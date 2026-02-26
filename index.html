@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AE Agentic Support — Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f1117;--surface:#161922;--surface2:#1e2130;--border:#282d3e;
+  --text:#e1e4ed;--text-muted:#8b90a0;--accent:#6c8aff;--accent-dim:#3a4a8a;
+  --green:#34d399;--amber:#fbbf24;--red:#f87171;
+  --sidebar-w:300px;--header-h:56px;
+  --radius:8px;
+}
+html{font-size:15px;scroll-behavior:smooth}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;overflow:hidden;height:100vh}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+
+/* ─── Layout ─── */
+.app{display:grid;grid-template-columns:var(--sidebar-w) 1fr;grid-template-rows:var(--header-h) 1fr;height:100vh}
+.header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 24px;background:var(--surface);border-bottom:1px solid var(--border);z-index:10}
+.header .logo{font-weight:700;font-size:1.1rem;color:var(--accent);white-space:nowrap}
+.header .sep{width:1px;height:24px;background:var(--border)}
+.header .title{font-weight:500;color:var(--text-muted);font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.sidebar{background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;padding:16px 0}
+.sidebar::-webkit-scrollbar{width:4px}
+.sidebar::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.sidebar h3{padding:6px 20px;font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-top:12px}
+.sidebar h3:first-child{margin-top:0}
+
+.doc-btn{display:flex;align-items:center;gap:10px;width:100%;padding:10px 20px;border:none;background:none;color:var(--text);font:inherit;font-size:.88rem;cursor:pointer;text-align:left;transition:background .15s,color .15s}
+.doc-btn:hover{background:var(--surface2)}
+.doc-btn.active{background:var(--accent-dim);color:#fff;font-weight:600}
+.doc-btn .icon{width:20px;height:20px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:.75rem;flex-shrink:0}
+.doc-btn .icon.p2{background:#2563eb22;color:#60a5fa}
+.doc-btn .icon.ss{background:#8b5cf622;color:#a78bfa}
+
+.toc-item{display:block;padding:5px 20px 5px 36px;font-size:.8rem;color:var(--text-muted);cursor:pointer;border:none;background:none;width:100%;text-align:left;font-family:inherit;transition:color .15s}
+.toc-item:hover{color:var(--accent)}
+.toc-item.depth-3{padding-left:52px;font-size:.76rem}
+
+.main{overflow-y:auto;padding:0}
+.main::-webkit-scrollbar{width:6px}
+.main::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+.content{max-width:900px;margin:0 auto;padding:40px 48px 120px}
+
+/* ─── Search ─── */
+.search-box{position:relative;margin-left:auto}
+.search-box input{width:240px;padding:7px 12px 7px 34px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface2);color:var(--text);font:inherit;font-size:.84rem;outline:none;transition:border-color .2s}
+.search-box input:focus{border-color:var(--accent)}
+.search-box svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--text-muted)}
+
+/* ─── Print / Export ─── */
+.btn-icon{padding:6px 10px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface2);color:var(--text-muted);cursor:pointer;font-size:.82rem;display:flex;align-items:center;gap:6px;transition:background .15s,color .15s}
+.btn-icon:hover{background:var(--accent-dim);color:#fff}
+
+/* ─── Markdown rendered ─── */
+.md h1{font-size:1.75rem;font-weight:700;margin:2rem 0 1rem;padding-bottom:.4em;border-bottom:1px solid var(--border);color:#fff}
+.md h2{font-size:1.4rem;font-weight:700;margin:2.2rem 0 .8rem;color:#fff}
+.md h3{font-size:1.12rem;font-weight:600;margin:1.6rem 0 .6rem;color:var(--text)}
+.md h4{font-size:1rem;font-weight:600;margin:1.2rem 0 .5rem;color:var(--text-muted)}
+.md p{margin:.6em 0}
+.md ul,
+.md ol{margin:.6em 0;padding-left:1.6em}
+.md li{margin:.3em 0}
+.md li > ul, .md li > ol{margin:0}
+.md blockquote{border-left:3px solid var(--accent);padding:.4em 1em;margin:.8em 0;background:var(--surface2);border-radius:0 var(--radius) var(--radius) 0;color:var(--text-muted)}
+.md hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
+.md strong{color:#fff;font-weight:600}
+.md em{font-style:italic;color:var(--text-muted)}
+.md img{max-width:100%;border-radius:var(--radius)}
+
+/* inline code */
+.md code{font-family:'JetBrains Mono',monospace;font-size:.88em;background:var(--surface2);padding:.15em .4em;border-radius:4px;color:var(--green)}
+.md pre{margin:1em 0;border-radius:var(--radius);overflow:hidden;border:1px solid var(--border);position:relative}
+.md pre code{display:block;padding:1em 1.2em;background:var(--surface);color:var(--text);overflow-x:auto;font-size:.84rem;line-height:1.6}
+.md pre code .hljs{background:transparent}
+.md pre .copy-btn{position:absolute;top:8px;right:8px;padding:4px 10px;font-size:.72rem;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text-muted);cursor:pointer;opacity:0;transition:opacity .2s}
+.md pre:hover .copy-btn{opacity:1}
+.md pre .copy-btn:hover{color:#fff;background:var(--accent-dim)}
+
+/* tables */
+.md table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.88rem}
+.md thead th{background:var(--surface2);font-weight:600;text-align:left;padding:10px 14px;border-bottom:2px solid var(--border);color:var(--accent);white-space:nowrap}
+.md tbody td{padding:8px 14px;border-bottom:1px solid var(--border);vertical-align:top}
+.md tbody tr:hover{background:var(--surface2)}
+.md tbody td code{font-size:.82em}
+
+/* task lists */
+.md input[type="checkbox"]{margin-right:6px;accent-color:var(--accent)}
+
+/* scrollbar inside code */
+.md pre code::-webkit-scrollbar{height:4px}
+.md pre code::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* ─── Back to top ─── */
+.back-top{position:fixed;bottom:28px;right:28px;width:40px;height:40px;border-radius:50%;background:var(--accent);color:#fff;border:none;cursor:pointer;font-size:1.1rem;display:none;align-items:center;justify-content:center;box-shadow:0 4px 16px #0005;transition:transform .2s}
+.back-top.show{display:flex}
+.back-top:hover{transform:scale(1.1)}
+
+/* ─── Responsive ─── */
+.menu-toggle{display:none;background:none;border:none;color:var(--text);cursor:pointer;padding:4px}
+@media(max-width:800px){
+  .app{grid-template-columns:1fr}
+  .sidebar{position:fixed;left:0;top:var(--header-h);bottom:0;width:280px;z-index:20;transform:translateX(-100%);transition:transform .25s}
+  .sidebar.open{transform:translateX(0)}
+  .menu-toggle{display:block}
+  .search-box input{width:160px}
+  .content{padding:24px 20px 100px}
+}
+
+/* ─── Loading state ─── */
+.loader{display:flex;flex-direction:column;align-items:center;justify-content:center;height:60vh;color:var(--text-muted);gap:16px}
+.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Header -->
+  <header class="header">
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+      <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+    <div class="logo">AE Agentic Support</div>
+    <div class="sep"></div>
+    <div class="title" id="headerTitle">Documentation</div>
+
+    <div class="search-box">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input type="text" id="searchInput" placeholder="Search in document..." oninput="handleSearch(this.value)">
+    </div>
+    <button class="btn-icon" onclick="printDoc()" title="Print / Export PDF">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+      Print
+    </button>
+  </header>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <h3>Documents</h3>
+    <button class="doc-btn active" data-doc="part2" onclick="switchDoc('part2',this)">
+      <span class="icon p2">P2</span>
+      Implementation Guide Part 2
+    </button>
+    <button class="doc-btn" data-doc="stepbystep" onclick="switchDoc('stepbystep',this)">
+      <span class="icon ss">SS</span>
+      StepByStep Configuration
+    </button>
+    <h3>Table of Contents</h3>
+    <div id="tocContainer"></div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main" id="mainPanel">
+    <div class="content md" id="mdContent">
+      <div class="loader"><div class="spinner"></div><span>Loading documents...</span></div>
+    </div>
+  </main>
+</div>
+
+<button class="back-top" id="backTop" onclick="document.getElementById('mainPanel').scrollTo({top:0,behavior:'smooth'})">&#8593;</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+<script>
+const DOC_FILES = {
+  part2:      'AE_Agentic_OpsSupport_Implementation_Guide_Part2.md',
+  stepbystep: 'AI_Studio_OnPrem_Agentic_Support_StepByStep(1).md'
+};
+const DOC_TITLES = {
+  part2:      'Implementation Guide — Part 2',
+  stepbystep: 'StepByStep Configuration + Code'
+};
+
+const cache = {};
+let currentDoc = 'part2';
+let rawMd = '';
+
+// Marked config
+marked.setOptions({
+  highlight(code, lang) {
+    if (lang && hljs.getLanguage(lang)) return hljs.highlight(code, { language: lang }).value;
+    return hljs.highlightAuto(code).value;
+  },
+  breaks: false,
+  gfm: true
+});
+
+// Custom renderer for heading anchors + copy buttons on code
+const renderer = new marked.Renderer();
+renderer.heading = function(text, level, raw) {
+  // marked v12 passes an object for `text`
+  const t = typeof text === 'object' ? text.text || text : text;
+  const id = String(t).toLowerCase().replace(/<[^>]+>/g, '').replace(/[^\w]+/g, '-').replace(/-+$/,'');
+  return `<h${level} id="${id}">${t}</h${level}>`;
+};
+renderer.code = function(code, lang) {
+  const c = typeof code === 'object' ? code.text || code : code;
+  const l = typeof code === 'object' ? (code.lang || '') : (lang || '');
+  let highlighted;
+  if (l && hljs.getLanguage(l)) {
+    highlighted = hljs.highlight(c, { language: l }).value;
+  } else {
+    highlighted = hljs.highlightAuto(c).value;
+  }
+  return `<pre><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs language-${l}">${highlighted}</code></pre>`;
+};
+marked.use({ renderer });
+
+async function loadDoc(key) {
+  if (cache[key]) return cache[key];
+  try {
+    const res = await fetch(DOC_FILES[key]);
+    if (!res.ok) throw new Error(res.statusText);
+    cache[key] = await res.text();
+  } catch (e) {
+    cache[key] = `# Failed to load\n\nCould not load \`${DOC_FILES[key]}\`.\n\nMake sure you're serving from the project directory (e.g. \`npx serve .\` or \`python -m http.server\`).`;
+  }
+  return cache[key];
+}
+
+async function switchDoc(key, btn) {
+  currentDoc = key;
+  document.querySelectorAll('.doc-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.getElementById('headerTitle').textContent = DOC_TITLES[key];
+  document.querySelector('.sidebar').classList.remove('open');
+
+  rawMd = await loadDoc(key);
+  renderMarkdown(rawMd);
+  document.getElementById('mainPanel').scrollTo({ top: 0 });
+  buildTOC();
+}
+
+function renderMarkdown(md) {
+  document.getElementById('mdContent').innerHTML = marked.parse(md);
+}
+
+function buildTOC() {
+  const container = document.getElementById('tocContainer');
+  container.innerHTML = '';
+  const headings = document.querySelectorAll('#mdContent h2, #mdContent h3');
+  headings.forEach(h => {
+    const btn = document.createElement('button');
+    btn.className = 'toc-item' + (h.tagName === 'H3' ? ' depth-3' : '');
+    btn.textContent = h.textContent.substring(0, 60) + (h.textContent.length > 60 ? '...' : '');
+    btn.onclick = () => {
+      h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      document.querySelector('.sidebar').classList.remove('open');
+    };
+    container.appendChild(btn);
+  });
+}
+
+function copyCode(btn) {
+  const code = btn.nextElementSibling.textContent;
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+// Search / highlight
+let searchTimeout;
+function handleSearch(query) {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => {
+    // Remove old marks
+    document.querySelectorAll('#mdContent mark.search-hl').forEach(m => {
+      const parent = m.parentNode;
+      parent.replaceChild(document.createTextNode(m.textContent), m);
+      parent.normalize();
+    });
+    if (!query || query.length < 2) return;
+    highlightText(document.getElementById('mdContent'), query);
+    const first = document.querySelector('#mdContent mark.search-hl');
+    if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 250);
+}
+
+function highlightText(node, query) {
+  if (node.nodeType === 3) {
+    const idx = node.textContent.toLowerCase().indexOf(query.toLowerCase());
+    if (idx >= 0) {
+      const span = document.createElement('mark');
+      span.className = 'search-hl';
+      span.style.cssText = 'background:#fbbf2444;color:#fbbf24;padding:1px 2px;border-radius:3px';
+      const after = node.splitText(idx);
+      after.splitText(query.length);
+      const mark = span;
+      mark.textContent = after.textContent;
+      after.parentNode.replaceChild(mark, after);
+    }
+  } else if (node.nodeType === 1 && node.tagName !== 'SCRIPT' && node.tagName !== 'STYLE' && node.tagName !== 'MARK') {
+    Array.from(node.childNodes).forEach(c => highlightText(c, query));
+  }
+}
+
+function printDoc() {
+  const w = window.open('', '_blank');
+  w.document.write(`<!DOCTYPE html><html><head><title>${DOC_TITLES[currentDoc]}</title>
+    <style>
+      body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 24px;color:#1a1a1a;line-height:1.7;font-size:14px}
+      h1{border-bottom:2px solid #ddd;padding-bottom:.3em}
+      h2{margin-top:2em;color:#333}
+      pre{background:#f6f8fa;border:1px solid #ddd;border-radius:6px;padding:12px;overflow-x:auto;font-size:13px}
+      code{font-family:'JetBrains Mono',monospace;font-size:.9em}
+      table{border-collapse:collapse;width:100%;margin:1em 0}
+      th,td{border:1px solid #ddd;padding:8px 12px;text-align:left}
+      th{background:#f0f0f0}
+      blockquote{border-left:3px solid #aaa;margin:1em 0;padding:.3em 1em;color:#555}
+      @media print{body{margin:0;padding:12px}}
+    </style></head><body>${document.getElementById('mdContent').innerHTML}</body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 400);
+}
+
+// Back to top
+const mainPanel = document.getElementById('mainPanel');
+const backTop = document.getElementById('backTop');
+mainPanel.addEventListener('scroll', () => {
+  backTop.classList.toggle('show', mainPanel.scrollTop > 400);
+});
+
+// Keyboard shortcut
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    document.getElementById('searchInput').focus();
+  }
+});
+
+// Init
+switchDoc('part2', document.querySelector('.doc-btn'));
+</script>
+</body>
+</html>
