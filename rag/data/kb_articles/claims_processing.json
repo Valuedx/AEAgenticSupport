@@ -1,0 +1,10 @@
+{
+  "id": "kb-claims-processing",
+  "title": "Claims Batch Processing — Troubleshooting Guide",
+  "content": "The Claims_Processing_Daily workflow runs every day at 06:00 IST. It reads batch files from /data/claims/batch_YYYYMMDD.csv and processes insurance claims. Common failure modes:\n\n1. Missing input file: The upstream Input_File_Generator workflow did not produce the batch file. Check if Input_File_Generator completed successfully. Resolution: trigger Input_File_Generator manually, then restart Claims_Processing_Daily.\n\n2. File format error: The batch CSV has unexpected columns or encoding. Check the file with check_input_file tool. Resolution: contact the data team to regenerate the file.\n\n3. Database connection timeout: The claims database is overloaded during peak hours. Resolution: retry after 30 minutes or check database health.\n\n4. Downstream impact: If Claims_Processing_Daily fails, the following workflows will also fail: Report_Aggregator, Email_Notification, Reconciliation_Daily.",
+  "metadata": {
+    "category": "troubleshooting",
+    "workflows": ["Claims_Processing_Daily", "Input_File_Generator"],
+    "tags": ["claims", "batch", "file", "processing"]
+  }
+}

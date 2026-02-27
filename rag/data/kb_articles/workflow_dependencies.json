@@ -1,0 +1,10 @@
+{
+  "id": "kb-workflow-dependencies",
+  "title": "Workflow Dependency Map — Core Batch Workflows",
+  "content": "Core batch workflow dependency chain (upstream → downstream):\n\n1. Input_File_Generator → Claims_Processing_Daily → Report_Aggregator → Email_Notification\n2. Input_File_Generator → Policy_Renewal_Batch → Premium_Calculation\n3. Data_Validation_Check → Claims_Processing_Daily\n4. Agent_Commission_Report runs independently (weekly Monday 07:00)\n5. Document_OCR_Pipeline runs continuously, independent of batch workflows\n\nWhen investigating cascade failures, always trace upstream first. Use get_workflow_dependencies to map the chain, then check_workflow_status on each upstream workflow.\n\nShared resources:\n- /data/claims/ — used by Claims_Processing_Daily and Report_Aggregator\n- /data/policies/ — used by Policy_Renewal_Batch and Premium_Calculation\n- PostgreSQL claims_db — used by Claims_Processing_Daily, Reconciliation_Daily",
+  "metadata": {
+    "category": "reference",
+    "workflows": ["Claims_Processing_Daily", "Policy_Renewal_Batch", "Report_Aggregator"],
+    "tags": ["dependencies", "cascade", "upstream", "downstream"]
+  }
+}

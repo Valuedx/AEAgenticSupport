@@ -1,0 +1,9 @@
+{
+  "id": "sop-escalation",
+  "title": "SOP: When to Escalate",
+  "content": "Escalation criteria:\n\n1. Protected workflow failure: Any workflow in the PROTECTED_WORKFLOWS list must be escalated to L3 (Engineering/DevOps). Never auto-restart.\n\n2. Recurrence threshold: If the same issue has recurred 3 or more times (configurable via RECURRENCE_ESCALATION_THRESHOLD), auto-escalate to L2 support for permanent root cause analysis.\n\n3. Permission/auth errors: If tool calls fail with 401/403, escalate to L3 — likely a service account issue.\n\n4. Data corruption suspected: If investigation reveals inconsistent data (e.g., row counts don't match, checksums fail), escalate to L2 with full RCA.\n\n5. Multiple cascade failures: If 3+ downstream workflows fail due to the same root cause and auto-remediation doesn't resolve, escalate to L2.\n\nEscalation actions:\n- Create incident ticket via create_incident_ticket\n- Send notification via send_notification to the appropriate team channel\n- Set case owner_type to HUMAN_TEAM\n- Stay hands-off — only add user updates to the ticket",
+  "metadata": {
+    "category": "sop",
+    "tags": ["escalation", "protected", "recurrence", "severity"]
+  }
+}

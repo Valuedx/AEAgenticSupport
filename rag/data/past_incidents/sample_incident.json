@@ -1,0 +1,12 @@
+{
+  "id": "INC-SAMPLE-001",
+  "title": "Claims Processing Failed Due to Missing Input File",
+  "content": "Claims_Processing_Daily failed at 06:05 IST with FileNotFoundException for /data/claims/batch_20250215.csv.\n\nRoot Cause: The upstream Input_File_Generator workflow timed out at 05:45 due to high database load during nightly backup window (04:00-06:00). The batch file was never created.\n\nResolution: Waited for backup to complete, manually triggered Input_File_Generator at 06:30, then restarted Claims_Processing_Daily. All downstream workflows (Report_Aggregator, Email_Notification) completed by 08:00.\n\nPrevention: Moved Input_File_Generator schedule from 05:30 to 06:15 (after backup window). Added pre-check step to Claims_Processing_Daily that verifies input file exists before starting.",
+  "metadata": {
+    "summary": "Claims batch failed — missing input file due to upstream timeout during backup window",
+    "root_cause": "Input_File_Generator timed out during nightly backup window, no batch file produced",
+    "resolution": "Rescheduled upstream workflow after backup window, added input file pre-check",
+    "workflows": ["Claims_Processing_Daily", "Input_File_Generator"],
+    "category": "file_missing"
+  }
+}

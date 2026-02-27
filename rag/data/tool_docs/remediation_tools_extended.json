@@ -1,0 +1,10 @@
+{
+  "id": "tooldoc-remediation",
+  "title": "Remediation Tools — Extended Documentation",
+  "content": "Remediation tools modify system state and require careful use.\n\nrestart_execution: Restarts a failed execution from its last checkpoint. Safe for most workflows. Requires workflow_name and optionally execution_id. If execution_id is omitted, restarts the latest failed execution. Check MAX_RESTARTS_PER_WORKFLOW limit before calling.\n\ntrigger_workflow: Triggers a fresh execution of a workflow. Use when restart is not appropriate (e.g., the previous execution completed but produced wrong output). Requires workflow_name. Optional parameters dict for workflow inputs.\n\nrequeue_item: Requeues a single failed item from a processing queue. Use for item-level failures in batch workflows. Requires queue_name and item_id.\n\nbulk_retry_failures: Retries ALL failed executions in a time window. HIGH RISK — requires approval. Use only when multiple workflows failed due to a transient issue (e.g., database was down, now recovered). Check MAX_BULK_OPERATIONS limit.\n\ndisable_workflow: Disables a workflow's schedule. HIGH RISK — requires approval. Use only to prevent further damage while investigating. Remember to re-enable after resolution.\n\nNever use remediation tools on PROTECTED_WORKFLOWS without explicit human approval.",
+  "metadata": {
+    "category": "tool_documentation",
+    "tools": ["restart_execution", "trigger_workflow", "requeue_item", "bulk_retry_failures", "disable_workflow"],
+    "tags": ["remediation", "restart", "retry", "risk"]
+  }
+}

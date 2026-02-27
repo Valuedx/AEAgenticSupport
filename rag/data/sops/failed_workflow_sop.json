@@ -1,0 +1,9 @@
+{
+  "id": "sop-failed-workflow",
+  "title": "SOP: Investigating a Failed Workflow",
+  "content": "Standard Operating Procedure for investigating workflow failures:\n\nStep 1: Check workflow status using check_workflow_status(workflow_name). Note the error message and last execution time.\n\nStep 2: Pull execution logs using get_execution_logs(workflow_name, execution_id). Look for the first ERROR line — that's usually the root cause.\n\nStep 3: If the error mentions a file (FileNotFoundError, FileFormatError), use check_input_file to verify the input file exists and is valid.\n\nStep 4: If the error is a timeout or connection error, use get_system_health to check if the AE platform is healthy. Also use check_agent_resources to verify the agent has sufficient CPU/memory.\n\nStep 5: Check dependencies using get_workflow_dependencies. If upstream workflows failed, investigate those first.\n\nStep 6: If root cause is identified and fix is straightforward (e.g., file arrived late), propose restart_execution. If the workflow is in PROTECTED_WORKFLOWS, escalate instead.\n\nStep 7: After remediation, verify with check_workflow_status that the workflow is running/completed.",
+  "metadata": {
+    "category": "sop",
+    "tags": ["investigation", "failure", "troubleshooting", "remediation"]
+  }
+}
