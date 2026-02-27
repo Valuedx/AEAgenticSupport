@@ -205,26 +205,19 @@ class Orchestrator:
                 candidate = response.candidates[0]
                 parts = candidate.content.parts
 
-                tool_called = False
-                for part in parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        tool_called = True
-                        fc = part.function_call
+                fn_calls = [
+                    p for p in parts
+                    if hasattr(p, 'function_call') and p.function_call
+                ]
+                tool_called = bool(fn_calls)
+
+                if tool_called:
+                    for fc_part in fn_calls:
+                        fc = fc_part.function_call
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
-
                         tool_def = tool_registry.get_tool(tool_name)
-                        if not tool_def:
-                            messages.append(candidate.content)
-                            messages.append(Content(parts=[
-                                Part.from_function_response(
-                                    name=tool_name,
-                                    response={"error": f"unknown tool '{tool_name}'"},
-                                )
-                            ]))
-                            continue
-
-                        if self.approval_gate.needs_approval(
+                        if tool_def and self.approval_gate.needs_approval(
                             tool_name, tool_def.tier, tool_args
                         ):
                             state.pending_action = {
@@ -241,9 +234,30 @@ class Orchestrator:
                             state.is_agent_working = False
                             return self.approval_gate.format_approval_prompt(
                                 self.approval_gate.create_approval_request(
-                                    tool_name, tool_def.tier, tool_args, summary
+                                    tool_name, tool_def.tier,
+                                    tool_args, summary,
                                 )
                             )
+
+                    messages.append(candidate.content)
+
+                    response_parts = []
+                    for fc_part in fn_calls:
+                        fc = fc_part.function_call
+                        tool_name = fc.name
+                        tool_args = dict(fc.args) if fc.args else {}
+
+                        tool_def = tool_registry.get_tool(tool_name)
+                        if not tool_def:
+                            response_parts.append(
+                                Part.from_function_response(
+                                    name=tool_name,
+                                    response={
+                                        "error": f"unknown tool '{tool_name}'"
+                                    },
+                                )
+                            )
+                            continue
 
                         result = tool_registry.execute(tool_name, **tool_args)
                         state.log_tool_call(
@@ -263,18 +277,19 @@ class Orchestrator:
                                     result.error[:100],
                                 )
 
-                        messages.append(candidate.content)
                         result_payload = (
                             {"result": result.data}
                             if result.success
                             else {"error": result.error}
                         )
-                        messages.append(Content(parts=[
+                        response_parts.append(
                             Part.from_function_response(
                                 name=tool_name,
                                 response=result_payload,
                             )
-                        ]))
+                        )
+
+                    messages.append(Content(parts=response_parts))
 
                 if not tool_called:
                     text_parts = [
@@ -290,14 +305,22 @@ class Orchestrator:
                     )
                     state.add_message("assistant", final_response)
                     state.is_agent_working = False
+
+                    queued = self._drain_queued_messages(state, tracker)
+                    if queued:
+                        final_response += "\n\n" + queued
                     return final_response
 
             state.is_agent_working = False
-            return (
+            max_iter_msg = (
                 "I've reached the maximum investigation steps. Here's what "
                 "I found so far — would you like me to continue, escalate, "
                 "or generate an RCA?"
             )
+            queued = self._drain_queued_messages(state, tracker)
+            if queued:
+                max_iter_msg += "\n\n" + queued
+            return max_iter_msg
         except Exception as e:
             logger.error(f"Processing error: {e}", exc_info=True)
             state.is_agent_working = False
@@ -305,6 +328,44 @@ class Orchestrator:
                 "I encountered an error during investigation. "
                 "The operations team has been notified."
             )
+
+    # =====================================================================
+    # Queued message processing
+    # =====================================================================
+
+    def _drain_queued_messages(self, state: ConversationState,
+                               tracker: IssueTracker) -> str:
+        queued = state.get_queued_messages()
+        if not queued:
+            return ""
+
+        parts = []
+        for msg in queued:
+            hint = msg.get("hint", "")
+            content = msg.get("content", "")
+            if hint == "interrupt":
+                parts.append(
+                    f"**Queued (urgent):** Processing your earlier message "
+                    f"now — \"{content[:150]}\""
+                )
+                state.add_message("user", content)
+                resp = self._process_message(content, state, tracker)
+                parts.append(resp)
+            elif hint == "additive":
+                state.add_message("user", f"[Additional context] {content}")
+                parts.append(
+                    f"**Noted additional context:** {content[:200]}"
+                )
+            elif hint == "new_request":
+                parts.append(
+                    f"**Queued request:** \"{content[:150]}\" — "
+                    f"I'll handle this next."
+                )
+                state.add_message("user", content)
+                resp = self._process_message(content, state, tracker)
+                parts.append(resp)
+
+        return "\n\n".join(parts)
 
     # =====================================================================
     # Approval handling
@@ -324,6 +385,7 @@ class Orchestrator:
         if not decision:
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
+            state.pending_action_summary = ""
             return "Action rejected. What would you like me to do instead?"
 
         action = state.pending_action
@@ -337,7 +399,9 @@ class Orchestrator:
             action["tool"], action["args"], result.data, result.success
         )
 
+        action_summary = state.pending_action_summary
         state.pending_action = None
+        state.pending_action_summary = ""
         state.phase = ConversationPhase.IDLE
 
         active_issue = tracker.get_active_issue()
@@ -345,7 +409,7 @@ class Orchestrator:
             if active_issue:
                 tracker.resolve_issue(
                     active_issue.issue_id,
-                    f"Approved and executed: {state.pending_action_summary}",
+                    f"Approved and executed: {action_summary}",
                 )
             return (
                 f"Done. {action['tool']} completed successfully.\n"

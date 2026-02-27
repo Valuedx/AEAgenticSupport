@@ -123,6 +123,19 @@ FOLLOWUP_SIGNALS = [
     "is it running now", "did it complete",
 ]
 
+STATUS_CHECK_SIGNALS = [
+    "what's the status", "status update", "where are we",
+    "any progress", "how's it going", "current status",
+    "what's happening", "status check", "show status",
+    "case status", "all cases", "open cases",
+]
+
+CANCEL_SIGNALS = [
+    "cancel", "never mind", "nevermind", "stop",
+    "forget it", "forget about it", "don't bother",
+    "abort", "scratch that", "disregard",
+]
+
 
 class IssueTracker:
     """
@@ -248,8 +261,21 @@ class IssueTracker:
                          "go ahead", "proceed"):
             return MessageClassification.CONTINUE_EXISTING, self.active_issue_id
 
-        if msg_lower in ("cancel", "stop", "abort", "never mind"):
-            return MessageClassification.CONTINUE_EXISTING, self.active_issue_id
+        for signal in CANCEL_SIGNALS:
+            if signal in msg_lower:
+                if self.active_issue_id and self.active_issue_id in self.issues:
+                    issue = self.issues[self.active_issue_id]
+                    if issue.status not in (IssueStatus.RESOLVED,
+                                            IssueStatus.ESCALATED):
+                        issue.status = IssueStatus.RESOLVED
+                        issue.resolution = "Cancelled by user"
+                        issue.resolved_at = datetime.now().isoformat()
+                        self._persist_issue(issue)
+                return MessageClassification.NEW_ISSUE, None
+
+        for signal in STATUS_CHECK_SIGNALS:
+            if signal in msg_lower:
+                return MessageClassification.STATUS_CHECK, None
 
         for signal in NEW_ISSUE_SIGNALS:
             if signal in msg_lower:

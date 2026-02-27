@@ -64,7 +64,7 @@ class TestConversationState(unittest.TestCase):
         state.is_agent_working = True
         state.queue_user_message("urgent fix", hint="interrupt")
         self.assertEqual(len(state.message_queue), 1)
-        self.assertEqual(state.message_queue[0]["message"], "urgent fix")
+        self.assertEqual(state.message_queue[0]["content"], "urgent fix")
 
 
 class TestApprovalGate(unittest.TestCase):
