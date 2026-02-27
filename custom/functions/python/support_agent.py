@@ -111,9 +111,10 @@ def _build_plan_with_rag(client: RestToolClient, case: Case,
         else "GENERIC"
     )
 
+    step_idx = 1
     steps = [
         {
-            "index": 1,
+            "index": step_idx,
             "type": "TICKET_UPDATE",
             "capability_id": "CAP_TICKET_UPDATE",
             "tool_ref": "/tools/ticket/update",
@@ -123,34 +124,72 @@ def _build_plan_with_rag(client: RestToolClient, case: Case,
             },
             "policy_tags": {"risk": "SAFE_WRITE"},
         },
-        {
-            "index": 2,
-            "type": "TOOL_CALL",
-            "capability_id": "CAP_GET_REQUEST_STATUS",
-            "tool_ref": "/tools/ae/request/status",
-            "inputs": {"ticket_id": case.ticket_id},
-            "policy_tags": {"risk": "READ_ONLY"},
-        },
     ]
+    step_idx += 1
+
+    steps.append({
+        "index": step_idx,
+        "type": "TOOL_CALL",
+        "capability_id": "CAP_GET_REQUEST_STATUS",
+        "tool_ref": "/tools/ae/request/status",
+        "inputs": {"ticket_id": case.ticket_id},
+        "policy_tags": {"risk": "READ_ONLY"},
+    })
+    step_idx += 1
+
+    seen_refs = {"/tools/ticket/update", "/tools/ae/request/status"}
+    for hit in tool_hits:
+        tool_ref = hit.get("tool_ref") or hit.get("metadata", {}).get("tool_ref")
+        if not tool_ref or tool_ref in seen_refs:
+            continue
+        seen_refs.add(tool_ref)
+        risk = hit.get("risk") or hit.get("metadata", {}).get("risk", "SAFE_WRITE")
+        cap = hit.get("capability_id") or hit.get("metadata", {}).get("capability_id", "CAP_RAG_SUGGESTED")
+        steps.append({
+            "index": step_idx,
+            "type": "TOOL_CALL",
+            "capability_id": cap,
+            "tool_ref": tool_ref,
+            "inputs": {"ticket_id": case.ticket_id},
+            "policy_tags": {"risk": risk},
+        })
+        step_idx += 1
 
     if issue_bucket == "OUTPUT_NOT_RECEIVED":
-        steps.append({
-            "index": 3,
-            "type": "TOOL_CALL",
-            "capability_id": "CAP_PUBLISH_OUTPUT_TO_SHARED_PATH",
-            "tool_ref": "/tools/ae/output/publish",
-            "inputs": {"ticket_id": case.ticket_id},
-            "policy_tags": {"risk": "SAFE_WRITE"},
-        })
+        if "/tools/ae/output/publish" not in seen_refs:
+            steps.append({
+                "index": step_idx,
+                "type": "TOOL_CALL",
+                "capability_id": "CAP_PUBLISH_OUTPUT_TO_SHARED_PATH",
+                "tool_ref": "/tools/ae/output/publish",
+                "inputs": {"ticket_id": case.ticket_id},
+                "policy_tags": {"risk": "SAFE_WRITE"},
+            })
+            step_idx += 1
+
+    sop_refs = [h.get("id") or h.get("title") for h in sop_hits]
+    tool_refs = [
+        h.get("tool_ref") or h.get("metadata", {}).get("tool_ref")
+        for h in tool_hits
+        if h.get("tool_ref") or h.get("metadata", {}).get("tool_ref")
+    ]
+    workflows = list({
+        h.get("workflow_name") or h.get("metadata", {}).get("workflow_name")
+        for h in sop_hits + tool_hits
+        if h.get("workflow_name") or h.get("metadata", {}).get("workflow_name")
+    })
+    if workflows:
+        case.workflows_involved = list(set(
+            (case.workflows_involved or []) + workflows
+        ))
+        case.save()
 
     return {
         "case_id": case.case_id,
         "ticket_id": case.ticket_id,
         "issue_bucket": issue_bucket,
-        "sop_refs": [h.get("id") or h.get("title") for h in sop_hits],
-        "tool_refs": [
-            h.get("tool_ref") for h in tool_hits if h.get("tool_ref")
-        ],
+        "sop_refs": sop_refs,
+        "tool_refs": tool_refs,
         "steps": steps,
         "close_criteria": {
             "requires_user_confirmation": True,
@@ -194,11 +233,14 @@ def _execute_plan(client: RestToolClient, case: Case, plan: dict) -> str:
         case.updated_at = timezone.now()
         case.save()
 
-        return (
-            "Approval required for one or more actions.\n"
-            f"On-shift tech reviewers: "
-            f"{', '.join(onshift) if onshift else '(none found)'}\n"
-            "Tech user can reply: `APPROVE` or `REJECT` in this thread."
+        step_labels = [
+            f"Step {s['index']}: {s.get('capability_id', s.get('type'))}"
+            for s in needs_approval
+        ]
+        return make_approval_card(
+            case_id=case.case_id,
+            action_summary="; ".join(step_labels),
+            reviewers=onshift,
         )
 
     for step in plan["steps"]:
@@ -211,6 +253,11 @@ def _execute_plan(client: RestToolClient, case: Case, plan: dict) -> str:
                 ),
             )
         except ToolError as e:
+            err_sig = str(e)[:200]
+            if err_sig not in (case.error_signatures or []):
+                sigs = list(case.error_signatures or [])
+                sigs.append(err_sig)
+                case.error_signatures = sigs
             client.call("/tools/ticket/assign", {
                 "ticket_id": case.ticket_id,
                 "team": "L2_SUPPORT",
@@ -245,18 +292,25 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
     Main entry point called from custom_hooks.py.
     Routes to agentic orchestrator or plan-execute mode.
     """
+    _user_id = (raw_activity.get("from", {}) or {}).get("id", "")
+    _user_type = raw_activity.get("user_type", "technical")
+
+    # Populate user_type on the active case if not yet set
+    cs = ConversationState.objects.filter(thread_id=thread_id).first()
+    if cs and cs.active_case_id:
+        Case.objects.filter(
+            case_id=cs.active_case_id, user_type__isnull=True,
+        ).update(user_type=_user_type)
 
     # ── Agentic mode: delegate to our full orchestrator ──
     if _USE_AGENTIC:
         gw = _get_gateway()
         if gw:
-            user_id = (raw_activity.get("from", {}) or {}).get("id", "")
-            user_type = raw_activity.get("user_type", "technical")
             response = gw.process_message(
                 conversation_id=thread_id,
                 user_message=user_text,
-                user_id=user_id,
-                user_role=user_type,
+                user_id=_user_id,
+                user_role=_user_type,
             )
             return make_text_reply(response)
 

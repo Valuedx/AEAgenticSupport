@@ -4,8 +4,11 @@ The 'brainstem' of the Extension: lock + dedupe + smalltalk gate +
 issue classification + routing to support agent.
 """
 
+import logging
 import uuid
 from django.utils import timezone
+
+logger = logging.getLogger("support_agent.hooks")
 
 from custom.helpers.locks import pg_advisory_lock
 from custom.helpers.db import is_duplicate_message, mark_message_processed
@@ -101,6 +104,18 @@ def api_messages_hook(request_json: dict, **kwargs):
                         "this action. Authorized reviewers: "
                         f"{', '.join(appr.requested_to)}"
                     )
+                is_approve = text.strip().upper() == "APPROVE"
+                appr.status = "APPROVED" if is_approve else "REJECTED"
+                appr.decided_by = user_id
+                appr.decided_at = timezone.now()
+                appr.save()
+                if not is_approve:
+                    active_case.state = "PLANNING"
+                    active_case.updated_at = timezone.now()
+                    active_case.save()
+                    return make_text_reply(
+                        "Action rejected. How would you like to proceed?"
+                    )
                 return handle_support_turn(
                     thread_id=thread_id,
                     teams_message_id=msg_id,
@@ -114,53 +129,68 @@ def api_messages_hook(request_json: dict, **kwargs):
         )
 
         if classification == IssueClassification.RECURRENCE:
-            old_case = Case.objects.filter(
-                case_id=ref_case_id
-            ).first()
-            if old_case:
-                if should_escalate_recurrence(old_case):
-                    old_case.state = "WAITING_ON_TEAM"
-                    old_case.owner_type = "HUMAN_TEAM"
-                    old_case.owner_team = "L2_SUPPORT"
-                    old_case.updated_at = timezone.now()
-                    old_case.save()
-                    return make_text_reply(
-                        f"This issue has now recurred "
-                        f"{old_case.recurrence_count + 1} times. "
-                        f"The previous fix is not holding. "
-                        f"Escalating to L2 support for a "
-                        f"permanent resolution."
-                    )
-
-                old_case.state = "PLANNING"
-                old_case.recurrence_count += 1
-                old_case.resolved_at = None
-                old_case.updated_at = timezone.now()
-                old_case.save()
-                cs.active_case_id = old_case.case_id
+            old_case = (
+                Case.objects.filter(case_id=ref_case_id).first()
+                if ref_case_id else None
+            )
+            if not old_case:
+                logger.warning(
+                    "RECURRENCE ref_case %s not found — treating as new issue",
+                    ref_case_id,
+                )
+                cs.active_case_id = None
                 cs.updated_at = timezone.now()
                 cs.save()
-                prefix = (
-                    f"This looks like a recurrence "
-                    f"(#{old_case.recurrence_count}) of a previous "
-                    f"issue. "
-                )
-                if old_case.resolution_summary:
-                    prefix += (
-                        f"Last resolution: "
-                        f"{old_case.resolution_summary[:200]}. "
-                    )
-                prefix += (
-                    "Let me check if the same cause applies.\n\n"
-                )
-                result = handle_support_turn(
+                return handle_support_turn(
                     thread_id=thread_id,
                     teams_message_id=msg_id,
                     user_text=text,
                     raw_activity=activity,
                 )
-                result["text"] = prefix + result.get("text", "")
-                return result
+
+            if should_escalate_recurrence(old_case):
+                old_case.state = "WAITING_ON_TEAM"
+                old_case.owner_type = "HUMAN_TEAM"
+                old_case.owner_team = "L2_SUPPORT"
+                old_case.updated_at = timezone.now()
+                old_case.save()
+                return make_text_reply(
+                    f"This issue has now recurred "
+                    f"{old_case.recurrence_count + 1} times. "
+                    f"The previous fix is not holding. "
+                    f"Escalating to L2 support for a "
+                    f"permanent resolution."
+                )
+
+            old_case.state = "PLANNING"
+            old_case.recurrence_count += 1
+            old_case.resolved_at = None
+            old_case.updated_at = timezone.now()
+            old_case.save()
+            cs.active_case_id = old_case.case_id
+            cs.updated_at = timezone.now()
+            cs.save()
+            prefix = (
+                f"This looks like a recurrence "
+                f"(#{old_case.recurrence_count}) of a previous "
+                f"issue. "
+            )
+            if old_case.resolution_summary:
+                prefix += (
+                    f"Last resolution: "
+                    f"{old_case.resolution_summary[:200]}. "
+                )
+            prefix += (
+                "Let me check if the same cause applies.\n\n"
+            )
+            result = handle_support_turn(
+                thread_id=thread_id,
+                teams_message_id=msg_id,
+                user_text=text,
+                raw_activity=activity,
+            )
+            result["text"] = prefix + result.get("text", "")
+            return result
 
         elif classification == IssueClassification.NEW_ISSUE:
             cs.active_case_id = None
@@ -201,6 +231,13 @@ def api_messages_hook(request_json: dict, **kwargs):
                     f"Regarding [{target_case.case_id}]: "
                     f"{target_case.resolution_summary}\n\n"
                     f"Would you like me to verify the current status?"
+                )
+            if target_case:
+                return make_text_reply(
+                    f"Case [{target_case.case_id}] is currently "
+                    f"in state **{target_case.state}**. "
+                    f"No resolution recorded yet — would you like "
+                    f"me to check the latest status?"
                 )
 
         elif classification == IssueClassification.STATUS_CHECK:

@@ -37,10 +37,14 @@ class RCAAgent:
         rag = get_rag_engine()
         past_incidents = rag.search_past_incidents(search_query, top_k=3)
 
+        def _extract(f):
+            if isinstance(f, dict):
+                return f
+            return {"category": f.category, "summary": f.summary,
+                    "severity": f.severity, "details": f.details}
+
         findings_text = json.dumps(
-            [{"category": f.category, "summary": f.summary,
-              "severity": f.severity, "details": f.details}
-             for f in findings],
+            [_extract(f) for f in findings],
             indent=2, default=str,
         )
 

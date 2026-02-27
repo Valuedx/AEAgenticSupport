@@ -10,7 +10,7 @@ from django.db import connection
 
 def _lock_key(thread_id: str) -> int:
     h = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
-    return int(h[:16], 16)
+    return int(h[:16], 16) & 0x7FFFFFFFFFFFFFFF  # must fit signed bigint
 
 
 @contextmanager

@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Optional, Tuple
 
+from django.utils import timezone
+
 from custom.models import Case, IssueLink
 
 logger = logging.getLogger("support_agent.issue_classifier")
@@ -36,7 +38,7 @@ CONTINUE_SIGNALS = [
 NEW_ISSUE_SIGNALS = [
     "different issue", "new problem", "something else",
     "unrelated", "separate issue", "by the way",
-    "changing topic", "another workflow", "on a different note",
+    "changing topic", "another issue", "on a different note",
 ]
 
 RECURRENCE_SIGNALS = [
@@ -51,6 +53,19 @@ FOLLOWUP_SIGNALS = [
     "is it running now", "did it complete",
 ]
 
+STATUS_CHECK_SIGNALS = [
+    "what's the status", "status update", "where are we",
+    "any progress", "how's it going", "current status",
+    "what's happening", "status check", "show status",
+    "case status", "all cases", "open cases",
+]
+
+CANCEL_SIGNALS = [
+    "cancel", "never mind", "nevermind", "stop",
+    "forget it", "forget about it", "don't bother",
+    "abort", "scratch that", "disregard",
+]
+
 
 def classify_message(thread_id: str, user_text: str,
                      active_case: Optional[Case]
@@ -59,6 +74,18 @@ def classify_message(thread_id: str, user_text: str,
 
     if not active_case:
         return IssueClassification.NEW_ISSUE, None
+
+    for signal in CANCEL_SIGNALS:
+        if signal in msg_lower:
+            if active_case and active_case.state not in ("CLOSED", "CANCELLED"):
+                active_case.state = "CANCELLED"
+                active_case.updated_at = timezone.now()
+                active_case.save()
+            return IssueClassification.NEW_ISSUE, None
+
+    for signal in STATUS_CHECK_SIGNALS:
+        if signal in msg_lower:
+            return IssueClassification.STATUS_CHECK, None
 
     if msg_lower in APPROVAL_SIGNALS:
         return IssueClassification.CONTINUE_EXISTING, active_case.case_id

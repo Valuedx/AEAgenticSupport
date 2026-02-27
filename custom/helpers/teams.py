@@ -8,19 +8,26 @@ def make_text_reply(text: str) -> dict:
     return {"type": "message", "text": text}
 
 
-def make_approval_card(action_summary: str, case_id: str,
-                       plan_version: int) -> dict:
+def make_approval_card(case_id: str, action_summary: str,
+                       reviewers: list[str] | None = None,
+                       plan_version: int | None = None) -> dict:
     """
     Adaptive Card for approval requests.
     Replace this stub with a real Adaptive Card JSON if your
     Teams integration supports it.
     """
+    reviewer_text = (
+        f"Authorized reviewers: {', '.join(reviewers)}"
+        if reviewers else "Any authorized team member can respond"
+    )
+    version_text = f" (v{plan_version})" if plan_version else ""
     return {
         "type": "message",
         "text": (
             f"**Approval Required**\n\n"
             f"Action: {action_summary}\n"
-            f"Case: {case_id} (v{plan_version})\n\n"
+            f"Case: {case_id}{version_text}\n"
+            f"{reviewer_text}\n\n"
             f"Reply **APPROVE** to proceed or **REJECT** to cancel."
         ),
     }

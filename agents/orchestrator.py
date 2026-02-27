@@ -8,6 +8,8 @@ issue lifecycle (new, continue, recurrence, escalation).
 import json
 import logging
 
+from vertexai.generative_models import Content, Part
+
 from agents.approval_gate import ApprovalGate
 from agents.escalation import EscalationAgent
 from config.llm_client import llm_client
@@ -174,7 +176,12 @@ class Orchestrator:
             context_block = self._format_rag_context(tool_hits, kb_hits, sop_hits)
 
             messages = [
-                {"role": "user", "content": f"{context_block}\n\nUser: {user_message}"}
+                Content(
+                    role="user",
+                    parts=[Part.from_text(
+                        f"{context_block}\n\nUser: {user_message}"
+                    )],
+                )
             ]
 
             active_issue = tracker.get_active_issue()
@@ -208,10 +215,13 @@ class Orchestrator:
 
                         tool_def = tool_registry.get_tool(tool_name)
                         if not tool_def:
-                            messages.append({
-                                "role": "function",
-                                "content": f"Error: unknown tool '{tool_name}'",
-                            })
+                            messages.append(candidate.content)
+                            messages.append(Content(parts=[
+                                Part.from_function_response(
+                                    name=tool_name,
+                                    response={"error": f"unknown tool '{tool_name}'"},
+                                )
+                            ]))
                             continue
 
                         if self.approval_gate.needs_approval(
@@ -253,10 +263,18 @@ class Orchestrator:
                                     result.error[:100],
                                 )
 
-                        messages.append({
-                            "role": "function",
-                            "content": json.dumps(result.data, default=str),
-                        })
+                        messages.append(candidate.content)
+                        result_payload = (
+                            {"result": result.data}
+                            if result.success
+                            else {"error": result.error}
+                        )
+                        messages.append(Content(parts=[
+                            Part.from_function_response(
+                                name=tool_name,
+                                response=result_payload,
+                            )
+                        ]))
 
                 if not tool_called:
                     text_parts = [
