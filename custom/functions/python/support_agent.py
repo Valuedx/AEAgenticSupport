@@ -8,6 +8,7 @@ Two modes:
   2. PLAN-EXECUTE MODE: Builds a deterministic plan via RAG, then executes
      steps sequentially with approval gates.
 """
+from __future__ import annotations
 
 import uuid
 import logging
@@ -57,6 +58,46 @@ def _get_gateway():
     if _gateway is None:
         _gateway = _get_orchestrator()
     return _gateway
+
+
+def _sync_state_from_gateway(gw, thread_id: str, case: Case) -> None:
+    """
+    After the agentic gateway returns, sync key state back to the
+    Django Case model so the Extension hook layer stays consistent
+    with the standalone orchestrator's state.
+    """
+    try:
+        session = gw.get_or_create_session(thread_id)
+        phase = session.phase.value if hasattr(session.phase, "value") else str(session.phase)
+
+        phase_to_state = {
+            "idle": "PLANNING",
+            "investigating": "EXECUTING",
+            "awaiting_approval": "WAITING_APPROVAL",
+            "executing": "EXECUTING",
+            "resolved": "RESOLVED_PENDING_CONFIRMATION",
+            "escalated": "WAITING_ON_TEAM",
+        }
+        new_state = phase_to_state.get(phase, case.state)
+        if new_state != case.state:
+            case.state = new_state
+            case.updated_at = timezone.now()
+
+        if session.affected_workflows:
+            merged = list(set(
+                (case.workflows_involved or []) + session.affected_workflows
+            ))
+            case.workflows_involved = merged
+
+        if session.pending_action_summary:
+            case.latest_plan_json = {
+                "pending_action": session.pending_action,
+                "summary": session.pending_action_summary,
+            }
+
+        case.save()
+    except Exception as e:
+        logger.warning(f"State sync from gateway failed (non-fatal): {e}")
 
 
 def _get_or_create_case(thread_id: str) -> Case:
@@ -237,11 +278,12 @@ def _execute_plan(client: RestToolClient, case: Case, plan: dict) -> str:
             f"Step {s['index']}: {s.get('capability_id', s.get('type'))}"
             for s in needs_approval
         ]
-        return make_approval_card(
+        card = make_approval_card(
             case_id=case.case_id,
             action_summary="; ".join(step_labels),
             reviewers=onshift,
         )
+        return card.get("text", str(card))
 
     for step in plan["steps"]:
         try:
@@ -306,12 +348,16 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
     if _USE_AGENTIC:
         gw = _get_gateway()
         if gw:
+            case = _get_or_create_case(thread_id)
+
             response = gw.process_message(
                 conversation_id=thread_id,
                 user_message=user_text,
                 user_id=_user_id,
                 user_role=_user_type,
             )
+
+            _sync_state_from_gateway(gw, thread_id, case)
             return make_text_reply(response)
 
     # ── Plan-execute mode: deterministic plan via RAG ──

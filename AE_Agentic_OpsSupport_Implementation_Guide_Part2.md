@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from config.llm_client import llm_client
 from state.conversation_state import ConversationState
-from rag.engine import rag_engine
+from rag.engine import get_rag_engine
 
 logger = logging.getLogger("ops_agent.rca")
 
@@ -40,7 +40,7 @@ class RCAAgent:
             return "I need to investigate first before generating an RCA."
 
         search_query = incident_summary or " ".join(affected_wfs)
-        past_incidents = rag_engine.search_past_incidents(search_query, top_k=3)
+        past_incidents = get_rag_engine().search_past_incidents(search_query, top_k=3)
 
         findings_text = json.dumps(
             [{"category": f.category, "summary": f.summary,
@@ -135,7 +135,7 @@ Be specific with workflow names, execution IDs, timestamps, and error details.""
                 f"Extract the root cause in one sentence from this RCA:\n{rca_report[:1000]}"
             )
             root_cause = llm_client.chat(root_cause_prompt)
-            rag_engine.index_past_incident(
+            get_rag_engine().index_past_incident(
                 incident_id=incident_id,
                 summary=summary,
                 root_cause=root_cause,
@@ -154,6 +154,8 @@ Be specific with workflow names, execution IDs, timestamps, and error details.""
 ### 10.1 Message Gateway
 
 Create file: `gateway/message_gateway.py`
+
+> **Progress callback:** The gateway and orchestrator support an optional `on_progress` callback. When provided (e.g., by the agent server for SSE streaming or by the Cognibot proxy for Teams), the orchestrator invokes it at key milestones: investigation start, before each tool call, after errors, and before the final response. See `gateway/progress.py` for the `ProgressCallback` class that maps tool names to user-friendly status text (business vs technical personas).
 
 ```python
 # gateway/message_gateway.py
@@ -1088,8 +1090,11 @@ class Orchestrator:
                          tracker: IssueTracker) -> str:
         """
         Core investigation/remediation loop. Uses the existing agent loop
-        (tool selection via RAG, LLM reasoning, tool execution) but scopes
-        findings to the current issue via the tracker.
+        (RAG-filtered tool selection, LLM reasoning, tool execution) but scopes
+        findings to the current issue via the tracker. When the catalog has >30
+        tools, only always_available + RAG-matched tools (up to MAX_RAG_TOOLS) +
+        the discover_tools meta-tool are sent to the LLM; the LLM can call
+        discover_tools with a query or category to find more tools mid-conversation.
         """
         system_prompt = self._build_system_prompt(state, tracker)
         # ... existing agent loop (tool calls, LLM reasoning) ...
@@ -1207,6 +1212,8 @@ Timeline:
   → LLM fallback: sees active claims issue, unrelated workflow
   → Classification: NEW_ISSUE
   → Creates ISS-abc003, completely fresh investigation
+  → (Large-catalog mode: if catalog >30 tools, LLM may call discover_tools
+    with query "timeout" or "policy" to find relevant tools mid-conversation)
 
 15:00 User: "Claims batch failed again" (3rd recurrence)
   → Classification: RECURRENCE → recurrence_count = 3
@@ -1260,7 +1267,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.settings import CONFIG
 from config.logging_setup import setup_logging
 from gateway.message_gateway import MessageGateway
-from rag.engine import rag_engine
+from rag.engine import get_rag_engine
 from tools.registry import tool_registry
 
 # Initialize
@@ -1269,7 +1276,7 @@ gateway = MessageGateway()
 
 # Index tools into RAG on startup
 tool_docs = tool_registry.get_all_rag_documents()
-rag_engine.index_tools(tool_docs)
+get_rag_engine().index_tools(tool_docs)
 app_logger.info("Ops Agent initialized successfully")
 
 
@@ -1386,6 +1393,10 @@ if __name__ == "__main__":
 8. **Enable Web Chat** → In AI Studio project settings, enable "Chat Interface"
 9. **Test** → Open the chat window and type: `What workflows failed today?`
 10. **Verify** → Check logs at `/opt/automationedge/aistudio/scripts/ops_agent/logs/`
+
+### 12.2a SSE Streaming Endpoint (`/chat/stream`)
+
+The agent server exposes `POST /chat/stream` for real-time progress updates. It sends Server-Sent Events (SSE): `event: progress` with status text during investigation (e.g., "Looking into this...", "Checking workflow status..."), then `event: done` with the final response. The webchat uses this endpoint so users see progress messages as italic text that updates in-place. The original `POST /chat` endpoint remains for backwards compatibility.
 
 ### 12.3 MS Teams Integration (Deferred Phase)
 
@@ -1807,6 +1818,7 @@ ops_agent/
 │   ├── __init__.py
 │   ├── base.py                      # Base classes, AE API client
 │   ├── registry.py                  # Tool registry
+│   ├── general_tools.py             # General escape-hatch tools (call_ae_api, query_database, search_knowledge_base)
 │   ├── status_tools.py              # Status & health tools
 │   ├── log_tools.py                 # Log & history tools
 │   ├── file_tools.py                # File validation tools
@@ -1824,7 +1836,8 @@ ops_agent/
 │       └── past_incidents/          # Historical incident data
 ├── gateway/
 │   ├── __init__.py
-│   └── message_gateway.py           # Message routing & queuing
+│   ├── message_gateway.py           # Message routing & queuing
+│   └── progress.py                  # ProgressCallback — real-time status messages
 ├── state/
 │   ├── __init__.py
 │   ├── conversation_state.py        # Conversation state management
@@ -1842,7 +1855,7 @@ ops_agent/
 
 ---
 
-## 15. Appendix B — Tool Catalogue (Starter Set)
+## 15. Appendix B — Tool Catalogue (24 tools)
 
 | # | Tool Name | Category | Tier | Description |
 |---|---|---|---|---|
@@ -1866,6 +1879,10 @@ ops_agent/
 | 18 | `bulk_retry_failures` | remediation | high_risk | Retry all failed in time window |
 | 19 | `disable_workflow` | remediation | high_risk | Disable a workflow |
 | 20 | `create_incident_ticket` | notification | medium_risk | Create ITSM ticket |
+| 21 | `discover_tools` | meta | read_only | Search the tool catalog for tools matching a query or category; enables mid-conversation discovery when RAG filtering is active |
+| 22 | `call_ae_api` | general | medium_risk | Call any AE REST endpoint directly (GET/POST/PUT/DELETE). GET bypasses approval; write methods require approval. Fallback when no typed tool exists. Params: method, endpoint, params, body |
+| 23 | `query_database` | general | read_only | Run read-only SQL (SELECT only) against ops_agent database. Mutations blocked. Results capped at 50 rows. Params: sql, params |
+| 24 | `search_knowledge_base` | general | read_only | Semantic search across RAG collections (kb_articles, sops, tools, past_incidents). Params: query, collection (optional), top_k |
 
 **Adding New Tools**: Create the function in the appropriate `tools/*.py` file, create a `ToolDefinition`, register in `tools/registry.py`, run `python -m rag.index_all` to update RAG index.
 
@@ -1921,7 +1938,7 @@ Include workflow names, execution IDs, error codes, and timestamps.
 | Tool calls fail with 401 | AE API key invalid or expired | Regenerate API key in AE Admin |
 | Tool calls fail with timeout | AE server overloaded or network issue | Increase `timeout_seconds` in config, check AE health |
 | Agent loops without resolving | Insufficient tools or LLM not understanding context | Add more tools, improve system prompt, increase `max_agent_iterations` |
-| pgvector search returns no results | Embeddings not indexed or pgvector extension missing | Run `CREATE EXTENSION vector;`, then `python -m rag.index_all` |
+| RAG search returns no results | Embeddings not indexed; if pgvector is unavailable the RAG engine falls back to a numpy-based in-memory store for local dev | Run `python -m rag.index_all`; for production ensure pgvector is installed |
 | Vertex AI 403 / permission denied | Service account lacks `aiplatform.endpoints.predict` permission | Grant `Vertex AI User` role to the service account in GCP IAM |
 | Vertex AI quota exceeded | Too many concurrent requests or token limits hit | Request quota increase in GCP console, or implement request queuing |
 | LLM responds slowly | Network latency to Vertex AI region | Use a closer region, switch to `gemini-2.0-flash` for faster responses |
@@ -1937,6 +1954,7 @@ Include workflow names, execution IDs, error codes, and timestamps.
 | Related issues not linked | LLM returns RELATED_NEW but parent_id is None | Check that `active_issue_id` is set before the classification call; ensure resolved issues retain their IDs |
 | Issue tracker state lost on restart | PostgreSQL persistence not configured | Verify `issue_registry` and `issue_tracker_state` tables exist; check `POSTGRES_DSN` |
 | Recurrence keeps happening (>3 times) | Root cause not addressed | System auto-escalates after `RECURRENCE_ESCALATION_THRESHOLD` (default 3); adjust threshold if needed |
+| Specific typed tool not available for needed operation | No typed tool covers the required AE API call or data query | Use `call_ae_api` as fallback with the raw endpoint path (e.g., `/api/v1/workflows/...`) |
 
 ---
 
@@ -1948,7 +1966,7 @@ Create `requirements.txt`:
 google-cloud-aiplatform>=1.60.0
 psycopg2-binary>=2.9.9
 pgvector>=0.3.0
-sentence-transformers>=2.6.0
+numpy>=1.26.0
 httpx>=0.27.0
 pydantic>=2.6.0
 tenacity>=8.2.3
@@ -1956,7 +1974,7 @@ jinja2>=3.1.3
 python-dateutil>=2.9.0
 requests>=2.31.0
 flask>=3.0.0
-numpy>=1.26.0
+python-dotenv>=1.0.0
 ```
 
 ### Vertex AI LLM Client
@@ -2030,36 +2048,92 @@ llm_client = VertexAIClient()
 
 ### PostgreSQL + pgvector RAG Engine
 
-Update `rag/engine.py` to use pgvector instead of ChromaDB:
+Update `rag/engine.py` — uses Vertex AI embeddings with pgvector (production) and numpy fallback (local dev):
 
 ```python
 # rag/engine.py
 """
 RAG engine backed by PostgreSQL + pgvector.
-Uses sentence-transformers for local embeddings and pgvector for similarity search.
+Uses Google Vertex AI text-embedding models. Two storage backends:
+pgvector (production) and numpy fallback (local dev).
 """
 
 import logging
 import json
-import psycopg2
-from psycopg2.extras import Json, execute_values
-from sentence_transformers import SentenceTransformer
+import numpy as np
 from config.settings import CONFIG
+from vertexai.language_models import TextEmbeddingModel
 
 logger = logging.getLogger("ops_agent.rag")
+
+EMBED_DIM = 768
+
+
+class VertexEmbedder:
+    """Wraps Vertex AI text-embedding-004 model."""
+
+    def __init__(self):
+        self.model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+
+    def embed(self, text: str) -> list[float]:
+        embeddings = self.model.get_embeddings([text])
+        return embeddings[0].values
+
+
+class NumpyFallbackStore:
+    """In-memory numpy store for local dev when pgvector is not available."""
+
+    def __init__(self, embedder: VertexEmbedder):
+        self.embedder = embedder
+        self._collections: dict[str, list[dict]] = {}
+
+    def index_documents(self, documents: list[dict], collection: str):
+        if collection not in self._collections:
+            self._collections[collection] = []
+        for doc in documents:
+            emb = np.array(self.embedder.embed(doc["content"]))
+            self._collections[collection].append({
+                "id": doc["id"],
+                "content": doc["content"],
+                "metadata": doc.get("metadata", {}),
+                "embedding": emb,
+            })
+        logger.info(f"Indexed {len(documents)} docs into '{collection}' (numpy)")
+
+    def search(self, query: str, collection: str, top_k: int = 5) -> list[dict]:
+        if collection not in self._collections:
+            return []
+        q_emb = np.array(self.embedder.embed(query))
+        scored = []
+        for doc in self._collections[collection]:
+            sim = float(np.dot(q_emb, doc["embedding"]) /
+                        (np.linalg.norm(q_emb) * np.linalg.norm(doc["embedding"]) + 1e-9))
+            scored.append((sim, doc))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [
+            {"id": d["id"], "content": d["content"],
+             "metadata": d["metadata"], "similarity": s}
+            for s, d in scored[:top_k]
+        ]
 
 
 class PgVectorRAGEngine:
     def __init__(self):
-        self.dsn = CONFIG["POSTGRES_DSN"]
-        self.embed_model = SentenceTransformer(
-            CONFIG.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-        )
-        self.embed_dim = self.embed_model.get_sentence_embedding_dimension()
-        self._ensure_tables()
+        self.dsn = CONFIG.get("POSTGRES_DSN", "")
+        self.embedder = VertexEmbedder()
+        self._pg_available = False
+        self._fallback = NumpyFallbackStore(self.embedder)
+        if self.dsn:
+            try:
+                import psycopg2
+                self._psycopg2 = psycopg2
+                self._ensure_tables()
+                self._pg_available = True
+            except Exception as e:
+                logger.warning(f"pgvector unavailable, using numpy fallback: {e}")
 
     def _get_conn(self):
-        return psycopg2.connect(self.dsn)
+        return self._psycopg2.connect(self.dsn)
 
     def _ensure_tables(self):
         with self._get_conn() as conn:
@@ -2071,14 +2145,13 @@ class PgVectorRAGEngine:
                         content     TEXT NOT NULL,
                         metadata    JSONB DEFAULT '{{}}',
                         collection  TEXT NOT NULL,
-                        embedding   vector({self.embed_dim}),
+                        embedding   vector({EMBED_DIM}),
                         created_at  TIMESTAMPTZ DEFAULT NOW()
                     );
                 """)
-                cur.execute("""
+                cur.execute(f"""
                     CREATE INDEX IF NOT EXISTS idx_rag_embedding
-                    ON rag_documents USING ivfflat (embedding vector_cosine_ops)
-                    WITH (lists = 100);
+                    ON rag_documents USING hnsw (embedding vector_cosine_ops);
                 """)
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_rag_collection
@@ -2087,13 +2160,18 @@ class PgVectorRAGEngine:
             conn.commit()
 
     def _embed(self, text: str) -> list[float]:
-        return self.embed_model.encode(text).tolist()
+        return self.embedder.embed(text)
 
     def index_documents(self, documents: list[dict], collection: str):
         """
-        Index documents into pgvector.
+        Index documents. Uses pgvector when available, numpy otherwise.
         Each doc: {"id": str, "content": str, "metadata": dict}
         """
+        if not self._pg_available:
+            self._fallback.index_documents(documents, collection)
+            return
+
+        from psycopg2.extras import Json, execute_values
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 values = []
@@ -2119,6 +2197,9 @@ class PgVectorRAGEngine:
         logger.info(f"Indexed {len(documents)} docs into collection '{collection}'")
 
     def search(self, query: str, collection: str, top_k: int = 5) -> list[dict]:
+        if not self._pg_available:
+            return self._fallback.search(query, collection, top_k)
+
         query_emb = self._embed(query)
         with self._get_conn() as conn:
             with conn.cursor() as cur:
@@ -2166,9 +2247,17 @@ class PgVectorRAGEngine:
         self.index_documents([doc], collection="past_incidents")
 
 
-rag_engine = PgVectorRAGEngine()
+_rag_engine: PgVectorRAGEngine | None = None
+
+
+def get_rag_engine() -> PgVectorRAGEngine:
+    """Lazy singleton — avoids initialization at import time."""
+    global _rag_engine
+    if _rag_engine is None:
+        _rag_engine = PgVectorRAGEngine()
+    return _rag_engine
 ```
 
 ---
 
-*End of Implementation Guide — Version 1.0*
+*End of Implementation Guide — Version 2.0 — Updated 2026-02-28*

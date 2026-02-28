@@ -1,6 +1,6 @@
 # AutomationEdge Agentic Support — Setup Guide
 
-Complete step-by-step guide to deploy the Agentic Support Assistant on **AutomationEdge AI Studio (on-prem)** with **MS Teams** integration.
+Complete step-by-step guide to deploy the Agentic Support Assistant on **AutomationEdge AI Studio (on-prem)** with **MS Teams** and **webchat** integration.
 
 ---
 
@@ -28,11 +28,11 @@ Complete step-by-step guide to deploy the Agentic Support Assistant on **Automat
 |---|---|---|
 | AutomationEdge AI Studio | On-prem (latest) | Hosts the Extension, provides Cognibot |
 | PostgreSQL | 14+ | State persistence, RAG vector store |
-| pgvector extension | 0.5+ | Vector similarity search for RAG |
-| Python | 3.10+ | Runtime for the Extension |
-| Google Cloud SDK | Latest | Vertex AI authentication |
-| MS Teams | - | Chat channel for end users |
-| Azure Bot Service | - | Routes Teams messages to AI Studio |
+| pgvector extension | 0.5+ | Recommended (numpy fallback available) |
+| Python | 3.9.6+ (bundled with AI Studio) | Runtime for the Extension |
+| Google Cloud SDK | Latest | Vertex AI authentication (LLM + embeddings) |
+| MS Teams | - | Chat channel for end users (optional — webchat also available) |
+| Azure Bot Service | - | Routes Teams messages to AI Studio (only needed for Teams channel) |
 
 ### 1.2 Accounts & Credentials
 
@@ -57,7 +57,9 @@ You will need:
 
 ```
 AEAgenticSupport/
-├── main.py                              # Standalone entry point (web chat / CLI)
+├── main.py                              # Standalone entry point (CLI)
+├── agent_server.py                      # Flask REST API server (port 5050)
+├── webchat.html                         # Browser-based chat UI
 ├── setup_db.py                          # Database schema setup script
 ├── requirements.txt                     # Python dependencies
 ├── .env.example                         # Environment variable template
@@ -66,9 +68,11 @@ AEAgenticSupport/
 │   ├── apps.py                          #   Django AppConfig
 │   ├── settings.py                      #   Extension settings
 │   ├── models.py                        #   Django models (dedup, cases, approvals)
-│   ├── migrations.py                    #   Migration runner
-│   ├── custom_hooks.py                  #   api_messages_hook (Teams entry point)
-│   ├── extra_requirements.text          #   Extension dependencies
+│   ├── migrations/                      #   Django migrations directory
+│   │   ├── __init__.py
+│   │   └── 0001_initial.py             #   Initial schema migration
+│   ├── custom_hooks.py                  #   CustomChatbotHooks (Teams entry point)
+│   ├── extra_requirements.txt           #   Extension dependencies
 │   ├── helpers/
 │   │   ├── locks.py                     #   PostgreSQL advisory locks
 │   │   ├── db.py                        #   Message deduplication
@@ -81,8 +85,13 @@ AEAgenticSupport/
 │   └── functions/python/
 │       └── support_agent.py             #   Planner/executor (bridges to orchestrator)
 │
+├── custom_cognibot/                     # ← Thin proxy hooks for local dev (no AI Studio)
+│   ├── custom_hooks.py                  #   Forwards webchat messages to agent_server
+│   └── ...
+│
 ├── config/                              # ← Standalone modules
 │   ├── settings.py                      #   Central configuration
+│   ├── classification_signals.py        #   Heuristic classification patterns
 │   ├── llm_client.py                    #   Vertex AI (Gemini) client
 │   └── logging_setup.py                 #   App + audit loggers
 ├── agents/
@@ -93,6 +102,7 @@ AEAgenticSupport/
 ├── tools/
 │   ├── base.py                          #   AE API client, ToolDefinition
 │   ├── registry.py                      #   Tool registry
+│   ├── general_tools.py                 #   3 general escape-hatch tools (call_ae_api, query_database, search_knowledge_base)
 │   ├── status_tools.py                  #   5 status/health tools
 │   ├── log_tools.py                     #   2 log/history tools
 │   ├── file_tools.py                    #   2 file validation tools
@@ -100,7 +110,7 @@ AEAgenticSupport/
 │   ├── dependency_tools.py              #   4 dependency/config tools
 │   └── notification_tools.py            #   2 notification tools
 ├── rag/
-│   ├── engine.py                        #   pgvector RAG engine
+│   ├── engine.py                        #   RAG engine (VertexEmbedder, pgvector or numpy fallback)
 │   ├── index_all.py                     #   Index builder script
 │   └── data/
 │       ├── kb_articles/                 #   Knowledge base JSON/MD files
@@ -108,7 +118,8 @@ AEAgenticSupport/
 │       ├── tool_docs/                   #   Extended tool documentation
 │       └── past_incidents/              #   Historical incident data
 ├── gateway/
-│   └── message_gateway.py               #   Thread-safe message routing
+│   ├── message_gateway.py               #   Thread-safe message routing
+│   └── progress.py                      #   ProgressCallback — real-time status messages
 ├── state/
 │   ├── conversation_state.py            #   Session state (PostgreSQL-backed)
 │   └── issue_tracker.py                 #   Multi-issue tracking
@@ -125,6 +136,8 @@ AEAgenticSupport/
 
 ### 2.1 PostgreSQL + pgvector
 
+> **Note:** pgvector is **recommended for production** but **optional for local development**. When the pgvector extension is not available, the RAG engine automatically falls back to a **numpy-based cosine similarity** implementation. In fallback mode, embeddings are stored as JSONB and similarity is computed in Python. This is adequate for development and small knowledge bases but pgvector is strongly recommended for production workloads.
+
 **Option A: Existing AI Studio PostgreSQL**
 
 If your AI Studio on-prem already uses PostgreSQL, connect to it and install pgvector:
@@ -136,7 +149,7 @@ psql -h <db-host> -U <admin-user> -d postgres
 # Create a dedicated database
 CREATE DATABASE ops_agent;
 
-# Connect to it and install pgvector
+# Connect to it and install pgvector (recommended, not required)
 \c ops_agent
 CREATE EXTENSION vector;
 ```
@@ -147,7 +160,7 @@ CREATE EXTENSION vector;
 # Install PostgreSQL 14+
 sudo apt install postgresql-14
 
-# Install pgvector
+# (Recommended) Install pgvector
 sudo apt install postgresql-14-pgvector
 
 # Or build from source:
@@ -157,7 +170,18 @@ make && sudo make install
 
 # Create database
 sudo -u postgres createdb ops_agent
+# Optional: install pgvector extension (the RAG engine works without it)
 sudo -u postgres psql -d ops_agent -c "CREATE EXTENSION vector;"
+```
+
+**Option C: Local dev without pgvector**
+
+If you just want to get started quickly without installing the pgvector extension:
+
+```bash
+# Create the database — no extension needed
+sudo -u postgres createdb ops_agent
+# The RAG engine will detect pgvector is missing and use numpy fallback
 ```
 
 **Create the application user:**
@@ -233,8 +257,8 @@ VERTEX_AI_MODEL=gemini-2.0-flash
 # PostgreSQL
 POSTGRES_DSN=postgresql://ops_agent_user:your-password@db-host:5432/ops_agent
 
-# Embeddings (runs locally on AI Studio server)
-EMBEDDING_MODEL=all-MiniLM-L6-v2
+# Embeddings (Vertex AI — uses the same GCP credentials as the LLM)
+EMBEDDING_MODEL=text-embedding-004
 
 # Tool Gateway
 TOOL_BASE_URL=https://your-ae-server:8443/api/v1
@@ -242,6 +266,7 @@ TOOL_AUTH_TOKEN=your-ae-service-account-api-key
 
 # Agent Behaviour
 MAX_AGENT_ITERATIONS=15
+MAX_RAG_TOOLS=12           # When catalog >30 tools: max RAG-matched tools sent to LLM
 MAX_RESTARTS_PER_WORKFLOW=3
 MAX_BULK_OPERATIONS=10
 STALE_ISSUE_MINUTES=30
@@ -256,6 +281,9 @@ LOG_LEVEL=INFO
 
 # Agentic mode (true = full LLM orchestrator, false = deterministic plan-execute)
 USE_AGENTIC_MODE=true
+
+# Progress streaming (true = Cognibot sends intermediate progress messages during investigation)
+AGENT_PROGRESS_ENABLED=true
 ```
 
 ### 3.2 Set environment variables on the server
@@ -284,7 +312,9 @@ Get-Content .env | ForEach-Object {
 pip install -r requirements.txt
 ```
 
-> **Note:** The first time `sentence-transformers` runs, it will download the embedding model (~80MB). Ensure the server has internet access or pre-download the model.
+> **Note:** Embeddings use **Google Vertex AI `text-embedding-004`** (768 dimensions) via the `VertexEmbedder` class in `rag/engine.py`. The same GCP credentials used for the LLM are used for embeddings — no separate model download is needed.
+>
+> If the **pgvector** extension is not installed, the RAG engine automatically falls back to numpy-based cosine similarity (embeddings stored as JSONB). This is transparent — `setup_db.py` detects the available mode and creates the appropriate schema.
 
 ### 4.2 Run the schema setup script
 
@@ -441,9 +471,11 @@ Your Extension directory should now look like:
 │   ├── apps.py
 │   ├── settings.py
 │   ├── models.py
-│   ├── migrations.py
-│   ├── custom_hooks.py          ← AI Studio calls this
-│   ├── extra_requirements.text
+│   ├── migrations/
+│   │   ├── __init__.py
+│   │   └── 0001_initial.py
+│   ├── custom_hooks.py          ← CustomChatbotHooks class (async)
+│   ├── extra_requirements.txt
 │   ├── helpers/
 │   │   ├── locks.py
 │   │   ├── db.py
@@ -496,7 +528,21 @@ Edit `config/settings.py` or set the `PROTECTED_WORKFLOWS` environment variable:
 PROTECTED_WORKFLOWS=regulatory_report_irdai,financial_close_batch
 ```
 
-### 6.6 Create the Extension zip and upload
+### 6.6 AI Studio Integration Contract
+
+The Extension integrates with AI Studio's Cognibot via the hook system. Key requirements:
+
+| Item | Requirement |
+|---|---|
+| Hook class | `CustomChatbotHooks` extends `ChatbotHooks` in `custom/custom_hooks.py` |
+| App config | `CustomAppConfig` in `custom/apps.py` with `name = Constants.CUSTOM` |
+| Hook methods | All hooks are **async** (`async def`) — sync logic wrapped via `sync_to_async` |
+| `api_messages_hook` | Signature: `async def api_messages_hook(request, activity)` |
+| Migrations | Proper Django migrations directory at `custom/migrations/` |
+| Dependencies | Listed in `custom/extra_requirements.txt` (`.txt` extension, not `.text`) |
+| Python compat | AI Studio bundles Python 3.9.6 — all files use `from __future__ import annotations` |
+
+### 6.7 Create the Extension zip and upload
 
 ```bash
 cd <extension-dir>
@@ -509,7 +555,7 @@ zip -r ae_agentic_support_extension.zip .
    - All variables from your `.env` file
 4. Click **Deploy** / **Restart Cognibot**
 
-### 6.7 Verify Extension loaded
+### 6.8 Verify Extension loaded
 
 Check the AI Studio logs:
 
@@ -521,7 +567,8 @@ Look for:
 
 ```
 INFO - Custom extension loaded: AE Agentic Support Extension
-INFO - Registered hook: api_messages_hook
+INFO - Registered hook class: CustomChatbotHooks
+INFO - Registered hook: api_messages_hook (async)
 ```
 
 ---
@@ -590,7 +637,29 @@ python -m pytest tests/test_scenarios.py -v
 
 Expected: All tests pass (conversation state, approval gate, tool registry, templates).
 
-### 8.2 Run the mock AE API (for local testing)
+### 8.2 Standalone Agent Server
+
+The project includes a standalone Flask-based agent server (`agent_server.py`) that exposes the agent as a REST API on port **5050**. This is useful for local testing and for the Cognibot thin proxy architecture (see Section 8.6).
+
+**Start the server:**
+
+```bash
+python agent_server.py
+# Output: * Running on http://0.0.0.0:5050
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Serves `webchat.html` — a browser-based chat UI |
+| `GET` | `/health` | Health check (returns `{"status": "ok"}`) |
+| `POST` | `/chat` | Send a message. Body: `{"message": "...", "thread_id": "..."}` (non-streaming) |
+| `POST` | `/chat/stream` | SSE streaming: sends `event: progress` (status text) during investigation, then `event: done` (final response) |
+
+**Webchat:** Open `http://localhost:5050/` in your browser for an interactive chat interface. This is the fastest way to test the agent locally without Teams or AI Studio. When using the streaming endpoint, you will see real-time progress messages (e.g., "Looking into this...", "Checking workflow status...") as italic status text that updates in-place during long investigations.
+
+### 8.3 Run the mock AE API (for local testing)
 
 In one terminal:
 
@@ -605,7 +674,7 @@ In another terminal, set `AE_BASE_URL=http://localhost:5051` and:
 python main.py
 ```
 
-### 8.3 Test scenarios via CLI
+### 8.4 Test scenarios via CLI
 
 ```
 [technical] You: What workflows failed today?
@@ -624,7 +693,7 @@ python main.py
   Agent: (responds in plain English, no technical jargon)
 ```
 
-### 8.4 Test Teams-specific scenarios
+### 8.5 Test Teams-specific scenarios
 
 | Test | Message | Expected Result |
 |---|---|---|
@@ -639,7 +708,29 @@ python main.py
 | Escalation | 3+ recurrences | Auto-escalates to L2 |
 | Protected workflow | `Restart regulatory_report_irdai` | Refuses, suggests escalation |
 
-### 8.5 Verify audit logging
+### 8.6 Cognibot Thin Proxy (local dev without AI Studio)
+
+For local development without an AI Studio license, the `custom_cognibot/` directory contains **thin proxy hooks** that forward webchat messages to the agent server (`agent_server.py`) via HTTP. This avoids the need to install heavy AI Studio dependencies in Python 3.9 and lets you develop and test the full agent pipeline using only the standalone server.
+
+To use this mode:
+
+1. Start the agent server: `python agent_server.py`
+2. Open the webchat at `http://localhost:5050/`
+3. The thin proxy hooks in `custom_cognibot/` are only needed if you want to simulate the AI Studio Cognibot request flow locally.
+
+### 8.7 AI Studio Local .env Files
+
+When running AI Studio locally (e.g., for integration testing with the full Cognibot stack), three `.env` files need updating:
+
+| .env File | Key Changes |
+|---|---|
+| AIStudio Engine `.env` | Set `DB_PASS` to your local PostgreSQL password |
+| Cognibot `.env` | Set `DB_PASS` to your local PostgreSQL password; set `CHATBOT_WEB_SERVICE_HOME` to the Cognibot service directory |
+| KMEngine `.env` | Set `DB_PASS` to your local PostgreSQL password |
+
+> **Windows note:** In all three `.env` files, uncomment `SCHEDULER_LOCK_TYPE=Database` — the default file-based locking does not work reliably on Windows.
+
+### 8.8 Verify audit logging
 
 ```bash
 cat logs/audit.log | tail -20
@@ -695,7 +786,8 @@ Every tool call should be logged:
 | Approval not working | Phase state not transitioning | Check `ConversationPhase` in orchestrator |
 | Business user sees technical details | `user_role` not set correctly | Verify persona detection in session creation |
 | Issue tracker state lost on restart | PostgreSQL persistence failed | Check `issue_registry` table exists, check logs |
-| `sentence-transformers` download fails | No internet access on server | Pre-download model: `python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"` on a machine with internet, then copy `~/.cache/huggingface/` to the server |
+| Vertex AI embeddings slow on first call | Connection initialization overhead | First call initializes the Vertex AI connection; subsequent calls are faster |
+| pgvector not available | Extension not installed in PostgreSQL | The RAG engine automatically falls back to numpy-based cosine similarity. Performance is adequate for local dev but pgvector is recommended for production |
 | Recurrence not detected | `workflows_involved` not populated | Ensure orchestrator calls `tracker.add_workflow_to_issue()` |
 | LLM classification slow | Model too large or network latency | Switch to `gemini-2.0-flash`, use closer GCP region |
 
@@ -714,8 +806,8 @@ Azure Bot Service
      ▼ HTTPS POST /api/messages
 AI Studio Cognibot
      │
-     ▼ request_json
-custom/custom_hooks.py :: api_messages_hook()
+     ▼ (request, activity)
+custom/custom_hooks.py :: CustomChatbotHooks.api_messages_hook()
      │
      ├─ pg_advisory_lock(thread_id)         ← Prevents race conditions
      ├─ is_duplicate_message(msg_id)        ← Dedup check
@@ -736,6 +828,14 @@ custom/functions/python/support_agent.py :: handle_support_turn()
      │         agents/orchestrator.py :: handle_message()
      │              │
      │              ├─ RAG search (KB + SOPs + Tools)
+     │              ├─ Three-layer tool hierarchy (hybrid architecture):
+     │              │   ├─ General (3): call_ae_api, query_database, search_knowledge_base — always available, escape hatches
+     │              │   ├─ Typed (20+): RAG-filtered structured tools with validation and audit trails
+     │              │   └─ Meta (1): discover_tools for mid-conversation catalog search
+     │              ├─ RAG-filtered tool selection (if catalog >30 tools)
+     │              │   ├─ always_available tools (general + core status/logs) always sent
+     │              │   ├─ RAG-matched typed tools (up to MAX_RAG_TOOLS=12) sent
+     │              │   └─ discover_tools meta-tool for mid-conversation search
      │              ├─ LLM reasoning loop (Vertex AI Gemini)
      │              │   ├─ Tool selection via function calling
      │              │   ├─ Tool execution via tools/registry.py
@@ -768,27 +868,42 @@ PostgreSQL (ops_agent database)
 └── custom_issuelink         ← Links between related cases
 ```
 
-### 11.3 Tool Catalog (20 tools)
+### 11.3 Tool Catalog (23+ tools)
 
-| Category | Tools | Risk Tier |
-|---|---|---|
-| **Status** (5) | check_workflow_status, list_recent_failures, get_system_health, get_queue_status, get_agent_status | read_only |
-| **Logs** (2) | get_execution_logs, get_execution_history | read_only |
-| **File** (2) | check_input_file, check_output_file | read_only |
-| **Config** (2) | get_workflow_config, get_schedule_info | read_only |
-| **Dependency** (2) | get_workflow_dependencies, check_agent_resources | read_only |
-| **Remediation** (5) | restart_execution, trigger_workflow, requeue_item, bulk_retry_failures, disable_workflow | low_risk → high_risk |
-| **Notification** (2) | send_notification, create_incident_ticket | medium_risk |
+| Category | Tools | Risk Tier | Notes |
+|---|---|---|---|
+| **General** (3) | call_ae_api, query_database, search_knowledge_base | read_only / medium_risk | Always available. Escape hatches: call_ae_api (direct AE REST; GET bypasses approval, write methods require approval), query_database (read-only SQL, 50-row cap), search_knowledge_base (semantic RAG search) |
+| **Status** (5) | check_workflow_status, list_recent_failures, get_system_health, get_queue_status, get_agent_status | read_only | check_workflow_status, list_recent_failures, get_system_health are `always_available` |
+| **Logs** (2) | get_execution_logs, get_execution_history | read_only | get_execution_logs is `always_available` |
+| **File** (2) | check_input_file, check_output_file | read_only | |
+| **Config** (2) | get_workflow_config, get_schedule_info | read_only | |
+| **Dependency** (2) | get_workflow_dependencies, check_agent_resources | read_only | |
+| **Remediation** (5) | restart_execution, trigger_workflow, requeue_item, bulk_retry_failures, disable_workflow | low_risk → high_risk | |
+| **Notification** (2) | send_notification, create_incident_ticket | medium_risk | |
+| **Meta** (1) | discover_tools | read_only | Search the tool catalog for tools matching a query or category; enables mid-conversation tool discovery when RAG filtering is active |
 
-### 11.4 Adding New Tools
+### 11.4 Progress Streaming
+
+The agent sends real-time progress messages to users during long investigations so they know the agent is working. Implemented via:
+
+- **gateway/progress.py** — `ProgressCallback` class maps tool names to user-friendly status messages (different text for business vs technical users), throttles messages (min 3 seconds apart), and fires at key milestones: investigation start, each tool call, errors found, almost done, and heartbeat every 4 iterations for long investigations.
+
+- **Orchestrator** — `handle_message()` and `_process_message()` accept an `on_progress` callback. Progress fires at: investigation start ("Looking into this..."); before each tool call (e.g., "Checking workflow status..."); after tool errors ("Found an issue — analyzing the cause..."); every 4th iteration ("Still investigating..."); and before final response ("Almost done...").
+
+- **Agent Server** — `POST /chat/stream` sends SSE `event: progress` with status text during investigation, then `event: done` with the final response. The original `POST /chat` remains for backwards compatibility.
+
+- **Cognibot proxy** — When `AGENT_PROGRESS_ENABLED=true` (default), uses the SSE endpoint and sends proactive messages via Bot Framework's `turn_context.send_activity()`. Falls back to `/chat` if proactive messaging isn't available.
+
+### 11.5 Adding New Tools
 
 1. Create the handler function in the appropriate `tools/*.py` file
 2. Create a `ToolDefinition` with name, description, category, tier, and parameters
-3. Register it: `tool_registry.register(definition, handler)`
-4. Re-index RAG: `python -m rag.index_all`
-5. The orchestrator will automatically discover and use the new tool
+3. Set `always_available=True` for tools that should always be in the LLM context (e.g., core investigation tools like check_workflow_status, list_recent_failures, get_system_health, get_execution_logs)
+4. Register it: `tool_registry.register(definition, handler)`
+5. Re-index RAG: `python -m rag.index_all`
+6. The orchestrator will automatically discover and use the new tool
 
 ---
 
-**Document version:** 1.0
-**Last updated:** 2026-02-27
+**Document version:** 2.0
+**Last updated:** 2026-02-28

@@ -56,6 +56,7 @@ tool_registry.register(
             },
         },
         required_params=["execution_id"],
+        always_available=True,
     ),
     get_execution_logs,
 )

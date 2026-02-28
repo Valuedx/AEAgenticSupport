@@ -2,11 +2,26 @@
 Router hook — api_messages_hook.
 The 'brainstem' of the Extension: lock + dedupe + smalltalk gate +
 issue classification + routing to support agent.
+
+Implements the AI Studio Cognibot hook contract:
+  - Class extends ChatbotHooks
+  - All hooks are async static methods
+  - api_messages_hook receives (request, activity)
 """
+from __future__ import annotations
 
 import logging
 import uuid
+
+from asgiref.sync import sync_to_async
 from django.utils import timezone
+
+try:
+    from aistudiobot.hooks import ChatbotHooks
+except ImportError:
+    class ChatbotHooks:
+        """Stub for standalone development outside AI Studio runtime."""
+        pass
 
 logger = logging.getLogger("support_agent.hooks")
 
@@ -21,6 +36,24 @@ from custom.helpers.issue_classifier import (
     link_cases,
     should_escalate_recurrence,
 )
+
+
+# ── Activity normalisation ──
+
+def _activity_to_dict(activity) -> dict:
+    """Normalize a Bot Framework Activity (object or dict) to a plain dict."""
+    if isinstance(activity, dict):
+        return activity
+    result = {}
+    for attr in ("text", "id"):
+        result[attr] = getattr(activity, attr, None) or ""
+    conv = getattr(activity, "conversation", None)
+    result["conversation"] = {"id": getattr(conv, "id", "") or ""} if conv else {}
+    frm = getattr(activity, "from_property", None) or getattr(activity, "from", None)
+    result["from"] = {"id": getattr(frm, "id", "") or ""} if frm else {}
+    if hasattr(activity, "user_type"):
+        result["user_type"] = activity.user_type
+    return result
 
 
 def _extract_thread_id(activity: dict) -> str:
@@ -48,16 +81,17 @@ def _is_smalltalk(text: str) -> bool:
     )
 
 
-def api_messages_hook(request_json: dict, **kwargs):
+# ── Synchronous processing core (runs inside sync_to_async) ──
+
+def _process_message_sync(activity_dict: dict):
     """
-    Called by AI Studio for every incoming Teams message.
-    Must return a dict with {"type": "message", "text": "..."} or None.
+    All Django ORM + business logic runs here synchronously.
+    Wrapped by sync_to_async in the async hook.
     """
-    activity = request_json
-    thread_id = _extract_thread_id(activity)
-    msg_id = _extract_message_id(activity)
-    text = _extract_text(activity)
-    user_id = _extract_user_id(activity)
+    thread_id = _extract_thread_id(activity_dict)
+    msg_id = _extract_message_id(activity_dict)
+    text = _extract_text(activity_dict)
+    user_id = _extract_user_id(activity_dict)
 
     if not text:
         return make_text_reply(
@@ -120,7 +154,7 @@ def api_messages_hook(request_json: dict, **kwargs):
                     thread_id=thread_id,
                     teams_message_id=msg_id,
                     user_text=text,
-                    raw_activity=activity,
+                    raw_activity=activity_dict,
                 )
 
         # ── Issue classification ──
@@ -145,27 +179,28 @@ def api_messages_hook(request_json: dict, **kwargs):
                     thread_id=thread_id,
                     teams_message_id=msg_id,
                     user_text=text,
-                    raw_activity=activity,
+                    raw_activity=activity_dict,
                 )
+
+            old_case.recurrence_count += 1
+            old_case.updated_at = timezone.now()
+            old_case.save()
 
             if should_escalate_recurrence(old_case):
                 old_case.state = "WAITING_ON_TEAM"
                 old_case.owner_type = "HUMAN_TEAM"
                 old_case.owner_team = "L2_SUPPORT"
-                old_case.updated_at = timezone.now()
                 old_case.save()
                 return make_text_reply(
                     f"This issue has now recurred "
-                    f"{old_case.recurrence_count + 1} times. "
+                    f"{old_case.recurrence_count} times. "
                     f"The previous fix is not holding. "
                     f"Escalating to L2 support for a "
                     f"permanent resolution."
                 )
 
             old_case.state = "PLANNING"
-            old_case.recurrence_count += 1
             old_case.resolved_at = None
-            old_case.updated_at = timezone.now()
             old_case.save()
             cs.active_case_id = old_case.case_id
             cs.updated_at = timezone.now()
@@ -187,7 +222,7 @@ def api_messages_hook(request_json: dict, **kwargs):
                 thread_id=thread_id,
                 teams_message_id=msg_id,
                 user_text=text,
-                raw_activity=activity,
+                raw_activity=activity_dict,
             )
             result["text"] = prefix + result.get("text", "")
             return result
@@ -208,7 +243,7 @@ def api_messages_hook(request_json: dict, **kwargs):
                 thread_id=thread_id,
                 teams_message_id=msg_id,
                 user_text=text,
-                raw_activity=activity,
+                raw_activity=activity_dict,
             )
             new_cs = ConversationState.objects.get(thread_id=thread_id)
             if parent_id and new_cs.active_case_id:
@@ -259,5 +294,22 @@ def api_messages_hook(request_json: dict, **kwargs):
             thread_id=thread_id,
             teams_message_id=msg_id,
             user_text=text,
-            raw_activity=activity,
+            raw_activity=activity_dict,
         )
+
+
+# ── AI Studio Hook Class ──
+
+class CustomChatbotHooks(ChatbotHooks):
+    export_dialogs = []
+
+    async def api_messages_hook(request, activity):
+        """
+        Invoked for every api/messages REST API call.
+        Normalises the Activity, then delegates to synchronous processing.
+        Returns a dict ``{"type": "message", "text": "..."}`` or None.
+        """
+        activity_dict = _activity_to_dict(activity)
+        return await sync_to_async(
+            _process_message_sync, thread_sensitive=False
+        )(activity_dict)

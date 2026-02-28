@@ -2,8 +2,18 @@
 Central configuration — all settings loaded from environment variables
 with sensible defaults for local development.
 """
+from __future__ import annotations
 
 import os
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass
 
 CONFIG = {
     # AutomationEdge API
@@ -22,7 +32,7 @@ CONFIG = {
     ),
 
     # Embeddings
-    "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
+    "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", "text-embedding-004"),
 
     # Tool gateway
     "TOOL_BASE_URL": os.environ.get("TOOL_BASE_URL", "http://localhost:9999"),
@@ -38,6 +48,7 @@ CONFIG = {
     "RECURRENCE_ESCALATION_THRESHOLD": int(
         os.environ.get("RECURRENCE_ESCALATION_THRESHOLD", "3")
     ),
+    "MAX_RAG_TOOLS": int(os.environ.get("MAX_RAG_TOOLS", "12")),
 
     # Safety — workflows that must never be auto-restarted
     "PROTECTED_WORKFLOWS": [

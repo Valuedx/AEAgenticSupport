@@ -2,6 +2,7 @@
 Escalation agent — handles handoff to human support teams
 when the bot cannot resolve an issue automatically.
 """
+from __future__ import annotations
 
 import logging
 from typing import Optional

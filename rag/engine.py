@@ -1,31 +1,95 @@
 """
-RAG engine backed by PostgreSQL + pgvector.
-Uses sentence-transformers for local embeddings and pgvector for
-similarity search.
+RAG engine backed by PostgreSQL.
+Uses Google Vertex AI text-embedding models for embeddings.
+
+Two storage backends:
+  1. pgvector (production) — native vector similarity in PostgreSQL
+  2. numpy fallback (local dev) — stores embeddings as JSONB, computes
+     cosine similarity in Python. Activated automatically when
+     pgvector extension is not installed.
 """
+from __future__ import annotations
 
+import json
 import logging
+from typing import List
 
+import numpy as np
 import psycopg2
 from psycopg2.extras import Json, execute_values
-from sentence_transformers import SentenceTransformer
+
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
 
 from config.settings import CONFIG
 
 logger = logging.getLogger("ops_agent.rag")
+
+_EMBED_BATCH_SIZE = 250  # Vertex AI limit per request
+
+
+def _has_pgvector(conn) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"
+        )
+        return cur.fetchone() is not None
+
+
+class VertexEmbedder:
+    """Wraps the Vertex AI text-embedding model."""
+
+    def __init__(self, model_name: str = "text-embedding-004"):
+        vertexai.init(
+            project=CONFIG["GOOGLE_CLOUD_PROJECT"],
+            location=CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        )
+        self.model = TextEmbeddingModel.from_pretrained(model_name)
+        self._dim = None
+
+    @property
+    def dimension(self) -> int:
+        if self._dim is None:
+            sample = self.model.get_embeddings(["dimension probe"])
+            self._dim = len(sample[0].values)
+        return self._dim
+
+    def embed(self, text: str) -> list[float]:
+        result = self.model.get_embeddings([text])
+        return result[0].values
+
+    def embed_batch(self, texts: List[str]) -> List[list[float]]:
+        all_vectors = []
+        for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+            batch = texts[i:i + _EMBED_BATCH_SIZE]
+            results = self.model.get_embeddings(batch)
+            all_vectors.extend([r.values for r in results])
+        return all_vectors
 
 
 class PgVectorRAGEngine:
 
     def __init__(self):
         self.dsn = CONFIG["POSTGRES_DSN"]
-        self.embed_model = SentenceTransformer(
-            CONFIG.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+        embed_model_name = CONFIG.get("EMBEDDING_MODEL", "text-embedding-004")
+        self.embedder = VertexEmbedder(embed_model_name)
+        self.embed_dim = self.embedder.dimension
+        logger.info(
+            f"Vertex AI embedder ready: model={embed_model_name}, "
+            f"dim={self.embed_dim}"
         )
-        self.embed_dim = self.embed_model.get_sentence_embedding_dimension()
-        self._ensure_tables()
 
-    # ── Connection ──
+        with self._get_conn() as conn:
+            self._use_pgvector = _has_pgvector(conn)
+
+        if self._use_pgvector:
+            logger.info("pgvector available — using native vector search")
+        else:
+            logger.info(
+                "pgvector not available — using numpy fallback for search"
+            )
+
+        self._ensure_tables()
 
     def _get_conn(self):
         return psycopg2.connect(self.dsn)
@@ -35,65 +99,89 @@ class PgVectorRAGEngine:
     def _ensure_tables(self):
         with self._get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                cur.execute(f"""
-                    CREATE TABLE IF NOT EXISTS rag_documents (
-                        id          TEXT PRIMARY KEY,
-                        content     TEXT NOT NULL,
-                        metadata    JSONB DEFAULT '{{}}'::jsonb,
-                        collection  TEXT NOT NULL,
-                        embedding   vector({self.embed_dim}),
-                        created_at  TIMESTAMPTZ DEFAULT NOW()
-                    );
-                """)
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_rag_embedding
-                    ON rag_documents
-                    USING ivfflat (embedding vector_cosine_ops)
-                    WITH (lists = 100);
-                """)
+                if self._use_pgvector:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                    cur.execute(f"""
+                        CREATE TABLE IF NOT EXISTS rag_documents (
+                            id          TEXT PRIMARY KEY,
+                            content     TEXT NOT NULL,
+                            metadata    JSONB DEFAULT '{{}}'::jsonb,
+                            collection  TEXT NOT NULL,
+                            embedding   vector({self.embed_dim}),
+                            created_at  TIMESTAMPTZ DEFAULT NOW()
+                        );
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_rag_embedding
+                        ON rag_documents
+                        USING hnsw (embedding vector_cosine_ops)
+                        WITH (m = 16, ef_construction = 64);
+                    """)
+                else:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS rag_documents (
+                            id          TEXT PRIMARY KEY,
+                            content     TEXT NOT NULL,
+                            metadata    JSONB DEFAULT '{}'::jsonb,
+                            collection  TEXT NOT NULL,
+                            embedding   JSONB DEFAULT '[]'::jsonb,
+                            created_at  TIMESTAMPTZ DEFAULT NOW()
+                        );
+                    """)
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_rag_collection
                     ON rag_documents (collection);
                 """)
             conn.commit()
 
-    # ── Embedding ──
-
-    def _embed(self, text: str) -> list[float]:
-        return self.embed_model.encode(text).tolist()
-
     # ── Indexing ──
 
     def index_documents(self, documents: list[dict], collection: str):
-        """
-        Upsert documents into pgvector.
-        Each doc: {"id": str, "content": str, "metadata": dict}
-        """
+        texts = [doc["content"] for doc in documents]
+        embeddings = self.embedder.embed_batch(texts)
+
         with self._get_conn() as conn:
             with conn.cursor() as cur:
-                values = []
-                for doc in documents:
-                    emb = self._embed(doc["content"])
-                    values.append((
-                        doc["id"],
-                        doc["content"],
-                        Json(doc.get("metadata", {})),
-                        collection,
-                        emb,
-                    ))
-                execute_values(
-                    cur,
-                    """INSERT INTO rag_documents
-                           (id, content, metadata, collection, embedding)
-                       VALUES %s
-                       ON CONFLICT (id) DO UPDATE SET
-                         content   = EXCLUDED.content,
-                         metadata  = EXCLUDED.metadata,
-                         embedding = EXCLUDED.embedding""",
-                    values,
-                    template="(%s, %s, %s, %s, %s::vector)",
-                )
+                if self._use_pgvector:
+                    values = [
+                        (
+                            doc["id"],
+                            doc["content"],
+                            Json(doc.get("metadata", {})),
+                            collection,
+                            emb,
+                        )
+                        for doc, emb in zip(documents, embeddings)
+                    ]
+                    execute_values(
+                        cur,
+                        """INSERT INTO rag_documents
+                               (id, content, metadata, collection, embedding)
+                           VALUES %s
+                           ON CONFLICT (id) DO UPDATE SET
+                             content   = EXCLUDED.content,
+                             metadata  = EXCLUDED.metadata,
+                             embedding = EXCLUDED.embedding""",
+                        values,
+                        template="(%s, %s, %s, %s, %s::vector)",
+                    )
+                else:
+                    for doc, emb in zip(documents, embeddings):
+                        cur.execute("""
+                            INSERT INTO rag_documents
+                                (id, content, metadata, collection, embedding)
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (id) DO UPDATE SET
+                              content   = EXCLUDED.content,
+                              metadata  = EXCLUDED.metadata,
+                              embedding = EXCLUDED.embedding
+                        """, (
+                            doc["id"],
+                            doc["content"],
+                            Json(doc.get("metadata", {})),
+                            collection,
+                            Json(emb),
+                        ))
             conn.commit()
         logger.info(
             f"Indexed {len(documents)} docs into collection '{collection}'"
@@ -103,7 +191,13 @@ class PgVectorRAGEngine:
 
     def search(self, query: str, collection: str,
                top_k: int = 5) -> list[dict]:
-        query_emb = self._embed(query)
+        if self._use_pgvector:
+            return self._search_pgvector(query, collection, top_k)
+        return self._search_numpy(query, collection, top_k)
+
+    def _search_pgvector(self, query: str, collection: str,
+                         top_k: int) -> list[dict]:
+        query_emb = self.embedder.embed(query)
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -120,6 +214,38 @@ class PgVectorRAGEngine:
              "similarity": r[3]}
             for r in rows
         ]
+
+    def _search_numpy(self, query: str, collection: str,
+                      top_k: int) -> list[dict]:
+        query_emb = np.array(self.embedder.embed(query))
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, content, metadata, embedding
+                    FROM rag_documents
+                    WHERE collection = %s
+                """, (collection,))
+                rows = cur.fetchall()
+
+        if not rows:
+            return []
+
+        results = []
+        for row in rows:
+            doc_emb = np.array(row[3])
+            norm_q = np.linalg.norm(query_emb)
+            norm_d = np.linalg.norm(doc_emb)
+            if norm_q == 0 or norm_d == 0:
+                sim = 0.0
+            else:
+                sim = float(np.dot(query_emb, doc_emb) / (norm_q * norm_d))
+            results.append({
+                "id": row[0], "content": row[1],
+                "metadata": row[2], "similarity": sim,
+            })
+
+        results.sort(key=lambda r: r["similarity"], reverse=True)
+        return results[:top_k]
 
     # ── Convenience wrappers ──
 
@@ -175,4 +301,3 @@ def get_rag_engine() -> PgVectorRAGEngine:
     if _rag_engine is None:
         _rag_engine = PgVectorRAGEngine()
     return _rag_engine
-

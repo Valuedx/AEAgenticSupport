@@ -2,6 +2,7 @@
 Approval gate for risky remediation actions.
 Manages the approval workflow: request -> wait -> execute or reject.
 """
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
@@ -30,6 +31,12 @@ class ApprovalGate:
 
     def needs_approval(self, tool_name: str, tier: str,
                        params: dict) -> bool:
+        if tool_name == "call_ae_api":
+            method = str(params.get("method", "GET")).upper()
+            if method == "GET":
+                return False
+            return True
+
         if tier in SAFE_TIERS:
             return False
         if tier in AUTO_APPROVE_TIERS:

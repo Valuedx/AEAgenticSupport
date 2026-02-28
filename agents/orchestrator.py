@@ -4,6 +4,7 @@ Routes messages, manages the investigation/remediation loop,
 coordinates tool calls via RAG-selected tools, and handles
 issue lifecycle (new, continue, recurrence, escalation).
 """
+from __future__ import annotations
 
 import json
 import logging
@@ -14,6 +15,7 @@ from agents.approval_gate import ApprovalGate
 from agents.escalation import EscalationAgent
 from config.llm_client import llm_client
 from config.settings import CONFIG
+from gateway.progress import ProgressCallback, create_noop_progress
 from rag.engine import get_rag_engine
 from state.conversation_state import ConversationState, ConversationPhase
 from state.issue_tracker import (
@@ -45,10 +47,12 @@ class Orchestrator:
     # =====================================================================
 
     def handle_message(self, user_message: str,
-                       state: ConversationState) -> str:
+                       state: ConversationState,
+                       on_progress: ProgressCallback | None = None) -> str:
         if not user_message.strip():
             return "It looks like your message was empty. How can I help?"
 
+        progress = on_progress or create_noop_progress()
         state.add_message("user", user_message)
         tracker = self._get_issue_tracker(state.conversation_id)
 
@@ -58,6 +62,7 @@ class Orchestrator:
             if active:
                 active.touch()
                 tracker._persist_issue(active)
+            progress.on_phase("executing_fix")
             return self._handle_approval_response(user_message, state, tracker)
 
         # ── Classify message ──
@@ -72,11 +77,11 @@ class Orchestrator:
                 description=user_message,
             )
             state.phase = ConversationPhase.IDLE
-            response = self._process_message(user_message, state, tracker)
+            response = self._process_message(user_message, state, tracker, progress)
 
         elif classification == MessageClassification.CONTINUE_EXISTING:
             tracker.switch_to_issue(issue_id or tracker.active_issue_id)
-            response = self._process_message(user_message, state, tracker)
+            response = self._process_message(user_message, state, tracker, progress)
 
         elif classification == MessageClassification.RELATED_NEW:
             parent_id = issue_id or tracker.active_issue_id
@@ -90,7 +95,7 @@ class Orchestrator:
                 "This looks related to the issue I'm already investigating "
                 "but appears to be a separate problem. I'll track it as a "
                 "linked issue.\n\n"
-                + self._process_message(user_message, state, tracker)
+                + self._process_message(user_message, state, tracker, progress)
             )
 
         elif classification == MessageClassification.RECURRENCE:
@@ -118,7 +123,7 @@ class Orchestrator:
                     f"Let me check if the same root cause applies.\n\n"
                 )
             response = recurrence_note + self._process_message(
-                user_message, state, tracker
+                user_message, state, tracker, progress
             )
 
         elif classification == MessageClassification.FOLLOWUP:
@@ -138,19 +143,19 @@ class Orchestrator:
                 response = (
                     f"Resuming investigation of [{target_issue.issue_id}] "
                     f"{target_issue.title}.\n\n"
-                    + self._process_message(user_message, state, tracker)
+                    + self._process_message(user_message, state, tracker, progress)
                 )
             else:
-                response = self._process_message(user_message, state, tracker)
+                response = self._process_message(user_message, state, tracker, progress)
 
         elif classification == MessageClassification.STATUS_CHECK:
             summary = tracker.get_all_issues_summary()
             response = (
                 f"Here's the current session status:\n\n{summary}\n\n"
-                + self._process_message(user_message, state, tracker)
+                + self._process_message(user_message, state, tracker, progress)
             )
         else:
-            response = self._process_message(user_message, state, tracker)
+            response = self._process_message(user_message, state, tracker, progress)
 
         state.save()
         return response
@@ -161,19 +166,34 @@ class Orchestrator:
 
     def _process_message(self, user_message: str,
                          state: ConversationState,
-                         tracker: IssueTracker) -> str:
+                         tracker: IssueTracker,
+                         progress: ProgressCallback | None = None) -> str:
+        progress = progress or create_noop_progress()
         state.is_agent_working = True
         state.phase = ConversationPhase.INVESTIGATING
+        progress.on_phase("investigating")
 
         try:
             system_prompt = self._build_system_prompt(state, tracker)
             rag = get_rag_engine()
 
-            tool_hits = rag.search_tools(user_message, top_k=5)
+            tool_hits = rag.search_tools(user_message, top_k=12)
             kb_hits = rag.search_kb(user_message, top_k=3)
             sop_hits = rag.search_sops(user_message, top_k=3)
 
-            context_block = self._format_rag_context(tool_hits, kb_hits, sop_hits)
+            context_block = self._format_rag_context(
+                tool_hits[:5], kb_hits, sop_hits
+            )
+
+            rag_tool_names = [
+                h.get("metadata", {}).get("tool_name", h.get("id", ""))
+                for h in tool_hits
+            ]
+            max_rag = CONFIG.get("MAX_RAG_TOOLS", 12)
+            vertex_tools = tool_registry.get_vertex_tools_filtered(
+                rag_tool_names, max_rag_tools=max_rag,
+            )
+            active_tool_names = self._extract_active_tool_names(vertex_tools)
 
             messages = [
                 Content(
@@ -193,9 +213,11 @@ class Orchestrator:
                     state.is_agent_working = False
                     return "Investigation paused. What would you like me to do?"
 
+                progress.on_iteration(iteration, max_iterations)
+
                 response = llm_client.chat_with_tools(
                     messages,
-                    tools=tool_registry.get_vertex_tools(),
+                    tools=vertex_tools,
                     system=system_prompt,
                 )
 
@@ -212,11 +234,20 @@ class Orchestrator:
                 tool_called = bool(fn_calls)
 
                 if tool_called:
+                    needs_expansion = False
                     for fc_part in fn_calls:
                         fc = fc_part.function_call
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
                         tool_def = tool_registry.get_tool(tool_name)
+
+                        if not tool_def:
+                            tool_def = tool_registry.resolve_discovered_tool(
+                                tool_name
+                            )
+                            if tool_def:
+                                needs_expansion = True
+
                         if tool_def and self.approval_gate.needs_approval(
                             tool_name, tool_def.tier, tool_args
                         ):
@@ -242,12 +273,18 @@ class Orchestrator:
                     messages.append(candidate.content)
 
                     response_parts = []
+                    discovered_names: list[str] = []
+
                     for fc_part in fn_calls:
                         fc = fc_part.function_call
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
 
                         tool_def = tool_registry.get_tool(tool_name)
+                        if not tool_def:
+                            tool_def = tool_registry.resolve_discovered_tool(
+                                tool_name
+                            )
                         if not tool_def:
                             response_parts.append(
                                 Part.from_function_response(
@@ -259,10 +296,22 @@ class Orchestrator:
                             )
                             continue
 
+                        progress.on_tool_start(tool_name, tool_args)
                         result = tool_registry.execute(tool_name, **tool_args)
                         state.log_tool_call(
                             tool_name, tool_args, result.data, result.success
                         )
+                        progress.on_tool_done(
+                            tool_name, result.success,
+                            result.error if not result.success else "",
+                        )
+
+                        if tool_name == "discover_tools":
+                            found = (result.data or {}).get("tools", [])
+                            discovered_names.extend(
+                                t["name"] for t in found
+                                if t["name"] not in active_tool_names
+                            )
 
                         if active_issue:
                             active_issue.touch()
@@ -291,7 +340,17 @@ class Orchestrator:
 
                     messages.append(Content(parts=response_parts))
 
+                    if discovered_names or needs_expansion:
+                        expanded = list(active_tool_names) + discovered_names
+                        vertex_tools = tool_registry.get_vertex_tools_filtered(
+                            expanded, max_rag_tools=20,
+                        )
+                        active_tool_names = self._extract_active_tool_names(
+                            vertex_tools
+                        )
+
                 if not tool_called:
+                    progress.on_phase("almost_done")
                     text_parts = [
                         p.text for p in parts
                         if hasattr(p, 'text') and p.text
@@ -393,6 +452,13 @@ class Orchestrator:
             state.phase = ConversationPhase.IDLE
             return "No pending action found. How can I help?"
 
+        allowed = action.get("authorized_users", [])
+        if allowed and state.user_id and state.user_id not in allowed:
+            return (
+                "You are not authorized to approve this action. "
+                f"Authorized reviewers: {', '.join(allowed)}"
+            )
+
         state.phase = ConversationPhase.EXECUTING
         result = tool_registry.execute(action["tool"], **action["args"])
         state.log_tool_call(
@@ -421,6 +487,26 @@ class Orchestrator:
             f"Would you like me to try something else or escalate?"
         )
 
+    @staticmethod
+    def _extract_active_tool_names(vertex_tools: list) -> set[str]:
+        """Get the set of tool names currently in the Vertex Tool object."""
+        names: set[str] = set()
+        for tool_obj in vertex_tools:
+            for decl in getattr(tool_obj, "_raw_tool", {}).get(
+                "function_declarations", []
+            ):
+                names.add(decl.get("name", ""))
+            if hasattr(tool_obj, "function_declarations"):
+                for decl in tool_obj.function_declarations:
+                    if hasattr(decl, "name"):
+                        names.add(decl.name)
+                    elif hasattr(decl, "_raw_function_declaration"):
+                        names.add(
+                            decl._raw_function_declaration.get("name", "")
+                        )
+        names.discard("")
+        return names
+
     # =====================================================================
     # Prompt building
     # =====================================================================
@@ -436,9 +522,18 @@ Rules:
 3. When multiple failures exist, trace to the upstream root cause.
 4. Adjust detail level based on user role.
 5. Every tool call is audited.
+6. Prefer specific typed tools (check_workflow_status, get_execution_logs,
+   etc.) — they have better validation and cleaner audit trails.
+7. If no typed tool fits, use the general-purpose escape hatches:
+   - call_ae_api: hit any AE REST endpoint directly
+   - query_database: run read-only SQL against the ops database
+   - search_knowledge_base: semantic search across all KB collections
+8. If none of the above help, call discover_tools to search the full
+   catalog by description or category.
 
 Available tool categories: status, logs, file, remediation, dependency,
-config, notification. Use the most specific tool for the task."""
+config, notification, general, meta.
+You have a subset of tools loaded. Use discover_tools to find others."""
 
         persona = ""
         if state.user_role == "business":

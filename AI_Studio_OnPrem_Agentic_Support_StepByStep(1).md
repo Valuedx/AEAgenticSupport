@@ -1,5 +1,7 @@
 # AI Studio (On‑Prem) Agentic Support Assistant — Step‑by‑Step Configuration + Code
 
+> **Updated 2026-02-28** — Embeddings migrated from sentence-transformers to Google Vertex AI `text-embedding-004`. Extension file structure corrected (`migrations/` directory, `.txt` extension). Hook contract updated to async class-based pattern.
+
 This document describes how to build an agentic support assistant using **AutomationEdge AI Studio (on‑prem)** with:
 - **MS Teams** channel
 - **Python Extension** as the orchestrator (no mega orchestration workflow)
@@ -63,9 +65,11 @@ custom/
   apps.py
   settings.py
   models.py
-  migrations.py
+  migrations/
+    __init__.py
+    0001_initial.py
   custom_hooks.py
-  extra_requirements.text
+  extra_requirements.txt
 
   helpers/
     db.py
@@ -87,13 +91,13 @@ custom/
 
 If `requests` isn’t present in your runtime, add:
 
-**custom/extra_requirements.text**
+**custom/extra_requirements.txt**
 ```text
-requests==2.32.3
-psycopg2-binary>=2.9.9
-pgvector>=0.3.0
-sentence-transformers>=2.6.0
 google-cloud-aiplatform>=1.60.0
+pgvector>=0.3.0
+numpy>=1.26.0
+tenacity>=8.2.3
+psycopg2-binary>=2.9.9
 ```
 
 ---
@@ -163,15 +167,18 @@ class Approval(models.Model):
         indexes = [models.Index(fields=["case_id", "status"])]
 ```
 
-### 4.2 migrations.py
-Many AE Extension templates already run Django migrations on deployment. Keep the template’s behavior.
-If your template expects a function, keep it idempotent:
+### 4.2 Migrations directory
 
-**custom/migrations.py**
-```python
-def run_migrations():
-    # Keep template logic if present. Ensure idempotent.
-    return True
+The project now uses a proper Django `custom/migrations/` directory instead of a single `migrations.py` stub. This directory contains:
+
+- `__init__.py` — marks the directory as a Python package (required by Django)
+- `0001_initial.py` — auto-generated migration that creates the `ProcessedMessage`, `ConversationState`, `Case`, `Approval`, and `IssueLink` tables defined in `models.py`
+
+To generate or update migrations after changing models:
+
+```bash
+python manage.py makemigrations custom
+python manage.py migrate
 ```
 
 ---
@@ -274,15 +281,18 @@ def rag_search_tools(client: RestToolClient, query: str, top_k: int = 8) -> List
 
 ```python
 # custom/helpers/rag.py
-import psycopg2
-from sentence_transformers import SentenceTransformer
 import os
+import psycopg2
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
 
-_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+vertexai.init(project=os.environ.get("GOOGLE_CLOUD_PROJECT"), location="us-central1")
+_embed_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
 _dsn = os.environ.get("POSTGRES_DSN", "postgresql://localhost/ops_agent")
 
 def _embed(text: str) -> list:
-    return _embed_model.encode(text).tolist()
+    result = _embed_model.get_embeddings([text])
+    return result[0].values
 
 def rag_search(query: str, collection: str, top_k: int = 5) -> list:
     emb = _embed(query)
@@ -386,10 +396,21 @@ def make_text_reply(text: str) -> dict:
 
 This is the “brainstem”: lock + dedupe + smalltalk gate + support handling.
 
+> **Contract note:** The AI Studio Cognibot hook must be an **async method** inside a class that extends `ChatbotHooks`. The method signature is `async def api_messages_hook(request, activity)`. Use `from __future__ import annotations` and `asgiref.sync.sync_to_async` to bridge Django ORM calls.
+
 **custom/custom_hooks.py**
 ```python
+from __future__ import annotations
+
 import uuid
+from asgiref.sync import sync_to_async
 from django.utils import timezone
+
+try:
+    from aistudiobot.hooks import ChatbotHooks
+except ImportError:
+    class ChatbotHooks:
+        pass
 
 from custom.helpers.locks import pg_advisory_lock
 from custom.helpers.db import is_duplicate_message, mark_message_processed
@@ -397,8 +418,8 @@ from custom.helpers.teams import make_text_reply
 from custom.models import ConversationState
 from custom.functions.python.support_agent import handle_support_turn
 
+
 def _extract_thread_id(activity: dict) -> str:
-    # Adjust once you inspect real Teams payloads
     convo = activity.get("conversation", {}) or {}
     return convo.get("id") or "unknown-thread"
 
@@ -412,11 +433,12 @@ def _is_smalltalk(text: str) -> bool:
     t = text.lower().strip()
     return t in {"hi","hello","hey","thanks","thank you","ok"} or t.startswith(("hi ","hello ","hey "))
 
-def api_messages_hook(request_json: dict, **kwargs):
-    activity = request_json
-    thread_id = _extract_thread_id(activity)
-    msg_id = _extract_message_id(activity)
-    text = _extract_text(activity)
+
+def _process_message_sync(activity_dict: dict):
+    """Synchronous core — all Django ORM calls happen here."""
+    thread_id = _extract_thread_id(activity_dict)
+    msg_id = _extract_message_id(activity_dict)
+    text = _extract_text(activity_dict)
 
     with pg_advisory_lock(thread_id):
         if is_duplicate_message(thread_id, msg_id):
@@ -428,9 +450,18 @@ def api_messages_hook(request_json: dict, **kwargs):
             cs.last_user_message_id = msg_id
             cs.updated_at = timezone.now()
             cs.save()
-            return make_text_reply("Hello 👋 How can I help you with support today?")
+            return make_text_reply("Hello! How can I help you with support today?")
 
-        return handle_support_turn(thread_id=thread_id, teams_message_id=msg_id, user_text=text, raw_activity=activity)
+        return handle_support_turn(
+            thread_id=thread_id, teams_message_id=msg_id,
+            user_text=text, raw_activity=activity_dict,
+        )
+
+
+class CustomChatbotHooks(ChatbotHooks):
+    async def api_messages_hook(request, activity):
+        activity_dict = activity if isinstance(activity, dict) else {"text": getattr(activity, "text", "")}
+        return await sync_to_async(_process_message_sync, thread_sensitive=False)(activity_dict)
 ```
 
 ---
@@ -674,6 +705,9 @@ def handle_support_turn(thread_id: str, teams_message_id: str, user_text: str, r
 - **Issue Context Tracking** — multi-issue classification per thread (see section 16)
 - **pgvector RAG** — direct PostgreSQL vector search instead of REST stubs (see section 7 Option B)
 - **Vertex AI** — use Gemini models for classification and generation (see section 16 LLM fallback)
+- ~~**RAG-filtered tool selection**~~ — **implemented**: when catalog >30 tools, RAG filters which tools are sent to the LLM; `discover_tools` meta-tool lets the LLM search for more mid-conversation
+- **General escape-hatch tools** — **implemented**: `call_ae_api`, `query_database`, `search_knowledge_base` in `tools/general_tools.py` are always available for fallback when no typed tool fits; LLM prefers typed tools for validation/audit, falls back to general when needed (see SETUP_GUIDE section 11.3)
+- **Progress streaming** — **implemented**: When `AGENT_PROGRESS_ENABLED=true`, the agent sends real-time status messages (e.g., "Checking workflow status...") during long investigations. In Teams, these appear as proactive messages via Bot Framework; in webchat, they display as in-place updating italic text. See SETUP_GUIDE section 11.4.
 
 ---
 
@@ -1016,13 +1050,25 @@ def should_escalate_recurrence(case: Case) -> bool:
 
 ### Updated Router Hook
 
-**This replaces section 11's `api_messages_hook` entirely.** The new version adds issue classification, empty message guard, approval authorization, resolution lifecycle, and recurrence escalation.
+**This replaces section 11's `api_messages_hook` entirely.** The new version adds issue classification, empty message guard, approval authorization, resolution lifecycle, recurrence escalation, and uses the **async class-based hook pattern** required by AI Studio.
 
 ```python
 # custom/custom_hooks.py — FULL REPLACEMENT of section 11
+from __future__ import annotations
 
+import logging
 import uuid
+
+from asgiref.sync import sync_to_async
 from django.utils import timezone
+
+try:
+    from aistudiobot.hooks import ChatbotHooks
+except ImportError:
+    class ChatbotHooks:
+        pass
+
+logger = logging.getLogger("support_agent.hooks")
 
 from custom.helpers.locks import pg_advisory_lock
 from custom.helpers.db import is_duplicate_message, mark_message_processed
@@ -1032,6 +1078,19 @@ from custom.functions.python.support_agent import handle_support_turn
 from custom.helpers.issue_classifier import (
     classify_message, IssueClassification, link_cases, should_escalate_recurrence,
 )
+
+
+def _activity_to_dict(activity) -> dict:
+    if isinstance(activity, dict):
+        return activity
+    result = {}
+    for attr in ("text", "id"):
+        result[attr] = getattr(activity, attr, None) or ""
+    conv = getattr(activity, "conversation", None)
+    result["conversation"] = {"id": getattr(conv, "id", "") or ""} if conv else {}
+    frm = getattr(activity, "from_property", None) or getattr(activity, "from", None)
+    result["from"] = {"id": getattr(frm, "id", "") or ""} if frm else {}
+    return result
 
 
 def _extract_thread_id(activity: dict) -> str:
@@ -1052,14 +1111,13 @@ def _is_smalltalk(text: str) -> bool:
     return t in {"hi","hello","hey","thanks","thank you","ok"} or t.startswith(("hi ","hello ","hey "))
 
 
-def api_messages_hook(request_json: dict, **kwargs):
-    activity = request_json
-    thread_id = _extract_thread_id(activity)
-    msg_id = _extract_message_id(activity)
-    text = _extract_text(activity)
-    user_id = _extract_user_id(activity)
+def _process_message_sync(activity_dict: dict):
+    """Synchronous core — all Django ORM calls happen here."""
+    thread_id = _extract_thread_id(activity_dict)
+    msg_id = _extract_message_id(activity_dict)
+    text = _extract_text(activity_dict)
+    user_id = _extract_user_id(activity_dict)
 
-    # Guard: empty / whitespace-only messages
     if not text:
         return make_text_reply("It looks like your message was empty. How can I help?")
 
@@ -1075,72 +1133,98 @@ def api_messages_hook(request_json: dict, **kwargs):
             cs.save()
             return make_text_reply("Hello! How can I help you with support today?")
 
-        # ── Load conversation state and active case ──
         cs, _ = ConversationState.objects.get_or_create(thread_id=thread_id)
         active_case = None
         if cs.active_case_id:
             active_case = Case.objects.filter(case_id=cs.active_case_id).first()
 
-        # ── Approval with authorization check ──
         if (text.strip().upper() in {"APPROVE", "REJECT"}
                 and active_case
                 and active_case.state == "WAITING_APPROVAL"):
             appr = Approval.objects.filter(
-                case_id=active_case.case_id, status="PENDING"
+                case_id=active_case.case_id, status="PENDING",
             ).order_by("-created_at").first()
 
             if appr:
-                # Authorization: only users in requested_to list can approve
-                if user_id and appr.requested_to and user_id not in appr.requested_to:
+                if (user_id and appr.requested_to
+                        and user_id not in appr.requested_to):
                     return make_text_reply(
-                        "You are not authorized to approve/reject this action. "
-                        f"Authorized reviewers: {', '.join(appr.requested_to)}"
+                        "You are not authorized to approve/reject "
+                        "this action. Authorized reviewers: "
+                        f"{', '.join(appr.requested_to)}"
+                    )
+                is_approve = text.strip().upper() == "APPROVE"
+                appr.status = "APPROVED" if is_approve else "REJECTED"
+                appr.decided_by = user_id
+                appr.decided_at = timezone.now()
+                appr.save()
+                if not is_approve:
+                    active_case.state = "PLANNING"
+                    active_case.updated_at = timezone.now()
+                    active_case.save()
+                    return make_text_reply(
+                        "Action rejected. How would you like to proceed?"
                     )
                 return handle_support_turn(
                     thread_id=thread_id, teams_message_id=msg_id,
-                    user_text=text, raw_activity=activity,
+                    user_text=text, raw_activity=activity_dict,
                 )
 
-        # ── Issue classification ──
         classification, ref_case_id = classify_message(thread_id, text, active_case)
 
         if classification == IssueClassification.RECURRENCE:
-            old_case = Case.objects.filter(case_id=ref_case_id).first()
-            if old_case:
-                # Check escalation threshold
-                if should_escalate_recurrence(old_case):
-                    old_case.state = "WAITING_ON_TEAM"
-                    old_case.owner_type = "HUMAN_TEAM"
-                    old_case.owner_team = "L2_SUPPORT"
-                    old_case.updated_at = timezone.now()
-                    old_case.save()
-                    return make_text_reply(
-                        f"This issue has now recurred {old_case.recurrence_count + 1} times. "
-                        f"The previous fix is not holding. "
-                        f"Escalating to L2 support for a permanent resolution."
-                    )
-
-                old_case.state = "PLANNING"
-                old_case.recurrence_count += 1
-                old_case.resolved_at = None
-                old_case.updated_at = timezone.now()
-                old_case.save()
-                cs.active_case_id = old_case.case_id
+            old_case = (
+                Case.objects.filter(case_id=ref_case_id).first()
+                if ref_case_id else None
+            )
+            if not old_case:
+                logger.warning(
+                    "RECURRENCE ref_case %s not found — treating as new issue",
+                    ref_case_id,
+                )
+                cs.active_case_id = None
                 cs.updated_at = timezone.now()
                 cs.save()
-                prefix = (
-                    f"This looks like a recurrence (#{old_case.recurrence_count}) "
-                    f"of a previous issue. "
-                )
-                if old_case.resolution_summary:
-                    prefix += f"Last resolution: {old_case.resolution_summary[:200]}. "
-                prefix += "Let me check if the same cause applies.\n\n"
-                result = handle_support_turn(
+                return handle_support_turn(
                     thread_id=thread_id, teams_message_id=msg_id,
-                    user_text=text, raw_activity=activity
+                    user_text=text, raw_activity=activity_dict,
                 )
-                result["text"] = prefix + result.get("text", "")
-                return result
+
+            old_case.recurrence_count += 1
+            old_case.updated_at = timezone.now()
+            old_case.save()
+
+            if should_escalate_recurrence(old_case):
+                old_case.state = "WAITING_ON_TEAM"
+                old_case.owner_type = "HUMAN_TEAM"
+                old_case.owner_team = "L2_SUPPORT"
+                old_case.save()
+                return make_text_reply(
+                    f"This issue has now recurred "
+                    f"{old_case.recurrence_count} times. "
+                    f"The previous fix is not holding. "
+                    f"Escalating to L2 support for a permanent resolution."
+                )
+
+            old_case.state = "PLANNING"
+            old_case.resolved_at = None
+            old_case.save()
+            cs.active_case_id = old_case.case_id
+            cs.updated_at = timezone.now()
+            cs.save()
+            prefix = (
+                f"This looks like a recurrence "
+                f"(#{old_case.recurrence_count}) of a previous issue. "
+            )
+            if old_case.resolution_summary:
+                prefix += f"Last resolution: {old_case.resolution_summary[:200]}. "
+            prefix += "Let me check if the same cause applies.\n\n"
+            result = handle_support_turn(
+                thread_id=thread_id, teams_message_id=msg_id,
+                user_text=text, raw_activity=activity_dict,
+            )
+            result["text"] = prefix + result.get("text", "")
+            return result
 
         elif classification == IssueClassification.NEW_ISSUE:
             cs.active_case_id = None
@@ -1148,47 +1232,66 @@ def api_messages_hook(request_json: dict, **kwargs):
             cs.save()
 
         elif classification == IssueClassification.RELATED_NEW:
-            parent_id = ref_case_id or (active_case.case_id if active_case else None)
+            parent_id = ref_case_id or (
+                active_case.case_id if active_case else None
+            )
             cs.active_case_id = None
             cs.updated_at = timezone.now()
             cs.save()
             result = handle_support_turn(
                 thread_id=thread_id, teams_message_id=msg_id,
-                user_text=text, raw_activity=activity
+                user_text=text, raw_activity=activity_dict,
             )
             new_cs = ConversationState.objects.get(thread_id=thread_id)
             if parent_id and new_cs.active_case_id:
                 link_cases(parent_id, new_cs.active_case_id, "CASCADE")
             prefix = (
-                "This looks related to a previous issue but appears "
-                "to be a separate problem. Tracking as a linked case.\n\n"
+                "This looks related to a previous issue but "
+                "appears to be a separate problem. "
+                "Tracking as a linked case.\n\n"
             )
             result["text"] = prefix + result.get("text", "")
             return result
 
         elif classification == IssueClassification.FOLLOWUP:
-            target_case = Case.objects.filter(case_id=ref_case_id).first() if ref_case_id else active_case
+            target_case = (
+                Case.objects.filter(case_id=ref_case_id).first()
+                if ref_case_id else active_case
+            )
             if target_case and target_case.resolution_summary:
                 return make_text_reply(
-                    f"Regarding [{target_case.case_id}]: {target_case.resolution_summary}\n\n"
+                    f"Regarding [{target_case.case_id}]: "
+                    f"{target_case.resolution_summary}\n\n"
                     f"Would you like me to verify the current status?"
                 )
 
         elif classification == IssueClassification.STATUS_CHECK:
-            cases = Case.objects.filter(thread_id=thread_id).exclude(
-                state__in=["CLOSED", "CANCELLED"]
+            cases = Case.objects.filter(
+                thread_id=thread_id,
+            ).exclude(
+                state__in=["CLOSED", "CANCELLED"],
             ).order_by("-updated_at")[:10]
             summary = "\n".join(
-                f"- [{c.case_id}] {c.state} | Workflows: {c.workflows_involved}"
+                f"- [{c.case_id}] {c.state} | "
+                f"Workflows: {c.workflows_involved}"
                 for c in cases
             ) or "No active cases."
             return make_text_reply(f"Current session status:\n{summary}")
 
-        # Default: CONTINUE_EXISTING or fallback
         return handle_support_turn(
             thread_id=thread_id, teams_message_id=msg_id,
-            user_text=text, raw_activity=activity
+            user_text=text, raw_activity=activity_dict,
         )
+
+
+class CustomChatbotHooks(ChatbotHooks):
+    export_dialogs = []
+
+    async def api_messages_hook(request, activity):
+        activity_dict = _activity_to_dict(activity)
+        return await sync_to_async(
+            _process_message_sync, thread_sensitive=False
+        )(activity_dict)
 ```
 
 ### Updated Folder Structure
@@ -1224,4 +1327,4 @@ custom/
 
 ---
 
-**Generated:** 2026-02-20 06:19:06
+**Generated:** 2026-02-20 06:19:06 | **Last updated:** 2026-02-28

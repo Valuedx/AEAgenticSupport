@@ -39,7 +39,8 @@ except Exception as e:
 
 def handle_chat_message(message: str, session_id: str = "default",
                         user_id: str = "",
-                        user_role: str = "technical") -> str:
+                        user_role: str = "technical",
+                        on_progress=None) -> str:
     """
     Called by AE AI Studio for each incoming chat message.
 
@@ -48,6 +49,7 @@ def handle_chat_message(message: str, session_id: str = "default",
         session_id: Unique conversation/session identifier
         user_id:    Authenticated user ID from AE
         user_role:  "business" or "technical" (from AE user profile)
+        on_progress: optional ``fn(status_text)`` for streaming progress
 
     Returns:
         Response string to display in chat
@@ -61,6 +63,7 @@ def handle_chat_message(message: str, session_id: str = "default",
             user_message=message,
             user_id=user_id,
             user_role=user_role,
+            on_progress=on_progress,
         )
         app_logger.info(f"Response: {response[:100]}...")
         return response

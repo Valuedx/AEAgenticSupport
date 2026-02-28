@@ -3,6 +3,7 @@ Django models for the AI Studio Extension.
 Handles message deduplication, conversation state, case lifecycle,
 and approval tracking — all persisted in AI Studio's PostgreSQL.
 """
+from __future__ import annotations
 
 from django.db import models
 from django.utils import timezone

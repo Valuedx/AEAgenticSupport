@@ -4,6 +4,7 @@ Tracks the current state of a support conversation including
 phase, messages, findings, tool calls, and queued messages.
 Persists core state to PostgreSQL via save()/load().
 """
+from __future__ import annotations
 
 import json
 import logging

@@ -5,12 +5,15 @@ Message Gateway handles:
 3. Managing the message queue per conversation
 4. Routing to the orchestrator
 """
+from __future__ import annotations
 
 import logging
 import threading
 from enum import Enum
+from typing import Callable, Optional
 
 from config.llm_client import llm_client
+from gateway.progress import ProgressCallback, create_noop_progress
 from state.conversation_state import ConversationState, ConversationPhase
 from agents.orchestrator import Orchestrator
 
@@ -51,10 +54,17 @@ class MessageGateway:
     def process_message(
         self, conversation_id: str, user_message: str,
         user_id: str = "", user_role: str = "technical",
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
         Main entry point called by the chat interface.
         Thread-safe — handles concurrent messages gracefully.
+
+        Args:
+            on_progress: optional callback ``fn(status_text)`` invoked
+                with user-friendly progress messages during long operations.
+                For webchat this pushes SSE events; for Teams it sends
+                proactive messages.
         """
         if not user_message or not user_message.strip():
             return "It looks like your message was empty. How can I help?"
@@ -64,10 +74,17 @@ class MessageGateway:
         )
         lock = self._locks[conversation_id]
 
+        progress = ProgressCallback(
+            send_fn=on_progress,
+            user_role=state.user_role,
+        )
+
         # ── Fast path: agents NOT currently working ──
         if not state.is_agent_working:
             with lock:
-                return self.orchestrator.handle_message(user_message, state)
+                return self.orchestrator.handle_message(
+                    user_message, state, on_progress=progress
+                )
 
         # ── Agents ARE currently working — classify this new message ──
         intent = self._classify_message_intent(user_message, state)
@@ -87,7 +104,9 @@ class MessageGateway:
 
         elif intent == MessageIntent.APPROVAL:
             with lock:
-                return self.orchestrator.handle_message(user_message, state)
+                return self.orchestrator.handle_message(
+                    user_message, state, on_progress=progress
+                )
 
         else:
             state.queue_user_message(user_message, hint="new_request")

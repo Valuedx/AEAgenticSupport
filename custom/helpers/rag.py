@@ -3,6 +3,7 @@ RAG search helpers.
 Bridges the Extension layer to the standalone rag/engine.py module.
 Falls back to REST stubs if direct pgvector access is unavailable.
 """
+from __future__ import annotations
 
 import logging
 from typing import Dict, List

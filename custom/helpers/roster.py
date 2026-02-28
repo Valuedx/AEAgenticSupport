@@ -3,6 +3,7 @@ On-shift tech user roster.
 Determines which tech users are available to approve risky actions.
 Replace TECH_ROSTER with your real roster (DB table or config).
 """
+from __future__ import annotations
 
 from datetime import datetime, time
 from typing import Dict, List

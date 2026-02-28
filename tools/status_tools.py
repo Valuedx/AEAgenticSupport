@@ -81,6 +81,7 @@ tool_registry.register(
             },
         },
         required_params=["workflow_name"],
+        always_available=True,
     ),
     check_workflow_status,
 )
@@ -105,6 +106,7 @@ tool_registry.register(
             },
         },
         required_params=[],
+        always_available=True,
     ),
     list_recent_failures,
 )
@@ -120,6 +122,7 @@ tool_registry.register(
         tier="read_only",
         parameters={},
         required_params=[],
+        always_available=True,
     ),
     get_system_health,
 )

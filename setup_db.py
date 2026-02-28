@@ -4,6 +4,7 @@ Creates all PostgreSQL tables and extensions required by the ops agent.
 Run once during initial deployment:
     python setup_db.py
 """
+from __future__ import annotations
 
 import os
 import sys
@@ -12,22 +13,72 @@ import psycopg2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.settings import CONFIG
 
-SCHEMA_SQL = """
+
+def _has_pgvector(dsn: str) -> bool:
+    try:
+        with psycopg2.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _get_embedding_dimension() -> int:
+    """Derive vector dimension from the configured Vertex AI embedding model."""
+    try:
+        import vertexai
+        from vertexai.language_models import TextEmbeddingModel
+        vertexai.init(
+            project=CONFIG["GOOGLE_CLOUD_PROJECT"],
+            location=CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        )
+        model_name = CONFIG.get("EMBEDDING_MODEL", "text-embedding-004")
+        model = TextEmbeddingModel.from_pretrained(model_name)
+        sample = model.get_embeddings(["dimension probe"])
+        dim = len(sample[0].values)
+        print(f"  Detected embedding dimension {dim} from model '{model_name}'")
+        return dim
+    except Exception as e:
+        print(f"  Could not query embedding model ({e}) — defaulting to 768")
+        return 768
+
+
+def _build_schema_sql(embed_dim: int, use_pgvector: bool) -> str:
+    if use_pgvector:
+        rag_block = f"""
 -- pgvector extension for RAG
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- RAG documents (created by rag/engine.py but included here for completeness)
+CREATE TABLE IF NOT EXISTS rag_documents (
+    id          TEXT PRIMARY KEY,
+    content     TEXT NOT NULL,
+    metadata    JSONB DEFAULT '{{}}'::jsonb,
+    collection  TEXT NOT NULL,
+    embedding   vector({embed_dim}),
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_collection
+    ON rag_documents (collection);"""
+    else:
+        rag_block = """
+-- RAG documents (numpy fallback — embeddings stored as JSONB arrays)
 CREATE TABLE IF NOT EXISTS rag_documents (
     id          TEXT PRIMARY KEY,
     content     TEXT NOT NULL,
     metadata    JSONB DEFAULT '{}'::jsonb,
     collection  TEXT NOT NULL,
-    embedding   vector(384),
+    embedding   JSONB DEFAULT '[]'::jsonb,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_rag_collection
-    ON rag_documents (collection);
+    ON rag_documents (collection);"""
+
+    return rag_block + """
 
 -- Issue tracking (used by state/issue_tracker.py)
 CREATE TABLE IF NOT EXISTS issue_registry (
@@ -66,20 +117,35 @@ def setup_database():
     dsn = CONFIG["POSTGRES_DSN"]
     print(f"Connecting to: {dsn}")
 
-    with psycopg2.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            for statement in SCHEMA_SQL.split(";"):
-                statement = statement.strip()
-                if statement and not statement.startswith("--"):
-                    try:
-                        cur.execute(statement + ";")
-                    except psycopg2.Error as e:
-                        print(f"  Warning: {e.pgerror or e}")
-        conn.commit()
+    use_pgvector = _has_pgvector(dsn)
+    if use_pgvector:
+        print("  pgvector extension available — using native vector columns")
+    else:
+        print("  pgvector not available — using JSONB fallback for embeddings")
+
+    embed_dim = _get_embedding_dimension()
+    schema_sql = _build_schema_sql(embed_dim, use_pgvector)
+
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        for statement in schema_sql.split(";"):
+            lines = [
+                ln for ln in statement.strip().splitlines()
+                if ln.strip() and not ln.strip().startswith("--")
+            ]
+            clean = "\n".join(lines).strip()
+            if not clean:
+                continue
+            try:
+                cur.execute(clean + ";")
+            except psycopg2.Error as e:
+                print(f"  Warning: {e.pgerror or e}")
+    conn.close()
 
     print("Database setup complete.")
     print("Tables created:")
-    print("  - rag_documents (RAG vector store)")
+    print(f"  - rag_documents (RAG vector store, vector({embed_dim}))")
     print("  - issue_registry (issue tracking)")
     print("  - issue_tracker_state (active issue pointer)")
     print("  - conversation_state (session persistence)")

@@ -2,6 +2,9 @@
 Teams reply helpers.
 Replace with adaptive card payloads for richer approval UX.
 """
+from __future__ import annotations
+
+from typing import Optional, List
 
 
 def make_text_reply(text: str) -> dict:
@@ -9,8 +12,8 @@ def make_text_reply(text: str) -> dict:
 
 
 def make_approval_card(case_id: str, action_summary: str,
-                       reviewers: list[str] | None = None,
-                       plan_version: int | None = None) -> dict:
+                       reviewers: Optional[List[str]] = None,
+                       plan_version: Optional[int] = None) -> dict:
     """
     Adaptive Card for approval requests.
     Replace this stub with a real Adaptive Card JSON if your

@@ -1,6 +1,7 @@
 """
 Base classes for tools and the AutomationEdge REST API client.
 """
+from __future__ import annotations
 
 import logging
 import urllib3
@@ -24,6 +25,7 @@ class ToolDefinition:
     parameters: dict = field(default_factory=dict)
     required_params: list[str] = field(default_factory=list)
     protected_workflows: list[str] = field(default_factory=list)
+    always_available: bool = False  # if True, included in every LLM call regardless of RAG
 
     def to_rag_document(self) -> dict:
         return {

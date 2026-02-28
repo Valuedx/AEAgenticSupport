@@ -1,0 +1,19 @@
+# Extension dependencies — installed into the Cognibot embedded Python.
+# Pin conservatively to avoid breaking bundled packages.
+# The Cognibot runtime already ships: Django 3.2, requests 2.31,
+# httpx 0.23, psycopg2-binary 2.8, asgiref 3.4, botbuilder-* 4.14.
+
+# Google Vertex AI (LLM + embeddings — no local torch needed)
+google-cloud-aiplatform>=1.60.0
+
+# pgvector Python client (only needed if pgvector extension is installed)
+pgvector>=0.3.0
+
+# numpy for fallback similarity search
+numpy>=1.26.0
+
+# Retry logic
+tenacity>=8.2.3
+
+# psycopg2 — needed for standalone pgvector tables
+psycopg2-binary>=2.9.9

@@ -4,6 +4,7 @@ Steps tagged READ_ONLY always auto-run.
 Steps tagged DESTRUCTIVE always require approval.
 SAFE_WRITE auto-runs only if the capability is allowlisted.
 """
+from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 

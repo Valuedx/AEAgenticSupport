@@ -3,6 +3,7 @@ Tracks distinct issues within a conversation.
 Determines whether a new message is about an existing issue or a new one.
 Persists issue state to PostgreSQL so it survives process restarts.
 """
+from __future__ import annotations
 
 import json
 import logging
@@ -10,6 +11,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import Optional
 
 import psycopg2
 from psycopg2.extras import Json
@@ -99,42 +101,14 @@ class Issue:
 # Heuristic signal lists
 # =========================================================================
 
-CONTINUE_SIGNALS = [
-    "same workflow", "same one", "related to that",
-    "on the same topic", "regarding that", "about that",
-    "for that same", "going back to",
-]
-
-NEW_ISSUE_SIGNALS = [
-    "different issue", "new problem", "something else",
-    "unrelated", "separate issue", "by the way",
-    "changing topic", "on a different note",
-]
-
-RECURRENCE_SIGNALS = [
-    "happened again", "same error again", "still failing",
-    "back again", "recurring", "keeps failing", "not fixed",
-    "failed again", "same issue", "it's back",
-]
-
-FOLLOWUP_SIGNALS = [
-    "did it work", "is it fixed", "did the restart work",
-    "how did it go", "any update", "what happened after",
-    "is it running now", "did it complete",
-]
-
-STATUS_CHECK_SIGNALS = [
-    "what's the status", "status update", "where are we",
-    "any progress", "how's it going", "current status",
-    "what's happening", "status check", "show status",
-    "case status", "all cases", "open cases",
-]
-
-CANCEL_SIGNALS = [
-    "cancel", "never mind", "nevermind", "stop",
-    "forget it", "forget about it", "don't bother",
-    "abort", "scratch that", "disregard",
-]
+from config.classification_signals import (
+    CONTINUE_SIGNALS,
+    NEW_ISSUE_SIGNALS,
+    RECURRENCE_SIGNALS,
+    FOLLOWUP_SIGNALS,
+    STATUS_CHECK_SIGNALS,
+    CANCEL_SIGNALS,
+)
 
 
 class IssueTracker:

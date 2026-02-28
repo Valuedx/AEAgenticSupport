@@ -2,6 +2,7 @@
 REST client for calling AE workflows exposed as tools.
 Used by the Extension's planner/executor for tool invocations.
 """
+from __future__ import annotations
 
 import json
 import logging
