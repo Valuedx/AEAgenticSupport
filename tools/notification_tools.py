@@ -13,7 +13,7 @@ logger = logging.getLogger("ops_agent.tools.notification")
 def send_notification(channel: str, recipients: list[str],
                       subject: str, message: str) -> dict:
     resp = get_ae_client().post(
-        "/api/notifications/send",
+        "/api/v1/notifications/send",
         payload={
             "channel": channel,
             "recipients": recipients,
@@ -23,9 +23,10 @@ def send_notification(channel: str, recipients: list[str],
     )
     return {
         "success": True,
-        "channel": channel,
+        "channel": resp.get("channel", channel),
         "recipients_count": len(recipients),
-        "notification_id": resp.get("notificationId"),
+        "status": resp.get("status"),
+        "notification_id": resp.get("notification_id"),
     }
 
 
@@ -33,19 +34,20 @@ def create_incident_ticket(title: str, description: str,
                            priority: str = "P3",
                            assignee_group: str = "") -> dict:
     resp = get_ae_client().post(
-        "/api/tickets/create",
+        "/api/v1/incidents",
         payload={
             "title": title,
             "description": description,
             "priority": priority,
-            "assigneeGroup": assignee_group,
+            "assignee_group": assignee_group,
         },
     )
     return {
         "success": True,
-        "ticket_id": resp.get("ticketId"),
+        "ticket_id": resp.get("incident_id"),
+        "title": resp.get("title"),
         "priority": priority,
-        "url": resp.get("ticketUrl"),
+        "status": resp.get("status"),
     }
 
 

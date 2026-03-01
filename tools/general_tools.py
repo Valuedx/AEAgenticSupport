@@ -54,25 +54,20 @@ def call_ae_api(method: str, endpoint: str,
     parsed_params = _safe_json(params) if params else None
     parsed_body = _safe_json(body) if body else None
 
-    try:
-        if method == "GET":
-            data = client.get(endpoint, params=parsed_params)
-        elif method == "POST":
-            data = client._client.post(endpoint, json=parsed_body or {})
-            data.raise_for_status()
-            data = data.json()
-        elif method == "PUT":
-            data = client._client.put(endpoint, json=parsed_body or {})
-            data.raise_for_status()
-            data = data.json()
-        elif method == "DELETE":
-            data = client._client.delete(endpoint, params=parsed_params)
-            data.raise_for_status()
-            data = data.json()
-        else:
-            return {"error": f"Unsupported HTTP method: {method}"}
-    except Exception as e:
-        return {"error": str(e), "endpoint": endpoint, "method": method}
+    if method == "GET":
+        data = client.get(endpoint, params=parsed_params)
+    elif method == "POST":
+        data = client.post(endpoint, payload=parsed_body)
+    elif method == "PUT":
+        resp = client._client.put(endpoint, json=parsed_body or {})
+        resp.raise_for_status()
+        data = resp.json()
+    elif method == "DELETE":
+        resp = client._client.delete(endpoint, params=parsed_params)
+        resp.raise_for_status()
+        data = resp.json()
+    else:
+        raise ValueError(f"Unsupported HTTP method: {method}")
 
     return {
         "method": method,
@@ -158,6 +153,7 @@ def search_knowledge_base(query: str, collection: str = "",
         else ["kb_articles", "sops", "tools", "past_incidents"]
     )
 
+    errors = []
     for coll in collections:
         try:
             hits = rag.search(query, collection=coll, top_k=top_k)
@@ -168,14 +164,18 @@ def search_knowledge_base(query: str, collection: str = "",
                     "content": h.get("content", "")[:300],
                     "similarity": round(h.get("similarity", 0), 3),
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("RAG search failed for collection %s: %s", coll, exc)
+            errors.append(f"{coll}: {exc}")
 
     results.sort(key=lambda r: r.get("similarity", 0), reverse=True)
-    return {
+    result = {
         "results": results[:top_k],
         "collections_searched": collections,
     }
+    if errors:
+        result["warnings"] = errors
+    return result
 
 
 # =====================================================================
@@ -235,8 +235,8 @@ tool_registry.register(
             "endpoint": {
                 "type": "string",
                 "description": (
-                    "API path, e.g. /api/workflows/my_workflow/status "
-                    "or /api/queues/my_queue/items"
+                    "API path, e.g. /api/v1/workflows/my_workflow/status "
+                    "or /api/v1/queues/my_queue/items"
                 ),
             },
             "params": {

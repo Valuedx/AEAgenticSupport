@@ -69,10 +69,14 @@ def handle_chat_message(message: str, session_id: str = "default",
         return response
 
     except Exception as e:
-        app_logger.error(f"Unhandled error: {e}", exc_info=True)
+        app_logger.error(f"Unhandled error: {type(e).__name__}: {e}", exc_info=True)
+        # In dev, show a short hint so you can fix the root cause
+        show_hint = os.environ.get("SHOW_ERROR_HINT", "").lower() in ("1", "true", "yes")
+        hint = f" ({type(e).__name__}: {str(e)[:100]})" if show_hint else ""
         return (
             "I encountered an unexpected error. The operations team has "
             "been notified. Please try again or contact support directly."
+            + hint
         )
 
 

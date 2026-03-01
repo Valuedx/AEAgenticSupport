@@ -13,7 +13,7 @@ logger = logging.getLogger("ops_agent.tools.files")
 def check_input_file(workflow_name: str, expected_date: str = "") -> dict:
     params = {"date": expected_date} if expected_date else None
     resp = get_ae_client().get(
-        f"/api/workflows/{workflow_name}/input-file",
+        f"/api/v1/workflows/{workflow_name}/input-file",
         params=params,
     )
     return {
@@ -33,7 +33,7 @@ def check_output_file(workflow_name: str, execution_id: str = "") -> dict:
     if execution_id:
         params["executionId"] = execution_id
     resp = get_ae_client().get(
-        f"/api/workflows/{workflow_name}/output-file",
+        f"/api/v1/workflows/{workflow_name}/output-file",
         params=params,
     )
     return {

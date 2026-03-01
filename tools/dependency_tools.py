@@ -12,7 +12,7 @@ logger = logging.getLogger("ops_agent.tools.dependency")
 
 
 def get_workflow_dependencies(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/workflows/{workflow_name}/dependencies")
+    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/dependencies")
     return {
         "workflow_name": workflow_name,
         "upstream": resp.get("upstream", []),
@@ -22,20 +22,19 @@ def get_workflow_dependencies(workflow_name: str) -> dict:
 
 
 def get_workflow_config(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/workflows/{workflow_name}/config")
+    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/config")
     return {
         "workflow_name": workflow_name,
-        "schedule": resp.get("schedule"),
-        "input_path": resp.get("inputPath"),
-        "output_path": resp.get("outputPath"),
-        "timeout_minutes": resp.get("timeoutMinutes"),
-        "retry_policy": resp.get("retryPolicy"),
-        "assigned_agents": resp.get("assignedAgents", []),
+        "input_paths": resp.get("input_paths", []),
+        "output_paths": resp.get("output_paths", []),
+        "timeout_minutes": resp.get("timeout_minutes"),
+        "retry_count": resp.get("retry_count"),
+        "parameters": resp.get("parameters", {}),
     }
 
 
 def get_schedule_info(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/workflows/{workflow_name}/schedule")
+    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/schedule")
     return {
         "workflow_name": workflow_name,
         "cron_expression": resp.get("cronExpression"),
@@ -48,8 +47,8 @@ def get_schedule_info(workflow_name: str) -> dict:
 
 def check_agent_resources(agent_name: str = "") -> dict:
     if agent_name:
-        return get_ae_client().get(f"/api/agents/{agent_name}/resources")
-    return get_ae_client().get("/api/agents/resources")
+        return get_ae_client().get(f"/api/v1/agents/{agent_name}/resources")
+    return get_ae_client().get("/api/v1/agents/resources")
 
 
 # ── Register dependency tools ──

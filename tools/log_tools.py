@@ -12,25 +12,28 @@ logger = logging.getLogger("ops_agent.tools.logs")
 
 def get_execution_logs(execution_id: str, tail: int = 100) -> dict:
     resp = get_ae_client().get(
-        f"/api/executions/{execution_id}/logs",
+        f"/api/v1/executions/{execution_id}/logs",
         params={"tail": tail},
     )
+    logs = resp.get("logs", [])
     return {
         "execution_id": execution_id,
-        "logs": resp.get("logs", []),
-        "log_count": len(resp.get("logs", [])),
+        "workflow_name": resp.get("workflow_name", ""),
+        "logs": logs,
+        "log_count": len(logs),
     }
 
 
 def get_execution_history(workflow_name: str, limit: int = 10) -> dict:
     resp = get_ae_client().get(
-        f"/api/workflows/{workflow_name}/executions",
+        f"/api/v1/workflows/{workflow_name}/executions",
         params={"limit": limit},
     )
+    execs = resp.get("executions", [])
     return {
         "workflow_name": workflow_name,
-        "executions": resp.get("executions", []),
-        "total_count": len(resp.get("executions", [])),
+        "executions": execs,
+        "total_count": resp.get("total", len(execs)),
     }
 
 

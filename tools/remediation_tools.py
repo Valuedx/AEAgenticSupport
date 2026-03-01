@@ -23,17 +23,18 @@ def restart_execution(workflow_name: str, execution_id: str,
             ),
         }
     resp = get_ae_client().post(
-        f"/api/executions/{execution_id}/restart",
+        f"/api/v1/executions/{execution_id}/restart",
         payload={
-            "workflowName": workflow_name,
-            "fromCheckpoint": from_checkpoint,
+            "workflow_name": workflow_name,
+            "from_checkpoint": from_checkpoint,
         },
     )
     return {
         "success": True,
-        "new_execution_id": resp.get("executionId"),
+        "new_execution_id": resp.get("new_execution_id"),
         "workflow_name": workflow_name,
         "restarted_from": "checkpoint" if from_checkpoint else "beginning",
+        "status": resp.get("status"),
     }
 
 
@@ -47,19 +48,20 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
             ),
         }
     resp = get_ae_client().post(
-        f"/api/workflows/{workflow_name}/trigger",
+        f"/api/v1/workflows/{workflow_name}/trigger",
         payload={"parameters": parameters or {}},
     )
     return {
         "success": True,
-        "execution_id": resp.get("executionId"),
+        "execution_id": resp.get("execution_id"),
         "workflow_name": workflow_name,
+        "status": resp.get("status"),
     }
 
 
 def requeue_item(queue_name: str, item_id: str) -> dict:
     resp = get_ae_client().post(
-        f"/api/queues/{queue_name}/items/{item_id}/requeue"
+        f"/api/v1/queues/{queue_name}/items/{item_id}/requeue"
     )
     return {
         "success": True,
@@ -73,11 +75,11 @@ def bulk_retry_failures(workflow_name: str = "", hours: int = 24,
                         max_retries: int = None) -> dict:
     max_ops = max_retries or CONFIG.get("MAX_BULK_OPERATIONS", 10)
     resp = get_ae_client().post(
-        "/api/executions/bulk-retry",
+        "/api/v1/executions/bulk-retry",
         payload={
-            "workflowName": workflow_name,
+            "workflow_name": workflow_name,
             "hours": hours,
-            "maxRetries": max_ops,
+            "max_retries": max_ops,
         },
     )
     return {
@@ -90,13 +92,13 @@ def bulk_retry_failures(workflow_name: str = "", hours: int = 24,
 
 def disable_workflow(workflow_name: str, reason: str = "") -> dict:
     resp = get_ae_client().post(
-        f"/api/workflows/{workflow_name}/disable",
+        f"/api/v1/workflows/{workflow_name}/disable",
         payload={"reason": reason},
     )
     return {
         "success": True,
         "workflow_name": workflow_name,
-        "previous_status": resp.get("previousStatus"),
+        "status": resp.get("status"),
         "reason": reason,
     }
 

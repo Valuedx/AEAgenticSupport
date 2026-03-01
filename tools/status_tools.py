@@ -11,56 +11,61 @@ logger = logging.getLogger("ops_agent.tools.status")
 
 
 def check_workflow_status(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/workflows/{workflow_name}/status")
+    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/status")
     return {
         "workflow_name": workflow_name,
         "status": resp.get("status", "UNKNOWN"),
-        "last_run_time": resp.get("lastRunTime"),
-        "last_duration_seconds": resp.get("lastDuration"),
+        "last_execution_status": resp.get("last_execution_status"),
+        "schedule": resp.get("schedule"),
+        "agent": resp.get("agent"),
         "error_message": resp.get("errorMessage"),
-        "next_scheduled_run": resp.get("nextScheduledRun"),
     }
 
 
 def list_recent_failures(hours: int = 24, limit: int = 20) -> dict:
     resp = get_ae_client().get(
-        "/api/executions/failures",
+        "/api/v1/failures/recent",
         params={"hours": hours, "limit": limit},
     )
+    failures = resp.get("failures", [])
     return {
-        "failures": resp.get("failures", []),
-        "total_count": len(resp.get("failures", [])),
+        "failures": failures,
+        "total_count": resp.get("total", len(failures)),
         "time_window_hours": hours,
     }
 
 
 def get_system_health() -> dict:
-    resp = get_ae_client().get("/api/system/health")
+    resp = get_ae_client().get("/api/v1/system/health")
+    agents = resp.get("agents", [])
+    online = sum(1 for a in agents if a.get("status") == "online")
     return {
-        "agents_online": resp.get("agentsOnline", 0),
-        "agents_offline": resp.get("agentsOffline", 0),
-        "total_queues": resp.get("totalQueues", 0),
-        "stuck_items": resp.get("stuckItems", 0),
-        "scheduled_workflows": resp.get("scheduledWorkflows", 0),
-        "disabled_workflows": resp.get("disabledWorkflows", 0),
+        "status": resp.get("status", "unknown"),
+        "agents_online": online,
+        "agents_offline": len(agents) - online,
+        "agents": agents,
+        "queue_depth": resp.get("queue_depth", 0),
+        "active_executions": resp.get("active_executions", 0),
     }
 
 
 def get_queue_status(queue_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/queues/{queue_name}/status")
+    resp = get_ae_client().get(
+        f"/api/v1/queues/{queue_name}/status",
+    )
     return {
         "queue_name": queue_name,
-        "depth": resp.get("depth", 0),
-        "processing_rate": resp.get("processingRate"),
-        "stuck_items": resp.get("stuckItems", 0),
-        "oldest_item_age_seconds": resp.get("oldestItemAge"),
+        "pending": resp.get("pending", 0),
+        "running": resp.get("running", 0),
+        "completed_today": resp.get("completed_today", 0),
+        "failed_today": resp.get("failed_today", 0),
     }
 
 
 def get_agent_status(agent_name: str = "") -> dict:
     if agent_name:
-        return get_ae_client().get(f"/api/agents/{agent_name}/status")
-    return get_ae_client().get("/api/agents/status")
+        return get_ae_client().get(f"/api/v1/agents/{agent_name}/status")
+    return get_ae_client().get("/api/v1/agents/status")
 
 
 # ── Register status tools ──
