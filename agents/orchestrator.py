@@ -177,9 +177,13 @@ class Orchestrator:
             system_prompt = self._build_system_prompt(state, tracker)
             rag = get_rag_engine()
 
-            tool_hits = rag.search_tools(user_message, top_k=12)
-            kb_hits = rag.search_kb(user_message, top_k=3)
-            sop_hits = rag.search_sops(user_message, top_k=3)
+            query_vec = rag.embed_query(user_message)
+            tool_hits = rag.search_tools(user_message, top_k=12,
+                                         query_embedding=query_vec)
+            kb_hits = rag.search_kb(user_message, top_k=3,
+                                    query_embedding=query_vec)
+            sop_hits = rag.search_sops(user_message, top_k=3,
+                                       query_embedding=query_vec)
 
             context_block = self._format_rag_context(
                 tool_hits[:5], kb_hits, sop_hits

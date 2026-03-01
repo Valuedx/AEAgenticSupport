@@ -14,9 +14,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-import psycopg2
 from psycopg2.extras import Json
 
+from config.db import get_conn
 from config.settings import CONFIG
 
 logger = logging.getLogger("ops_agent.state")
@@ -138,7 +138,7 @@ class ConversationState:
                 "pending_action": self.pending_action,
                 "pending_action_summary": self.pending_action_summary,
             }
-            with psycopg2.connect(CONFIG["POSTGRES_DSN"]) as conn:
+            with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO conversation_state
@@ -169,7 +169,7 @@ class ConversationState:
         state = cls()
         state.conversation_id = conversation_id
         try:
-            with psycopg2.connect(CONFIG["POSTGRES_DSN"]) as conn:
+            with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT user_id, user_role, phase, state_data "

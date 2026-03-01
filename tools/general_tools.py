@@ -16,9 +16,9 @@ import json
 import logging
 import re
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from config.db import get_readonly_conn
 from config.settings import CONFIG
 from tools.base import ToolDefinition, get_ae_client
 from tools.registry import tool_registry
@@ -115,13 +115,11 @@ def query_database(sql: str, params: str = "") -> dict:
             parsed_params = (parsed_params,)
 
     try:
-        conn = psycopg2.connect(CONFIG["POSTGRES_DSN"])
-        conn.set_session(readonly=True, autocommit=True)
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, parsed_params)
-            rows = cur.fetchmany(_MAX_ROWS)
-            total = cur.rowcount
-        conn.close()
+        with get_readonly_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, parsed_params)
+                rows = cur.fetchmany(_MAX_ROWS)
+                total = cur.rowcount
     except Exception as e:
         return {"error": str(e), "sql": sql[:200]}
 
@@ -271,7 +269,7 @@ tool_registry.register(
             "Only SELECT queries are allowed — mutations are blocked. "
             "Useful for checking conversation state, issue history, "
             "RAG document counts, or any custom diagnostic query. "
-            "Tables: rag_documents, issue_registry, issue_tracker_state, "
+            "Tables: rag_documents, issue_registry, "
             "conversation_state. Results are capped at 50 rows."
         ),
         category="general",

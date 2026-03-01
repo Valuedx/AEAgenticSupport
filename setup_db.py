@@ -92,19 +92,15 @@ CREATE TABLE IF NOT EXISTS issue_registry (
 CREATE INDEX IF NOT EXISTS idx_issue_registry_conv
     ON issue_registry(conversation_id);
 
-CREATE TABLE IF NOT EXISTS issue_tracker_state (
-    conversation_id  VARCHAR(256) PRIMARY KEY,
-    active_issue_id  VARCHAR(64),
-    updated_at       TIMESTAMPTZ DEFAULT NOW()
-);
-
 -- Conversation state persistence (used by state/conversation_state.py)
+-- active_issue_id is also written by state/issue_tracker.py
 CREATE TABLE IF NOT EXISTS conversation_state (
     conversation_id  VARCHAR(256) PRIMARY KEY,
     user_id          VARCHAR(256),
     user_role        VARCHAR(32) DEFAULT 'technical',
     phase            VARCHAR(32) DEFAULT 'idle',
     state_data       JSONB DEFAULT '{}'::jsonb,
+    active_issue_id  VARCHAR(64),
     updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -147,8 +143,7 @@ def setup_database():
     print("Tables created:")
     print(f"  - rag_documents (RAG vector store, vector({embed_dim}))")
     print("  - issue_registry (issue tracking)")
-    print("  - issue_tracker_state (active issue pointer)")
-    print("  - conversation_state (session persistence)")
+    print("  - conversation_state (session persistence + active issue pointer)")
     print()
     print("Next steps:")
     print("  1. Index KB data:  python -m rag.index_all")
@@ -156,5 +151,54 @@ def setup_database():
     print("  3. Start agent:    python main.py")
 
 
+def migrate_from_issue_tracker_state():
+    """One-time migration: move active_issue_id data from the old
+    ``issue_tracker_state`` table into ``conversation_state``, then
+    drop the old table.  Safe to run multiple times.
+    """
+    dsn = CONFIG["POSTGRES_DSN"]
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_name = 'issue_tracker_state'"
+        )
+        if not cur.fetchone():
+            print("  issue_tracker_state does not exist — nothing to migrate.")
+            conn.close()
+            return
+
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'conversation_state' "
+            "AND column_name = 'active_issue_id'"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE conversation_state "
+                "ADD COLUMN active_issue_id VARCHAR(64)"
+            )
+            print("  Added active_issue_id column to conversation_state.")
+
+        cur.execute("""
+            UPDATE conversation_state cs
+            SET active_issue_id = its.active_issue_id
+            FROM issue_tracker_state its
+            WHERE cs.conversation_id = its.conversation_id
+              AND its.active_issue_id IS NOT NULL
+        """)
+        print(f"  Migrated {cur.rowcount} active_issue_id values.")
+
+        cur.execute("DROP TABLE issue_tracker_state")
+        print("  Dropped issue_tracker_state table.")
+    conn.close()
+    print("Migration complete.")
+
+
 if __name__ == "__main__":
-    setup_database()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--migrate":
+        migrate_from_issue_tracker_state()
+    else:
+        setup_database()

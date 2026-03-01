@@ -30,6 +30,7 @@ CONFIG = {
     "POSTGRES_DSN": os.environ.get(
         "POSTGRES_DSN", "postgresql://localhost/ops_agent"
     ),
+    "DB_POOL_MAX_CONN": int(os.environ.get("DB_POOL_MAX_CONN", "10")),
 
     # Embeddings
     "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", "text-embedding-004"),

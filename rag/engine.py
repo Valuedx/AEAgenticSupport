@@ -10,17 +10,16 @@ Two storage backends:
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import List
 
 import numpy as np
-import psycopg2
 from psycopg2.extras import Json, execute_values
 
 import vertexai
 from vertexai.language_models import TextEmbeddingModel
 
+from config.db import get_conn
 from config.settings import CONFIG
 
 logger = logging.getLogger("ops_agent.rag")
@@ -70,7 +69,6 @@ class VertexEmbedder:
 class PgVectorRAGEngine:
 
     def __init__(self):
-        self.dsn = CONFIG["POSTGRES_DSN"]
         embed_model_name = CONFIG.get("EMBEDDING_MODEL", "text-embedding-004")
         self.embedder = VertexEmbedder(embed_model_name)
         self.embed_dim = self.embedder.dimension
@@ -79,7 +77,7 @@ class PgVectorRAGEngine:
             f"dim={self.embed_dim}"
         )
 
-        with self._get_conn() as conn:
+        with get_conn() as conn:
             self._use_pgvector = _has_pgvector(conn)
 
         if self._use_pgvector:
@@ -91,13 +89,10 @@ class PgVectorRAGEngine:
 
         self._ensure_tables()
 
-    def _get_conn(self):
-        return psycopg2.connect(self.dsn)
-
     # ── Schema bootstrap ──
 
     def _ensure_tables(self):
-        with self._get_conn() as conn:
+        with get_conn() as conn:
             with conn.cursor() as cur:
                 if self._use_pgvector:
                     cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -140,7 +135,7 @@ class PgVectorRAGEngine:
         texts = [doc["content"] for doc in documents]
         embeddings = self.embedder.embed_batch(texts)
 
-        with self._get_conn() as conn:
+        with get_conn() as conn:
             with conn.cursor() as cur:
                 if self._use_pgvector:
                     values = [
@@ -187,18 +182,32 @@ class PgVectorRAGEngine:
             f"Indexed {len(documents)} docs into collection '{collection}'"
         )
 
+    # ── Embedding ──
+
+    def embed_query(self, text: str) -> list[float]:
+        """Compute an embedding vector for *text*.
+
+        Call this once per user message, then pass the vector into
+        ``search()`` via *query_embedding* to avoid redundant API calls.
+        """
+        return self.embedder.embed(text)
+
     # ── Search ──
 
     def search(self, query: str, collection: str,
-               top_k: int = 5) -> list[dict]:
+               top_k: int = 5,
+               query_embedding: list[float] | None = None) -> list[dict]:
         if self._use_pgvector:
-            return self._search_pgvector(query, collection, top_k)
-        return self._search_numpy(query, collection, top_k)
+            return self._search_pgvector(query, collection, top_k,
+                                         query_embedding)
+        return self._search_numpy(query, collection, top_k, query_embedding)
 
     def _search_pgvector(self, query: str, collection: str,
-                         top_k: int) -> list[dict]:
-        query_emb = self.embedder.embed(query)
-        with self._get_conn() as conn:
+                         top_k: int,
+                         query_embedding: list[float] | None = None,
+                         ) -> list[dict]:
+        query_emb = query_embedding or self.embedder.embed(query)
+        with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, content, metadata,
@@ -216,9 +225,14 @@ class PgVectorRAGEngine:
         ]
 
     def _search_numpy(self, query: str, collection: str,
-                      top_k: int) -> list[dict]:
-        query_emb = np.array(self.embedder.embed(query))
-        with self._get_conn() as conn:
+                      top_k: int,
+                      query_embedding: list[float] | None = None,
+                      ) -> list[dict]:
+        query_emb = np.array(
+            query_embedding if query_embedding is not None
+            else self.embedder.embed(query)
+        )
+        with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, content, metadata, embedding
@@ -252,18 +266,26 @@ class PgVectorRAGEngine:
     def index_tools(self, tool_docs: list[dict]):
         self.index_documents(tool_docs, collection="tools")
 
-    def search_tools(self, query: str, top_k: int = 5) -> list[dict]:
-        return self.search(query, collection="tools", top_k=top_k)
+    def search_tools(self, query: str, top_k: int = 5,
+                     query_embedding: list[float] | None = None) -> list[dict]:
+        return self.search(query, collection="tools", top_k=top_k,
+                           query_embedding=query_embedding)
 
-    def search_kb(self, query: str, top_k: int = 5) -> list[dict]:
-        return self.search(query, collection="kb_articles", top_k=top_k)
+    def search_kb(self, query: str, top_k: int = 5,
+                  query_embedding: list[float] | None = None) -> list[dict]:
+        return self.search(query, collection="kb_articles", top_k=top_k,
+                           query_embedding=query_embedding)
 
-    def search_sops(self, query: str, top_k: int = 5) -> list[dict]:
-        return self.search(query, collection="sops", top_k=top_k)
+    def search_sops(self, query: str, top_k: int = 5,
+                    query_embedding: list[float] | None = None) -> list[dict]:
+        return self.search(query, collection="sops", top_k=top_k,
+                           query_embedding=query_embedding)
 
-    def search_past_incidents(self, query: str,
-                              top_k: int = 3) -> list[dict]:
-        return self.search(query, collection="past_incidents", top_k=top_k)
+    def search_past_incidents(self, query: str, top_k: int = 3,
+                              query_embedding: list[float] | None = None,
+                              ) -> list[dict]:
+        return self.search(query, collection="past_incidents", top_k=top_k,
+                           query_embedding=query_embedding)
 
     def index_past_incident(
         self,

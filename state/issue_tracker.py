@@ -13,9 +13,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional
 
-import psycopg2
 from psycopg2.extras import Json
 
+from config.db import get_conn
 from config.llm_client import llm_client
 from config.settings import CONFIG
 
@@ -128,12 +128,9 @@ class IssueTracker:
     # Persistence
     # =====================================================================
 
-    def _get_conn(self):
-        return psycopg2.connect(CONFIG["POSTGRES_DSN"])
-
     def _load_from_db(self):
         try:
-            with self._get_conn() as conn:
+            with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT issue_data FROM issue_registry "
@@ -145,19 +142,19 @@ class IssueTracker:
                         self.issues[issue.issue_id] = issue
 
                     cur.execute(
-                        "SELECT active_issue_id FROM issue_tracker_state "
+                        "SELECT active_issue_id FROM conversation_state "
                         "WHERE conversation_id = %s",
                         (self.conversation_id,),
                     )
                     row = cur.fetchone()
-                    if row:
+                    if row and row[0]:
                         self.active_issue_id = row[0]
         except Exception as e:
             logger.warning(f"Could not load issue tracker state: {e}")
 
     def _persist_issue(self, issue: Issue):
         try:
-            with self._get_conn() as conn:
+            with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO issue_registry
@@ -178,10 +175,10 @@ class IssueTracker:
 
     def _persist_active_id(self):
         try:
-            with self._get_conn() as conn:
+            with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO issue_tracker_state
+                        INSERT INTO conversation_state
                             (conversation_id, active_issue_id, updated_at)
                         VALUES (%s, %s, NOW())
                         ON CONFLICT (conversation_id)

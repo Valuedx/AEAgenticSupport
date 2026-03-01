@@ -329,13 +329,22 @@ Expected output:
 Connecting to: postgresql://ops_agent_user:***@db-host:5432/ops_agent
 Database setup complete.
 Tables created:
-  - rag_documents (RAG vector store)
-  - issue_registry (issue tracking)
-  - issue_tracker_state (active issue pointer)
-  - conversation_state (session persistence)
+  - `rag_documents` (RAG vector store)
+  - `issue_registry` (issue tracking)
+  - `conversation_state` (session persistence + active issue pointer)
 ```
 
-### 4.3 Verify tables
+### 4.4 Migration (for existing deployments)
+
+If you are upgrading from a version before the database optimization (which merged `issue_tracker_state` into `conversation_state`), run the migration script:
+
+```bash
+python setup_db.py --migrate
+```
+
+This will move the `active_issue_id` data and drop the redundant table.
+
+### 4.5 Verify tables
 
 ```bash
 psql -h <db-host> -U ops_agent_user -d ops_agent -c "\dt"
@@ -349,11 +358,10 @@ Expected:
 --------+-----------------------+-------+----------------
  public | conversation_state    | table | ops_agent_user
  public | issue_registry        | table | ops_agent_user
- public | issue_tracker_state   | table | ops_agent_user
  public | rag_documents         | table | ops_agent_user
 ```
 
-### 4.4 Django migrations (for the Extension layer)
+### 4.6 Django migrations (for the Extension layer)
 
 The `custom/models.py` Django models (ProcessedMessage, Case, Approval, etc.) are migrated by AI Studio's built-in migration system when you upload the Extension zip. No manual migration is needed for those tables.
 
@@ -904,8 +912,7 @@ custom/functions/python/support_agent.py :: handle_support_turn()
 PostgreSQL (ops_agent database)
 ├── rag_documents          ← RAG vector store (KB, SOPs, tools, incidents)
 ├── issue_registry         ← Per-issue state (survives restarts)
-├── issue_tracker_state    ← Active issue pointer per conversation
-├── conversation_state     ← Session state (messages, findings, tool logs)
+├── conversation_state     ← Session state (messages, findings, tool logs, active issue)
 │
 ├── (Django-managed, created by AI Studio):
 ├── custom_processedmessage  ← Message deduplication
