@@ -492,18 +492,16 @@ class Orchestrator:
         """Get the set of tool names currently in the Vertex Tool object."""
         names: set[str] = set()
         for tool_obj in vertex_tools:
-            for decl in getattr(tool_obj, "_raw_tool", {}).get(
-                "function_declarations", []
-            ):
-                names.add(decl.get("name", ""))
             if hasattr(tool_obj, "function_declarations"):
                 for decl in tool_obj.function_declarations:
                     if hasattr(decl, "name"):
                         names.add(decl.name)
-                    elif hasattr(decl, "_raw_function_declaration"):
-                        names.add(
-                            decl._raw_function_declaration.get("name", "")
-                        )
+                    elif isinstance(decl, dict):
+                        names.add(decl.get("name", ""))
+            raw = getattr(tool_obj, "_raw_tool", None)
+            if raw and isinstance(raw, dict):
+                for decl in raw.get("function_declarations", []):
+                    names.add(decl.get("name", ""))
         names.discard("")
         return names
 

@@ -129,6 +129,15 @@ def webchat_page():
         return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
+@app.route("/aistudio-webchat", methods=["GET"])
+def aistudio_webchat_page():
+    html_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "aistudio_webchat.html"
+    )
+    with open(html_path, "r", encoding="utf-8") as f:
+        return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     port = int(os.environ.get("AGENT_SERVER_PORT", 5050))

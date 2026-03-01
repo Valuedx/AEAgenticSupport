@@ -2,113 +2,27 @@
 Thin proxy hook for AI Studio Cognibot.
 Routes incoming webchat/Teams messages to the standalone agent server
 via HTTP, keeping the Cognibot Python 3.9 environment dependency-free.
-
-Uses the /chat/stream SSE endpoint to receive progress updates and
-sends them as intermediate messages to the user (Teams/webchat)
-before delivering the final response.
 """
+import asyncio
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
 from aistudiobot.hooks import ChatbotHooks
+from botbuilder.dialogs import ComponentDialog, WaterfallDialog, WaterfallStepContext
 
 logger = logging.getLogger(__name__)
 
-AGENT_SERVER_URL = os.environ.get(
-    "AGENT_SERVER_URL", "http://localhost:5050"
-)
+AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://localhost:5050")
 AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "120"))
-PROGRESS_ENABLED = os.environ.get("AGENT_PROGRESS_ENABLED", "true").lower() == "true"
 
-
-def _activity_to_dict(activity):
-    if isinstance(activity, dict):
-        return activity
-    result = {}
-    for attr in ("text", "id"):
-        result[attr] = getattr(activity, attr, None) or ""
-    conv = getattr(activity, "conversation", None)
-    result["conversation"] = {"id": getattr(conv, "id", "") or ""} if conv else {}
-    frm = getattr(activity, "from_property", None) or getattr(activity, "from", None)
-    result["from"] = {"id": getattr(frm, "id", "") or ""} if frm else {}
-    return result
-
-
-def _send_proactive_message(turn_context, text):
-    """Send an intermediate message back to the user via Cognibot's turn context.
-
-    This works for both webchat and Teams channels.  The turn_context
-    is the Bot Framework TurnContext object passed to the hook.
-    """
-    try:
-        import asyncio
-        from botbuilder.core import TurnContext
-        from botbuilder.schema import Activity, ActivityTypes
-
-        if not isinstance(turn_context, TurnContext):
-            return
-
-        activity = Activity(
-            type=ActivityTypes.message,
-            text=text,
-        )
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(turn_context.send_activity(activity))
-        else:
-            loop.run_until_complete(turn_context.send_activity(activity))
-    except Exception as e:
-        logger.debug(f"Proactive message send skipped: {e}")
-
-
-def _call_agent_streaming(text, conv_id, user_id, turn_context=None):
-    """Call the agent server's SSE endpoint and stream progress to the user."""
-    try:
-        resp = requests.post(
-            f"{AGENT_SERVER_URL}/chat/stream",
-            json={
-                "message": text,
-                "session_id": conv_id,
-                "user_id": user_id,
-                "user_role": "technical",
-            },
-            timeout=AGENT_TIMEOUT,
-            stream=True,
-        )
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.error(f"Agent server call failed: {e}")
-        return "Sorry, the agent is temporarily unavailable. Please try again."
-
-    final_response = "No response from agent."
-    event_type = ""
-
-    for line in resp.iter_lines(decode_unicode=True):
-        if not line:
-            continue
-        if line.startswith("event: "):
-            event_type = line[7:].strip()
-        elif line.startswith("data: "):
-            raw = line[6:]
-            try:
-                parsed = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                parsed = raw
-
-            if event_type == "progress" and PROGRESS_ENABLED and turn_context:
-                _send_proactive_message(turn_context, parsed)
-            elif event_type == "done":
-                final_response = parsed
-            event_type = ""
-
-    return final_response
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 def _call_agent_simple(text, conv_id, user_id):
-    """Non-streaming fallback for when SSE is not needed."""
     try:
         resp = requests.post(
             f"{AGENT_SERVER_URL}/chat",
@@ -124,15 +38,91 @@ def _call_agent_simple(text, conv_id, user_id):
         data = resp.json()
         return data.get("response", "No response from agent.")
     except requests.RequestException as e:
-        logger.error(f"Agent server call failed: {e}")
+        logger.error("Agent server call failed: %s", e)
         return "Sorry, the agent is temporarily unavailable. Please try again."
 
 
+class AgentProxyDialog(ComponentDialog):
+    """Dialog that calls the agent server and sends the response.
+
+    root_dialog_hook returns this class so the Cognibot dialog engine
+    treats it as a valid dialog (bypassing 'No skill available').
+    The actual agent HTTP call and reply happen here, inside the dialog
+    pipeline, so the response correctly flows through the DirectLine
+    WebSocket channel back to the user.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__("AgentProxyDialog")
+        self.add_dialog(
+            WaterfallDialog("AgentProxyWaterfall", [self._call_agent_step])
+        )
+        self.initial_dialog_id = "AgentProxyWaterfall"
+
+    @staticmethod
+    async def _call_agent_step(step_context: WaterfallStepContext):
+        turn_context = step_context.context
+        text = ""
+        try:
+            text = (turn_context.activity.text or "").strip()
+        except Exception:
+            pass
+
+        if not text:
+            await turn_context.send_activity("I didn't catch that. Could you try again?")
+            return await step_context.cancel_all_dialogs()
+
+        conv_id = "webchat-default"
+        user_id = "webchat_user"
+        try:
+            conv_id = turn_context.activity.conversation.id or conv_id
+        except Exception:
+            pass
+        try:
+            frm = getattr(turn_context.activity, "from_property", None)
+            if frm is None:
+                frm = getattr(turn_context.activity, "from_", None)
+            if frm:
+                user_id = frm.id or user_id
+        except Exception:
+            pass
+
+        logger.info("AgentProxyDialog: calling agent for '%s'", text[:80])
+        loop = asyncio.get_event_loop()
+        try:
+            reply_text = await loop.run_in_executor(
+                _executor, _call_agent_simple, text, conv_id, user_id
+            )
+        except Exception as e:
+            logger.error("AgentProxyDialog agent call failed: %s", e)
+            reply_text = "Sorry, the agent is temporarily unavailable."
+
+        logger.info("AgentProxyDialog: sending reply (%d chars)", len(reply_text))
+        await turn_context.send_activity(reply_text)
+        return await step_context.cancel_all_dialogs()
+
+
 class CustomChatbotHooks(ChatbotHooks):
-    export_dialogs = []
+    export_dialogs = [AgentProxyDialog]
 
     async def root_dialog_hook(conv_state, user_state, turn_context):
-        return None
+        """Return AgentProxyDialog for all text messages.
+
+        The dialog itself will call the agent server and send the response,
+        ensuring it flows through the proper Bot Framework adapter pipeline
+        and reaches the client via DirectLine WebSocket.
+        """
+        text = ""
+        try:
+            text = (turn_context.activity.text or "").strip()
+        except Exception:
+            pass
+
+        if not text:
+            return None
+
+        logger.info("root_dialog_hook: routing '%s' to AgentProxyDialog", text[:80])
+        return AgentProxyDialog
 
     async def storecon_hook(turn_context):
         return None
@@ -148,31 +138,7 @@ class CustomChatbotHooks(ChatbotHooks):
         return None
 
     async def api_messages_hook(request, activity):
-        """
-        Proxy every incoming message to the standalone agent server.
-        Uses SSE streaming when progress is enabled to send intermediate
-        status updates to the user while the agent works.
-        """
-        act = _activity_to_dict(activity)
-        text = (act.get("text") or "").strip()
-        if not text:
-            return None
-
-        conv_id = (act.get("conversation", {}) or {}).get("id", "webchat-default")
-        user_id = (act.get("from", {}) or {}).get("id", "webchat_user")
-
-        turn_context = None
-        try:
-            turn_context = request._turn_context if hasattr(request, '_turn_context') else None
-        except Exception:
-            pass
-
-        if PROGRESS_ENABLED and turn_context:
-            reply_text = _call_agent_streaming(text, conv_id, user_id, turn_context)
-        else:
-            reply_text = _call_agent_simple(text, conv_id, user_id)
-
-        return {"type": "message", "text": reply_text}
+        return None
 
     async def api_reply_hook(request, body):
         return None

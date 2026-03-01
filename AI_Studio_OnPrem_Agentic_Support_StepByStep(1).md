@@ -1327,4 +1327,126 @@ custom/
 
 ---
 
-**Generated:** 2026-02-20 06:19:06 | **Last updated:** 2026-02-28
+---
+
+## 17) AI Studio Webchat — Local Development (Thin Proxy Pattern)
+
+For local development and testing with the full AI Studio Cognibot dialog engine (not just the standalone agent server), we use a **thin proxy pattern**: Cognibot's custom dialog forwards all messages to the standalone agent server via HTTP.
+
+### Architecture
+
+```
+Browser Webchat ──WebSocket──► Cognibot (Daphne :3978)
+                                  │
+                                  ▼
+                             RootDialog
+                                  │
+                                  ▼ root_dialog_hook()
+                             AgentProxyDialog
+                                  │
+                                  ▼ HTTP POST /chat
+                          Agent Server (:5050)
+                                  │
+                                  ▼
+                            Orchestrator
+                          (RAG, LLM, Tools)
+```
+
+### Required Changes to Cognibot
+
+Three files must be modified/created in the local Cognibot installation:
+
+**1. Default Config** (`aistudiobot/resources/cognibot_config_default.json`)
+
+Must include a default skill so `root_dialog_hook` is invoked. See `SETUP_GUIDE.md` Section 12.10 for the exact JSON.
+
+**2. ASGI Routing** (`common/asgi.py`)
+
+Create this file to override the compiled `.pyc` and add WebSocket support:
+
+```python
+import os
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "common.settings")
+import django
+django.setup()
+from webchat_channel.routing import application
+```
+
+**3. Custom Hooks** (`custom/custom_hooks.py`)
+
+```python
+import asyncio, logging, os, requests
+from concurrent.futures import ThreadPoolExecutor
+from aistudiobot.hooks import ChatbotHooks
+from botbuilder.dialogs import ComponentDialog, WaterfallDialog, WaterfallStepContext
+
+logger = logging.getLogger(__name__)
+AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://localhost:5050")
+AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "120"))
+_executor = ThreadPoolExecutor(max_workers=4)
+
+def _call_agent_simple(text, conv_id, user_id):
+    try:
+        resp = requests.post(
+            f"{AGENT_SERVER_URL}/chat",
+            json={"message": text, "session_id": conv_id,
+                  "user_id": user_id, "user_role": "technical"},
+            timeout=AGENT_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "No response from agent.")
+    except requests.RequestException as e:
+        logger.error("Agent server call failed: %s", e)
+        return "Sorry, the agent is temporarily unavailable."
+
+
+class AgentProxyDialog(ComponentDialog):
+    def __init__(self, *args, **kwargs):
+        super().__init__("AgentProxyDialog")
+        self.add_dialog(WaterfallDialog("AgentProxyWaterfall", [self._call_agent_step]))
+        self.initial_dialog_id = "AgentProxyWaterfall"
+
+    @staticmethod
+    async def _call_agent_step(step_context: WaterfallStepContext):
+        turn_context = step_context.context
+        text = (getattr(turn_context.activity, "text", "") or "").strip()
+        if not text:
+            await turn_context.send_activity("I didn't catch that.")
+            return await step_context.cancel_all_dialogs()
+
+        conv_id = getattr(turn_context.activity.conversation, "id", "webchat-default")
+        frm = getattr(turn_context.activity, "from_property", None)
+        user_id = frm.id if frm else "webchat_user"
+
+        loop = asyncio.get_event_loop()
+        reply_text = await loop.run_in_executor(
+            _executor, _call_agent_simple, text, conv_id, user_id
+        )
+        await turn_context.send_activity(reply_text)
+        return await step_context.cancel_all_dialogs()
+
+
+class CustomChatbotHooks(ChatbotHooks):
+    export_dialogs = [AgentProxyDialog]
+
+    async def root_dialog_hook(conv_state, user_state, turn_context):
+        text = (getattr(turn_context.activity, "text", "") or "").strip()
+        if not text:
+            return None
+        return AgentProxyDialog
+```
+
+### Understanding the Internal Flow
+
+For a detailed explanation of how Cognibot's `RootDialog` processes messages, how the config loading works (signed envelope vs. default fallback), how the DirectLine/WebSocket protocol delivers responses, and common failure modes, see **SETUP_GUIDE.md Section 12 — Cognibot Integration Architecture (Deep Dive)**.
+
+Key things to remember:
+- `root_dialog_hook` is only reached if a skill (with `is_default: true`) exists in the config
+- The hook must return a `Dialog` class (not an instance) that's also in `export_dialogs`
+- `cancel_all_dialogs()` in the waterfall step prevents Cognibot from showing fallback messages
+- Bot responses flow through `send_activity()` → adapter → DirectLine reply endpoint → WebSocket `group_send` → browser
+- The HTTP POST that sends a user message returns immediately (no response body); the actual bot reply arrives asynchronously via WebSocket
+
+---
+
+**Generated:** 2026-02-20 06:19:06 | **Last updated:** 2026-03-01

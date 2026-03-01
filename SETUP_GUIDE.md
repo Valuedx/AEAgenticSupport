@@ -17,6 +17,7 @@ Complete step-by-step guide to deploy the Agentic Support Assistant on **Automat
 9. [Go-Live Checklist](#9-go-live-checklist)
 10. [Troubleshooting](#10-troubleshooting)
 11. [Architecture Reference](#11-architecture-reference)
+12. [Cognibot Integration Architecture (Deep Dive)](#12-cognibot-integration-architecture-deep-dive)
 
 ---
 
@@ -730,6 +731,52 @@ When running AI Studio locally (e.g., for integration testing with the full Cogn
 
 > **Windows note:** In all three `.env` files, uncomment `SCHEDULER_LOCK_TYPE=Database` — the default file-based locking does not work reliably on Windows.
 
+### 8.9 Starting the AI Studio Local Stack (Webchat via Cognibot)
+
+To test the full AI Studio Cognibot → Agent pipeline locally (not just the standalone agent server), follow these steps. This runs the real Cognibot dialog engine with DirectLine/WebSocket webchat.
+
+**Prerequisites:**
+- AI Studio packages extracted at `AI_Studio_Local/aistudio-packages/Chatbot-Webservice/`
+- PostgreSQL running locally (Cognibot uses its own `cognibot_db`)
+- The three AI Studio `.env` files configured (see Section 8.7)
+- AI Studio license file placed in `AI_Studio_Local/aistudio-packages/Chatbot-Webservice/CBWS_HOME/license/`
+
+**Step 1: Start the Agent Server**
+
+```bash
+python agent_server.py
+# Output: Agent server starting on http://localhost:5050
+```
+
+**Step 2: Start Cognibot (Daphne ASGI server)**
+
+```bash
+cd AI_Studio_Local/aistudio-packages/Chatbot-Webservice/cognibot
+<python-path>/python.exe -m daphne -b 0.0.0.0 -p 3978 common.asgi:application
+# Output: Listening on TCP address 0.0.0.0:3978
+```
+
+> **Note:** The `python` used here is the one bundled with AI Studio (Python 3.9), not your system Python 3.12.
+
+**Step 3: Open the Webchat**
+
+Navigate to `http://localhost:5050/aistudio-webchat` in your browser. The webchat will:
+1. Create a DirectLine conversation via `POST /v3/directline/conversations`
+2. Open a WebSocket to `ws://localhost:3978/v3/directline/<conversation_id>`
+3. Send messages via `POST /v3/directline/conversations/<id>/activities`
+4. Receive bot responses via the WebSocket
+
+**Troubleshooting the local stack:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "No skill available" message | Default config has no skills; `root_dialog_hook` is never reached | See Section 12.10 — the default config must include an `ops_agent` skill |
+| WebSocket errors: "Django can only handle ASGI/HTTP" | The ASGI app doesn't route WebSocket connections | See Section 12.7 — `common/asgi.py` must import from `webchat_channel.routing` |
+| Config loads as default despite edits to `cognibot_config.json` | The main config expects a signed envelope (`cognibot_json` + `signature` + `keygen` + `key`); unsigned configs always fail | Edit `cognibot_config_default.json` instead (see Section 12.1) |
+| `AgentProxyDialog` not executing | The dialog class is not registered in `export_dialogs`, or the class name doesn't match | Ensure `export_dialogs = [AgentProxyDialog]` and the dialog's init passes `"AgentProxyDialog"` to `super().__init__()` |
+| Agent called but response not in webchat | WebSocket not connected, or `send_activity` not routing through adapter | Check browser console for WebSocket messages; the response flows through Django Channels `group_send` |
+| Stale Python code after edits | `.pyc` cache not cleared | Delete `custom/__pycache__/` and restart Cognibot |
+
 ### 8.8 Verify audit logging
 
 ```bash
@@ -905,5 +952,304 @@ The agent sends real-time progress messages to users during long investigations 
 
 ---
 
-**Document version:** 2.0
-**Last updated:** 2026-02-28
+## 12. Cognibot Integration Architecture (Deep Dive)
+
+This section documents the internal workings of AI Studio's Cognibot discovered through bytecode analysis of the compiled (`.pyc`) modules. This knowledge is critical for debugging integration issues.
+
+### 12.1 Configuration Loading
+
+Cognibot loads config in two stages:
+
+1. **Primary config** (`cognibot-home/config/cognibot_config.json`): Expected to be a **signed envelope** with this structure:
+   ```json
+   {
+     "cognibot_json": "<JSON string of BotConfig>",
+     "signature": "<digital signature>",
+     "keygen": "<key generation data>",
+     "key": "<encryption key>"
+   }
+   ```
+   All four fields are required (`CognibotJsonEnvelope` dataclass). This is what AI Studio pushes when you deploy a chatbot config from the UI. **You cannot create this locally** without the signing mechanism.
+
+2. **Fallback default config** (`aistudiobot/resources/cognibot_config_default.json`): When the primary config fails to load (always happens locally since we can't sign it), Cognibot falls back to this plain JSON config. **This is the file you must edit for local development.**
+
+**Key model: `BotConfig`**
+```
+BotConfig:
+  version: str
+  cognibot_settings: CognibotSettings
+  skills: list[Skill]         ← CRITICAL: must have at least 1 skill
+  connections: list[Connection]
+  credentials: list[Credential]
+  nlu_settings: list[AIStudioNLU]
+  km_settings: list[AIStudioKM]
+  schedules: list[Schedule]
+```
+
+**Key model: `Skill`**
+```
+Skill:
+  name: str                    ← Used as skill identifier
+  is_default: bool = False     ← Set to true for the default skill
+  nlu_enabled: bool = False
+  km_enabled: bool = False
+  welcome_message: WelcomeMessage  ← Set enabled=false to skip welcome
+  dialog_designer: DialogDesigner  ← Can be empty {dialogs:[], triggers:[]}
+  custom_trigger: CustomTrigger
+  handoff: Handoff
+  feedback: Feedback
+  nlu: list
+  km: list
+```
+
+The `default_skill` property on the cognibot object is computed from the skills list — it's the `name` of the first skill with `is_default=True`.
+
+### 12.2 RootDialog — The Critical Code Path
+
+The `RootDialog` is a `WaterfallDialog` with two steps: `auth_step` → `root_step`.
+
+**`auth_step`:** Checks if OAuth is configured (`settings.MS_OAUTH_CONNECTION_NAME`). For local dev (no OAuth), it calls `step_context.next()` to skip directly to `root_step`.
+
+**`root_step` — simplified pseudocode** (from bytecode at offsets 0-2898):
+
+```python
+async def root_step(self, step_context):
+    # 1. Get conversation/user state
+    aistudio_conv_state = await AIStudioConvState.get(self.conv_state, step_context.context)
+    aistudio_user_state = await AIStudioUserState.get(self.user_state, step_context.context)
+
+    # 2. Check for pre-set AIStudio dialog (from button clicks, etc.)
+    if self.aistudio_dialog_name or conv_params.get(ROOT_AISTUDIO_DIALOG):
+        return await step_context.begin_dialog(AIStudioDialog.__name__, ...)
+
+    # 3. Check OAuth (skipped locally)
+    if settings.MS_OAUTH_CONNECTION_NAME and adapter.settings.app_id:
+        # ... OAuth + handoff logic ...
+        return  # <-- returns before reaching hook
+
+    # 4. Get user input
+    user_input = step_context.context.activity.text or ""
+
+    # 5. i18n language change trigger
+    if i18n.enabled and user_input.lower() in i18n.triggers:
+        return await step_context.begin_dialog(ChangeLanguageDialog.__name__, ...)
+
+    # 6. Skill selection trigger (multi-skill)
+    if user_input.lower() in skill_settings.triggers and len(skills) > 1:
+        return await step_context.begin_dialog(SkillDialog.__name__, ...)
+
+    # 7. ★ SKILL RESOLUTION ★ — This is where things go wrong without config
+    self.skill = conv_params.get(Constants.SKILL)
+
+    if not self.skill:
+        default_skill = self.cognibot.default_skill
+
+        if default_skill is not None:
+            # Set the default skill
+            self.skill = default_skill
+            aistudio_conv_state.add_param(SKILL, default_skill)
+            DBHelper.update_conversation_skill(...)
+
+            # Show welcome message (if configured)
+            welcome_result = BotHelper.show_skill_welcome_message(...)
+            if welcome_result and welcome_result in skill_dialog_map:
+                return await step_context.begin_dialog(AIStudioDialog.__name__, ...)
+            # If no welcome → falls through to hook ✓
+
+        elif len(skills) > 1:
+            return await step_context.begin_dialog(SkillDialog.__name__, ...)
+
+        else:
+            # ★ THE PROBLEM: No skills, no default → sends "No skill available"
+            message = i18n_manager.get_str(language, 'no_skills_message')
+            await log_and_send_activity(step_context.context, message)
+            return await step_context.end_dialog()  # ← RETURNS HERE, hook never reached!
+
+    # 8. ★ HOOK INVOCATION ★ (offset 1448-1524)
+    from custom.custom_hooks import CustomChatbotHooks
+    custom_dialog = await CustomChatbotHooks.root_dialog_hook(
+        self.conv_state, self.user_state, step_context.context
+    )
+
+    if custom_dialog and issubclass(custom_dialog, Dialog):
+        return await step_context.begin_dialog(custom_dialog.__name__, step_context.options)
+    elif custom_dialog:
+        logger.exception(f"Failed to execute custom dialog {custom_dialog} - {type(custom_dialog)}")
+
+    # 9. Trigger matching, NLU, KM search...
+    # 10. "trigger_match_fail_message" (catch-all)
+```
+
+**Key takeaway:** `root_dialog_hook` at offset 1448 is only reached if `self.skill` is set. Without a configured skill, the code returns at step 7 with "No skill available".
+
+### 12.3 How `root_dialog_hook` Works
+
+**Signature:** `async def root_dialog_hook(conv_state, user_state, turn_context)`
+
+Called as: `CustomChatbotHooks.root_dialog_hook(self.conv_state, self.user_state, step_context.context)` (3 arguments; no `self` since it's on the class, not an instance).
+
+**Return value handling:**
+- If hook returns a **truthy value** that passes `issubclass(result, Dialog)`:
+  - Calls `step_context.begin_dialog(result.__name__, step_context.options)`
+  - The dialog must be registered via `export_dialogs` (see Section 12.4)
+- If hook returns a truthy value that is NOT a Dialog subclass:
+  - Logs error and falls through to trigger matching
+- If hook returns `None` / falsy:
+  - Falls through to trigger matching, NLU, KM search
+
+### 12.4 Custom Dialog Registration (`export_dialogs`)
+
+In `RootDialog.__init__`, custom dialogs are registered:
+
+```python
+from custom.custom_hooks import CustomChatbotHooks
+for dialog_cls in CustomChatbotHooks.export_dialogs:
+    if issubclass(dialog_cls, Dialog):
+        instance = dialog_cls(user_state, conv_state, cognibot)  # ← 3 args!
+        self.add_dialog(instance)
+```
+
+**Important:**
+- `export_dialogs` must contain **classes**, not instances
+- The class `__init__` must accept `*args, **kwargs` (RootDialog passes 3 positional args)
+- The dialog's `super().__init__("DialogName")` ID must match what `begin_dialog` looks up by `custom_dialog.__name__`
+- Example: `AgentProxyDialog.__name__` = `"AgentProxyDialog"`, and `super().__init__("AgentProxyDialog")`
+
+### 12.5 The `AgentProxyDialog` Pattern
+
+Our custom dialog (`AgentProxyDialog`) bridges Cognibot to the standalone agent server:
+
+```python
+class AgentProxyDialog(ComponentDialog):
+    def __init__(self, *args, **kwargs):      # Accept RootDialog's 3 args
+        super().__init__("AgentProxyDialog")   # Dialog ID = class name
+        self.add_dialog(WaterfallDialog("AgentProxyWaterfall", [self._call_agent_step]))
+        self.initial_dialog_id = "AgentProxyWaterfall"
+
+    @staticmethod
+    async def _call_agent_step(step_context):
+        # 1. Extract text, conversation_id, user_id from turn_context
+        # 2. HTTP POST to agent_server:5050/chat
+        # 3. send_activity(reply_text)
+        # 4. cancel_all_dialogs() — prevents RootDialog from continuing
+```
+
+**Why `cancel_all_dialogs()`?** After the agent sends its response, we must prevent the RootDialog waterfall from continuing (which would trigger "No skill available" or other fallback messages). `cancel_all_dialogs()` halts the entire dialog stack.
+
+### 12.6 DirectLine / WebSocket Message Flow
+
+```
+Browser (webchat)                    Cognibot (port 3978)              Agent Server (5050)
+      │                                      │                                │
+      │  POST /v3/directline/conversations   │                                │
+      │────────────────────────────────────►  │                                │
+      │  ◄── {conversationId}                │                                │
+      │                                      │                                │
+      │  WS /v3/directline/<conv_id>         │                                │
+      │════════════════════════════════════►  │ (WebChatConsumer joins group)  │
+      │                                      │                                │
+      │  POST .../activities {message}       │                                │
+      │────────────────────────────────────►  │                                │
+      │                                      │                                │
+      │     ┌─ activities view ──────────────┤                                │
+      │     │  1. send_activity_over_ws(     │                                │
+      │     │       conv_id, user_msg_echo)  │                                │
+      │  ◄══│══ WS: user message echo        │                                │
+      │     │                                │                                │
+      │     │  2. send_message_to_webservice │                                │
+      │     │     → messages(payload)        │                                │
+      │     │       → adapter.process_activity│                               │
+      │     │         → bot.on_turn           │                                │
+      │     │           → RootDialog          │                                │
+      │     │             → AgentProxyDialog   │                               │
+      │     │               → HTTP POST /chat ─┼──────────────────────────────►│
+      │     │               ◄── agent response ┼◄─────────────────────────────│
+      │     │               → send_activity    │                               │
+      │     │                 → adapter callback│                              │
+      │     │                   → POST /v3/.../activities (reply)              │
+      │     │                     → send_activity_over_ws(conv_id, reply)      │
+      │  ◄══│══ WS: bot reply                 │                               │
+      │     └─────────────────────────────────┤                                │
+```
+
+**Key insight:** The bot's response goes through the adapter's `send_activity` callback, which POSTs back to the DirectLine `/activities` reply endpoint. That endpoint calls `send_activity_over_websocket()` which uses Django Channels' `group_send` to push the activity to the WebSocket consumer for that conversation.
+
+### 12.7 ASGI / WebSocket Routing
+
+The compiled `common/asgi.pyc` uses plain `get_asgi_application()` (HTTP only). WebSocket support requires Django Channels' `ProtocolTypeRouter`.
+
+**Fix:** Create `common/asgi.py` (source file overrides `.pyc`):
+
+```python
+import os
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "common.settings")
+from django.core.asgi import get_asgi_application
+django_asgi_app = get_asgi_application()    # Must come first (breaks circular import otherwise)
+from webchat_channel.routing import application  # ProtocolTypeRouter with WS routes
+```
+
+The `webchat_channel.routing.application` provides:
+- **HTTP** → Django ASGI handler (all REST endpoints)
+- **WebSocket** → `WebChatConsumer` at URL pattern `v3/directline/(?P<conversation_id>[\w-]+)`
+
+Settings involved:
+```python
+ASGI_APPLICATION = "webchat_channel.routing.application"
+CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
+INSTALLED_APPS = [..., "channels", "channels_redis", "webchat_channel"]
+```
+
+### 12.8 Authentication (Local Dev)
+
+Cognibot's DirectLine uses `CLIENT_SECRET` (set in the Cognibot `.env`). For local dev, set it to `secret`:
+
+```env
+CLIENT_SECRET=secret
+```
+
+The webchat sends `Authorization: Bearer secret` with all requests. Cognibot's token validation tries to decode it as a JWT — this fails (it's not a JWT), but the exception handler allows it through for the `emulator`/local channel. This is expected and produces a non-blocking `DecodeError: Not enough segments` warning in logs.
+
+### 12.9 Summary of Required Files for Local Webchat
+
+| File | What It Does |
+|---|---|
+| `cognibot_config_default.json` | Must contain a skill with `is_default: true` so `root_dialog_hook` is reached |
+| `common/asgi.py` | Overrides compiled `.pyc` to add WebSocket routing via `ProtocolTypeRouter` |
+| `custom/custom_hooks.py` | Defines `AgentProxyDialog` and `CustomChatbotHooks` with `root_dialog_hook` and `export_dialogs` |
+| `aistudio_webchat.html` | Browser webchat client (served by agent server at `/aistudio-webchat`) |
+
+### 12.10 Minimal Skill Configuration
+
+Add this to `cognibot_config_default.json` to make `root_dialog_hook` reachable:
+
+```json
+{
+  "skills": [
+    {
+      "name": "ops_agent",
+      "is_default": true,
+      "nlu": [],
+      "km": [],
+      "dialog_designer": { "dialogs": [], "triggers": [] },
+      "nlu_enabled": false,
+      "km_enabled": false,
+      "welcome_message": { "type": "", "message": "", "enabled": false },
+      "custom_trigger": { "enabled": false, "function": "", "order": null },
+      "handoff": { "agents": [], "enabled": false, "triggers": [] },
+      "feedback": { "enabled": false, "dialog": "", "rating": "", "feedback": "" }
+    }
+  ]
+}
+```
+
+This ensures:
+1. `cognibot.default_skill = "ops_agent"` (not None)
+2. `self.skill` gets set on first message
+3. `welcome_message.enabled = false` → no welcome dialog, falls through
+4. Code reaches offset 1448 → `root_dialog_hook` is called
+5. Hook returns `AgentProxyDialog` → `begin_dialog("AgentProxyDialog")`
+
+---
+
+**Document version:** 3.0
+**Last updated:** 2026-03-01
