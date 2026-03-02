@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -58,6 +59,36 @@ def _get_gateway():
     if _gateway is None:
         _gateway = _get_orchestrator()
     return _gateway
+
+
+def _extract_user_role(raw_activity: dict) -> str:
+    role = str(
+        raw_activity.get("user_type")
+        or raw_activity.get("user_role")
+        or ""
+    ).strip().lower()
+
+    if not role:
+        channel_data = (
+            raw_activity.get("channelData")
+            or raw_activity.get("channel_data")
+            or {}
+        )
+        if isinstance(channel_data, dict):
+            role = str(channel_data.get("user_role", "")).strip().lower()
+
+    return "business" if role == "business" else "technical"
+
+
+def _classify_plan_approval_intent(user_text: str) -> str:
+    text = (user_text or "").strip().lower()
+    if not text:
+        return "other"
+    if re.search(r"\b(approve|approved|go ahead|proceed|yes|sure|do it)\b", text):
+        return "approve"
+    if re.search(r"\b(reject|deny|decline|nope|cancel|abort|do not|don't)\b", text):
+        return "reject"
+    return "other"
 
 
 def _sync_state_from_gateway(gw, thread_id: str, case: Case) -> None:
@@ -335,7 +366,7 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
     Routes to agentic orchestrator or plan-execute mode.
     """
     _user_id = (raw_activity.get("from", {}) or {}).get("id", "")
-    _user_type = raw_activity.get("user_type", "technical")
+    _user_type = _extract_user_role(raw_activity)
 
     # Populate user_type on the active case if not yet set
     cs = ConversationState.objects.filter(thread_id=thread_id).first()
@@ -349,6 +380,22 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
         gw = _get_gateway()
         if gw:
             case = _get_or_create_case(thread_id)
+            session = gw.get_or_create_session(
+                thread_id, _user_id, _user_type
+            )
+
+            if case.state == "WAITING_APPROVAL":
+                pending = Approval.objects.filter(
+                    case_id=case.case_id, status="PENDING",
+                ).order_by("-created_at").first()
+                if (
+                    pending
+                    and pending.requested_to
+                    and session.pending_action
+                ):
+                    action = dict(session.pending_action)
+                    action["authorized_users"] = list(pending.requested_to)
+                    session.pending_action = action
 
             response = gw.process_message(
                 conversation_id=thread_id,
@@ -366,14 +413,31 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
     case = _get_or_create_case(thread_id)
     _ensure_ticket(client, case)
 
-    if (user_text.strip().upper() in {"APPROVE", "REJECT"}
-            and case.state == "WAITING_APPROVAL"):
-        decision = user_text.strip().upper()
+    if case.state == "WAITING_APPROVAL":
+        intent = _classify_plan_approval_intent(user_text)
+        if intent == "other":
+            return make_text_reply(
+                "A risky action is pending approval. Please reply in natural "
+                "language to approve or reject it."
+            )
+
+        decision = "APPROVE" if intent == "approve" else "REJECT"
         appr = Approval.objects.filter(
             case_id=case.case_id, status="PENDING",
         ).order_by("-created_at").first()
 
         if appr:
+            if (
+                decision == "APPROVE"
+                and _user_id
+                and appr.requested_to
+                and _user_id not in appr.requested_to
+            ):
+                return make_text_reply(
+                    "You are not authorized to approve this action. "
+                    f"Authorized reviewers: {', '.join(appr.requested_to)}"
+                )
+
             appr.status = "APPROVED" if decision == "APPROVE" else "REJECTED"
             appr.decided_by = (
                 raw_activity.get("from", {}) or {}

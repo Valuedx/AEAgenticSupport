@@ -1,3 +1,12 @@
+> **Documentation Update (2026-03-02)**  
+> Patch release notes included in this version:
+> - Fixed circular import initialization in `agents` and `gateway` packages.
+> - Fixed approval and protected-workflow enforcement logic.
+> - Fixed tool result success/error propagation across execution paths.
+> - Improved busy-turn intent routing and queued message handling.
+> - Added cross-channel persona propagation (`business` and `technical`) and semantic approval handling.
+> - Validation status: `pytest -q tests` passed (`31 passed`).
+>
 ## AutomationEdge Agentic Support — Technical Blueprint
 
 **Version:** 1.0  
@@ -257,4 +266,5 @@ For each routed message:
   - Teams → Azure Bot → Cognibot (Extension hooks) → Agent logic → AE APIs/DB/RAG → Cognibot → Teams.
 
 This blueprint is intended as the single technical reference for architects and senior engineers; implementation details and step-by-step instructions remain in `SETUP_GUIDE.md` and the implementation guides.
+
 

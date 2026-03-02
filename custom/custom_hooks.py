@@ -11,6 +11,7 @@ Implements the AI Studio Cognibot hook contract:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 
 from asgiref.sync import sync_to_async
@@ -43,7 +44,18 @@ from custom.helpers.issue_classifier import (
 def _activity_to_dict(activity) -> dict:
     """Normalize a Bot Framework Activity (object or dict) to a plain dict."""
     if isinstance(activity, dict):
-        return activity
+        result = dict(activity)
+        if not result.get("user_type"):
+            channel_data = (
+                result.get("channelData")
+                or result.get("channel_data")
+                or {}
+            )
+            if isinstance(channel_data, dict):
+                role = str(channel_data.get("user_role", "")).strip().lower()
+                if role in {"business", "technical"}:
+                    result["user_type"] = role
+        return result
     result = {}
     for attr in ("text", "id"):
         result[attr] = getattr(activity, attr, None) or ""
@@ -79,6 +91,28 @@ def _is_smalltalk(text: str) -> bool:
         t in {"hi", "hello", "hey", "thanks", "thank you", "ok"}
         or t.startswith(("hi ", "hello ", "hey "))
     )
+
+
+def _classify_approval_intent(text: str) -> str:
+    msg = (text or "").strip().lower()
+    if not msg:
+        return "other"
+
+    if re.search(r"\b(cancel|never mind|abort|forget it)\b", msg):
+        return "cancel"
+
+    if re.search(
+        r"\b(reject|deny|decline|nope|don'?t do|do not|not now)\b", msg
+    ):
+        return "reject"
+
+    if re.search(
+        r"\b(approve|approved|go ahead|proceed|yes|sure|do it|run it)\b",
+        msg,
+    ):
+        return "approve"
+
+    return "other"
 
 
 # ── Synchronous processing core (runs inside sync_to_async) ──
@@ -123,39 +157,44 @@ def _process_message_sync(activity_dict: dict):
             ).first()
 
         # ── Approval with authorization check ──
-        if (text.strip().upper() in {"APPROVE", "REJECT"}
-                and active_case
-                and active_case.state == "WAITING_APPROVAL"):
+        if active_case and active_case.state == "WAITING_APPROVAL":
             appr = Approval.objects.filter(
                 case_id=active_case.case_id, status="PENDING",
             ).order_by("-created_at").first()
 
             if appr:
-                if (user_id and appr.requested_to
-                        and user_id not in appr.requested_to):
-                    return make_text_reply(
-                        "You are not authorized to approve/reject "
-                        "this action. Authorized reviewers: "
-                        f"{', '.join(appr.requested_to)}"
+                approval_intent = _classify_approval_intent(text)
+
+                if approval_intent == "approve":
+                    if (user_id and appr.requested_to
+                            and user_id not in appr.requested_to):
+                        return make_text_reply(
+                            "You are not authorized to approve/reject "
+                            "this action. Authorized reviewers: "
+                            f"{', '.join(appr.requested_to)}"
+                        )
+                    appr.status = "APPROVED"
+                    appr.decided_by = user_id
+                    appr.decided_at = timezone.now()
+                    appr.save()
+                    return handle_support_turn(
+                        thread_id=thread_id,
+                        teams_message_id=msg_id,
+                        user_text=text,
+                        raw_activity=activity_dict,
                     )
-                is_approve = text.strip().upper() == "APPROVE"
-                appr.status = "APPROVED" if is_approve else "REJECTED"
-                appr.decided_by = user_id
-                appr.decided_at = timezone.now()
-                appr.save()
-                if not is_approve:
+
+                if approval_intent in {"reject", "cancel"}:
+                    appr.status = "REJECTED"
+                    appr.decided_by = user_id
+                    appr.decided_at = timezone.now()
+                    appr.save()
                     active_case.state = "PLANNING"
                     active_case.updated_at = timezone.now()
                     active_case.save()
                     return make_text_reply(
                         "Action rejected. How would you like to proceed?"
                     )
-                return handle_support_turn(
-                    thread_id=thread_id,
-                    teams_message_id=msg_id,
-                    user_text=text,
-                    raw_activity=activity_dict,
-                )
 
         # ── Issue classification ──
         classification, ref_case_id = classify_message(

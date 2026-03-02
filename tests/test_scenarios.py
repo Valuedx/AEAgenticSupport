@@ -73,31 +73,31 @@ class TestApprovalGate(unittest.TestCase):
     def setUp(self):
         self.gate = ApprovalGate()
 
-    def test_safe_tier_no_approval(self):
+    def test_read_only_tier_no_approval(self):
         self.assertFalse(
             self.gate.needs_approval(
-                "check_workflow_status", "safe", {}
+                "check_workflow_status", "read_only", {}
             )
         )
 
-    def test_dangerous_tier_needs_approval(self):
+    def test_high_risk_tier_needs_approval(self):
         self.assertTrue(
             self.gate.needs_approval(
-                "disable_workflow", "dangerous", {}
+                "disable_workflow", "high_risk", {}
             )
         )
 
-    def test_restricted_tier_needs_approval(self):
+    def test_medium_risk_tier_needs_approval(self):
         self.assertTrue(
             self.gate.needs_approval(
-                "restart_execution", "restricted", {}
+                "trigger_workflow", "medium_risk", {}
             )
         )
 
     def test_protected_workflow_needs_approval(self):
         self.assertTrue(
             self.gate.needs_approval(
-                "restart_execution", "safe",
+                "restart_execution", "low_risk",
                 {"workflow_name": CONFIG.get(
                     "PROTECTED_WORKFLOWS", ["Claims_Processing_Daily"]
                 )[0]}
@@ -150,7 +150,7 @@ class TestToolDefinition(unittest.TestCase):
             name="test_tool",
             description="A test tool",
             category="test",
-            tier="safe",
+            tier="read_only",
             parameters={"workflow_name": {
                 "type": "string", "description": "Workflow",
             }},
@@ -226,6 +226,26 @@ class TestToolRegistry(unittest.TestCase):
         from tools.registry import tool_registry
         status_tools = tool_registry.get_tools_by_category("status")
         self.assertGreater(len(status_tools), 0)
+
+    def test_execute_handles_embedded_failure_payload(self):
+        from tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="sample_fail_tool",
+                description="Fails with payload flag",
+                category="test",
+                tier="read_only",
+                parameters={},
+                required_params=[],
+            ),
+            lambda: {"success": False, "error": "blocked by policy"},
+        )
+
+        result = registry.execute("sample_fail_tool")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "blocked by policy")
 
 
 if __name__ == "__main__":

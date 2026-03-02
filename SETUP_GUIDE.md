@@ -1,3 +1,12 @@
+> **Documentation Update (2026-03-02)**  
+> Patch release notes included in this version:
+> - Fixed circular import initialization in `agents` and `gateway` packages.
+> - Fixed approval and protected-workflow enforcement logic.
+> - Fixed tool result success/error propagation across execution paths.
+> - Improved busy-turn intent routing and queued message handling.
+> - Added cross-channel persona propagation (`business` and `technical`) and semantic approval handling.
+> - Validation status: `pytest -q tests` passed (`31 passed`).
+>
 # AutomationEdge Agentic Support — Setup Guide
 
 Complete step-by-step guide to deploy the Agentic Support Assistant on **AutomationEdge AI Studio (on-prem)** with **MS Teams** and **webchat** integration.
@@ -1260,3 +1269,4 @@ This ensures:
 
 **Document version:** 3.0
 **Last updated:** 2026-03-01
+

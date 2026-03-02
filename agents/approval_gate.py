@@ -103,14 +103,16 @@ class ApprovalGate:
                 return False
             return True
 
+        # Protected workflows should always require explicit approval,
+        # even for otherwise low-risk tools.
+        workflow = params.get("workflow_name", "")
+        if workflow in CONFIG.get("PROTECTED_WORKFLOWS", []):
+            return True
+
         if tier in SAFE_TIERS:
             return False
         if tier in AUTO_APPROVE_TIERS:
             return False
-
-        workflow = params.get("workflow_name", "")
-        if workflow in CONFIG.get("PROTECTED_WORKFLOWS", []):
-            return True
 
         return tier in APPROVAL_REQUIRED_TIERS
 

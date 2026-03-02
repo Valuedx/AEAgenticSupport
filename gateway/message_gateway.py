@@ -13,7 +13,7 @@ from enum import Enum
 from typing import Callable, Optional
 
 from config.llm_client import llm_client
-from gateway.progress import ProgressCallback, create_noop_progress
+from gateway.progress import ProgressCallback
 from state.conversation_state import ConversationState, ConversationPhase
 from agents.orchestrator import Orchestrator
 
@@ -35,21 +35,23 @@ class MessageGateway:
         self.orchestrator = Orchestrator()
         self._sessions: dict[str, ConversationState] = {}
         self._locks: dict[str, threading.Lock] = {}
+        self._session_guard = threading.Lock()
 
     def get_or_create_session(
         self, conversation_id: str,
         user_id: str = "",
         user_role: str = "technical",
     ) -> ConversationState:
-        if conversation_id not in self._sessions:
-            state = ConversationState.load(conversation_id)
-            if not state.user_id:
-                state.user_id = user_id
-            if user_role:
-                state.user_role = user_role
-            self._sessions[conversation_id] = state
-            self._locks[conversation_id] = threading.Lock()
-        return self._sessions[conversation_id]
+        with self._session_guard:
+            if conversation_id not in self._sessions:
+                state = ConversationState.load(conversation_id)
+                if not state.user_id:
+                    state.user_id = user_id
+                if user_role:
+                    state.user_role = user_role
+                self._sessions[conversation_id] = state
+                self._locks[conversation_id] = threading.Lock()
+            return self._sessions[conversation_id]
 
     def process_message(
         self, conversation_id: str, user_message: str,
@@ -114,9 +116,13 @@ class MessageGateway:
                     user_message, state, on_progress=progress
                 )
 
-        else:
+        elif intent == MessageIntent.NEW_REQUEST:
             state.queue_user_message(user_message, hint="new_request")
             return "I'm working on something else right now. I'll get to this next."
+
+        else:
+            state.queue_user_message(user_message, hint="additive")
+            return "Noted - I'll include this in my current investigation."
 
     def _classify_message_intent(
         self, message: str, state: ConversationState,
@@ -127,12 +133,29 @@ class MessageGateway:
         if msg_lower in cancel_words:
             return MessageIntent.CANCEL
 
+        if state.pending_action and any(
+            cue in msg_lower
+            for cue in (
+                "approve", "approved", "go ahead", "proceed", "yes",
+                "reject", "denied", "deny", "no", "don't do it", "do not",
+            )
+        ):
+            return MessageIntent.APPROVAL
+
         urgent_words = {
             "urgent", "critical", "emergency", "p1", "asap",
             "immediately", "production down",
         }
         if any(w in msg_lower for w in urgent_words):
             return MessageIntent.INTERRUPT
+
+        new_request_signals = (
+            "different issue", "new problem", "something else",
+            "separate issue", "another issue", "new request",
+            "on a different note", "changing topic",
+        )
+        if any(sig in msg_lower for sig in new_request_signals):
+            return MessageIntent.NEW_REQUEST
 
         current_context = ""
         if state.affected_workflows:
@@ -145,12 +168,17 @@ class MessageGateway:
             f"Classify this message. Current work: {current_context}\n"
             f"New message: {message}\n\n"
             f"Reply with exactly one word: ADDITIVE (related to current "
-            f"work) or INTERRUPT (urgent/different topic) or CANCEL (stop)",
+            f"work) or INTERRUPT (urgent/different topic) or NEW_REQUEST "
+            f"(different non-urgent request) or CANCEL (stop)",
             system="You classify user messages. Reply with one word only.",
         ).strip().upper()
 
         if "CANCEL" in classification:
             return MessageIntent.CANCEL
-        elif "INTERRUPT" in classification:
+        if "INTERRUPT" in classification:
             return MessageIntent.INTERRUPT
+        if "NEW_REQUEST" in classification:
+            return MessageIntent.NEW_REQUEST
+        if "APPROVAL" in classification and state.pending_action:
+            return MessageIntent.APPROVAL
         return MessageIntent.ADDITIVE

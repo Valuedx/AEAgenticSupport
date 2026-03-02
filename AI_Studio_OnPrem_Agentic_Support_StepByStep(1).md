@@ -1,3 +1,12 @@
+> **Documentation Update (2026-03-02)**  
+> Patch release notes included in this version:
+> - Fixed circular import initialization in `agents` and `gateway` packages.
+> - Fixed approval and protected-workflow enforcement logic.
+> - Fixed tool result success/error propagation across execution paths.
+> - Improved busy-turn intent routing and queued message handling.
+> - Added cross-channel persona propagation (`business` and `technical`) and semantic approval handling.
+> - Validation status: `pytest -q tests` passed (`31 passed`).
+>
 # AI Studio (On‑Prem) Agentic Support Assistant — Step‑by‑Step Configuration + Code
 
 > **Updated 2026-02-28** — Embeddings migrated from sentence-transformers to Google Vertex AI `text-embedding-004`. Extension file structure corrected (`migrations/` directory, `.txt` extension). Hook contract updated to async class-based pattern.
@@ -1450,3 +1459,4 @@ Key things to remember:
 ---
 
 **Generated:** 2026-02-20 06:19:06 | **Last updated:** 2026-03-01
+

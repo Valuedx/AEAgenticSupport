@@ -54,6 +54,42 @@ class ToolRegistry:
         audit.info(f"TOOL_CALL tool={tool_name} params={kwargs}")
         try:
             result = handler(**kwargs)
+
+            # Allow handlers to return ToolResult directly.
+            if isinstance(result, ToolResult):
+                if result.tool_name == "":
+                    result.tool_name = tool_name
+                if result.success:
+                    audit.info(f"TOOL_OK tool={tool_name}")
+                else:
+                    audit.warning(
+                        f"TOOL_FAIL tool={tool_name} error={result.error}"
+                    )
+                return result
+
+            # Backward compatibility for dict payloads that embed success/error.
+            if isinstance(result, dict) and isinstance(
+                result.get("success"), bool
+            ):
+                if result["success"]:
+                    audit.info(f"TOOL_OK tool={tool_name}")
+                    return ToolResult(
+                        success=True,
+                        data=result,
+                        tool_name=tool_name,
+                    )
+                error = str(
+                    result.get("error")
+                    or f"Tool '{tool_name}' reported unsuccessful execution."
+                )
+                audit.warning(f"TOOL_FAIL tool={tool_name} error={error}")
+                return ToolResult(
+                    success=False,
+                    data=result,
+                    error=error,
+                    tool_name=tool_name,
+                )
+
             audit.info(f"TOOL_OK tool={tool_name}")
             return ToolResult(success=True, data=result, tool_name=tool_name)
         except Exception as e:

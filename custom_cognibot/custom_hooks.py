@@ -22,7 +22,7 @@ AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "120"))
 _executor = ThreadPoolExecutor(max_workers=4)
 
 
-def _call_agent_simple(text, conv_id, user_id):
+def _call_agent_simple(text, conv_id, user_id, user_role="technical"):
     try:
         resp = requests.post(
             f"{AGENT_SERVER_URL}/chat",
@@ -30,7 +30,7 @@ def _call_agent_simple(text, conv_id, user_id):
                 "message": text,
                 "session_id": conv_id,
                 "user_id": user_id,
-                "user_role": "technical",
+                "user_role": user_role,
             },
             timeout=AGENT_TIMEOUT,
         )
@@ -40,6 +40,43 @@ def _call_agent_simple(text, conv_id, user_id):
     except requests.RequestException as e:
         logger.error("Agent server call failed: %s", e)
         return "Sorry, the agent is temporarily unavailable. Please try again."
+
+
+def _extract_user_role(activity) -> str:
+    role = ""
+    try:
+        role = str(getattr(activity, "user_type", "") or "").strip().lower()
+    except Exception:
+        role = ""
+
+    if not role:
+        try:
+            role = str(
+                getattr(activity, "user_role", "") or ""
+            ).strip().lower()
+        except Exception:
+            role = ""
+
+    if not role:
+        try:
+            channel_data = (
+                getattr(activity, "channel_data", None)
+                or getattr(activity, "channelData", None)
+                or {}
+            )
+            if isinstance(channel_data, dict):
+                role = str(channel_data.get("user_role", "")).strip().lower()
+        except Exception:
+            role = ""
+
+    return "business" if role == "business" else "technical"
+
+
+def _extract_activity_text(activity) -> str:
+    try:
+        return (getattr(activity, "text", "") or "").strip()
+    except Exception:
+        return ""
 
 
 class AgentProxyDialog(ComponentDialog):
@@ -62,11 +99,7 @@ class AgentProxyDialog(ComponentDialog):
     @staticmethod
     async def _call_agent_step(step_context: WaterfallStepContext):
         turn_context = step_context.context
-        text = ""
-        try:
-            text = (turn_context.activity.text or "").strip()
-        except Exception:
-            pass
+        text = _extract_activity_text(turn_context.activity)
 
         if not text:
             await turn_context.send_activity("I didn't catch that. Could you try again?")
@@ -74,6 +107,7 @@ class AgentProxyDialog(ComponentDialog):
 
         conv_id = "webchat-default"
         user_id = "webchat_user"
+        user_role = _extract_user_role(turn_context.activity)
         try:
             conv_id = turn_context.activity.conversation.id or conv_id
         except Exception:
@@ -91,7 +125,7 @@ class AgentProxyDialog(ComponentDialog):
         loop = asyncio.get_event_loop()
         try:
             reply_text = await loop.run_in_executor(
-                _executor, _call_agent_simple, text, conv_id, user_id
+                _executor, _call_agent_simple, text, conv_id, user_id, user_role
             )
         except Exception as e:
             logger.error("AgentProxyDialog agent call failed: %s", e)
@@ -138,10 +172,38 @@ class CustomChatbotHooks(ChatbotHooks):
         return None
 
     async def api_messages_hook(request, activity):
-        return None
+        text = _extract_activity_text(activity)
+        if not text:
+            return None
+
+        conv_id = "webchat-default"
+        user_id = "webchat_user"
+        user_role = _extract_user_role(activity)
+
+        try:
+            conv = getattr(activity, "conversation", None)
+            if conv and getattr(conv, "id", None):
+                conv_id = conv.id
+        except Exception:
+            pass
+
+        try:
+            frm = getattr(activity, "from_property", None)
+            if frm is None:
+                frm = getattr(activity, "from_", None)
+            if frm and getattr(frm, "id", None):
+                user_id = frm.id
+        except Exception:
+            pass
+
+        loop = asyncio.get_event_loop()
+        reply_text = await loop.run_in_executor(
+            _executor, _call_agent_simple, text, conv_id, user_id, user_role
+        )
+        return {"type": "message", "text": reply_text}
 
     async def api_reply_hook(request, body):
-        return None
+        return body
 
     async def cancel_conv_hook(conv_state, user_state, turn_context):
         return None
@@ -150,19 +212,19 @@ class CustomChatbotHooks(ChatbotHooks):
         return file_data
 
     async def voice_init_conv_hook(conversation_id, body):
-        return None
+        return body or {}
 
     async def voice_end_conv_hook(conversation_id, request=None, activity=None):
         return None
 
     async def sms_bot_start_conv_hook(body):
-        return None
+        return body or {}
 
     async def sms_bot_reply_hook(request, conversation_id, activity_id, end_conversation, response_list):
-        return None
+        return response_list or []
 
     async def whatsapp_data_channel(flow_data):
-        return None
+        return flow_data or {}
 
     async def custom_schedules():
         return None

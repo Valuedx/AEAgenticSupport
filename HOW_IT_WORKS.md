@@ -1,3 +1,12 @@
+> **Documentation Update (2026-03-02)**  
+> Patch release notes included in this version:
+> - Fixed circular import initialization in `agents` and `gateway` packages.
+> - Fixed approval and protected-workflow enforcement logic.
+> - Fixed tool result success/error propagation across execution paths.
+> - Improved busy-turn intent routing and queued message handling.
+> - Added cross-channel persona propagation (`business` and `technical`) and semantic approval handling.
+> - Validation status: `pytest -q tests` passed (`31 passed`).
+>
 ## AutomationEdge Agentic Support — How It Works (Step‑by‑Step)
 
 **Purpose:** This document explains, step by step, how the Agentic Support system works end‑to‑end, with pointers to **code files** and **setup/config docs** so you can trace behaviour or extend it safely.
@@ -431,4 +440,5 @@ Before sending the final response to the user:
      - Technical: Includes workflow name, execution IDs, timestamp, and error string.
 
 This flow touches the key code and configuration surfaces described in this document, and provides a template for reasoning about any new scenarios you introduce.
+
 

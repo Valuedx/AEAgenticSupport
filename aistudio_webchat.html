@@ -24,6 +24,7 @@
   .typing span:nth-child(2) { animation-delay: .15s; }
   .typing span:nth-child(3) { animation-delay: .3s; }
   .input-area { padding: 16px 24px; background: white; border-top: 1px solid #e0e0e0; display: flex; gap: 12px; }
+  .input-area select { padding: 12px 14px; border: 1.5px solid #ddd; border-radius: 24px; background: white; font-size: 13px; color: #333; }
   .input-area input { flex: 1; padding: 12px 16px; border: 1.5px solid #ddd; border-radius: 24px; font-size: 14px; outline: none; transition: border-color .2s, box-shadow .2s; }
   .input-area input:focus { border-color: #1565c0; box-shadow: 0 0 0 3px rgba(21,101,192,.15); }
   .input-area button { padding: 12px 28px; background: #1565c0; color: white; border: none; border-radius: 24px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .2s, transform .1s; }
@@ -55,6 +56,10 @@
   <button onclick="sendQuick('status')">My open cases</button>
 </div>
 <div class="input-area">
+  <select id="roleSelect" title="Audience role">
+    <option value="technical" selected>Technical</option>
+    <option value="business">Business</option>
+  </select>
   <input type="text" id="msgInput" placeholder="Describe your issue..." disabled>
   <button id="sendBtn" disabled onclick="sendMessage()">Send</button>
 </div>
@@ -70,6 +75,7 @@ let ws = null;
 const chatArea  = document.getElementById('chatArea');
 const msgInput  = document.getElementById('msgInput');
 const sendBtn   = document.getElementById('sendBtn');
+const roleSel   = document.getElementById('roleSelect');
 const typingEl  = document.getElementById('typing');
 const statusDot = document.getElementById('statusDot');
 const statusTxt = document.getElementById('statusText');
@@ -203,6 +209,8 @@ async function sendMessage() {
     text: text,
     from: { id: 'webchat_user', name: 'Webchat User' },
     channelId: 'webchat',
+    user_type: roleSel.value || 'technical',
+    channelData: { user_role: roleSel.value || 'technical' },
   };
 
   try {

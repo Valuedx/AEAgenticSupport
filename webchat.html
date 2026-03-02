@@ -26,6 +26,7 @@
   .typing span:nth-child(2) { animation-delay: .15s; }
   .typing span:nth-child(3) { animation-delay: .3s; }
   .input-area { padding: 16px 24px; background: white; border-top: 1px solid #e0e0e0; display: flex; gap: 12px; }
+  .input-area select { padding: 12px 14px; border: 1.5px solid #ddd; border-radius: 24px; background: white; font-size: 13px; color: #333; }
   .input-area input { flex: 1; padding: 12px 16px; border: 1.5px solid #ddd; border-radius: 24px; font-size: 14px; outline: none; transition: border-color .2s, box-shadow .2s; }
   .input-area input:focus { border-color: #1a73e8; box-shadow: 0 0 0 3px rgba(26,115,232,.15); }
   .input-area button { padding: 12px 28px; background: #1a73e8; color: white; border: none; border-radius: 24px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .2s, transform .1s; }
@@ -57,6 +58,10 @@
   <button onclick="sendQuick('status')">My open cases</button>
 </div>
 <div class="input-area">
+  <select id="roleSelect" title="Audience role">
+    <option value="technical" selected>Technical</option>
+    <option value="business">Business</option>
+  </select>
   <input type="text" id="msgInput" placeholder="Describe your issue..." disabled>
   <button id="sendBtn" disabled onclick="sendMessage()">Send</button>
 </div>
@@ -68,6 +73,7 @@ const SESSION_ID = 'webchat-' + Date.now().toString(36);
 const chatArea  = document.getElementById('chatArea');
 const msgInput  = document.getElementById('msgInput');
 const sendBtn   = document.getElementById('sendBtn');
+const roleSel   = document.getElementById('roleSelect');
 const typingEl  = document.getElementById('typing');
 const statusDot = document.getElementById('statusDot');
 const statusTxt = document.getElementById('statusText');
@@ -131,7 +137,12 @@ async function sendMessage() {
     const r = await fetch(AGENT_URL + '/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, session_id: SESSION_ID, user_id: 'webchat_user', user_role: 'technical' })
+      body: JSON.stringify({
+        message: text,
+        session_id: SESSION_ID,
+        user_id: 'webchat_user',
+        user_role: roleSel.value || 'technical'
+      })
     });
 
     if (!r.ok) {

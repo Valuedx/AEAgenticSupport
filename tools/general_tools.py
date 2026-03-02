@@ -204,7 +204,9 @@ def _truncate(data, max_len: int = 4000) -> dict | list | str:
     s = json.dumps(data, default=str)
     if len(s) <= max_len:
         return data
-    return json.loads(s[:max_len] + "...")[:max_len] if isinstance(data, str) else {
+    if isinstance(data, str):
+        return data[:max_len] + "..."
+    return {
         "_truncated": True,
         "_preview": s[:max_len],
     }

@@ -62,7 +62,11 @@ class Orchestrator:
             if active:
                 active.touch()
                 tracker._persist_issue(active)
-            return self._handle_approval_response(user_message, state, tracker)
+            response = self._handle_approval_response(
+                user_message, state, tracker
+            )
+            state.save()
+            return response
 
         # ── Classify message ──
         classification, issue_id = tracker.classify_message(
@@ -103,12 +107,15 @@ class Orchestrator:
             if tracker.should_escalate_recurrence(old_issue.issue_id):
                 old_issue.status = IssueStatus.ESCALATED
                 tracker._persist_issue(old_issue)
-                return (
+                state.phase = ConversationPhase.ESCALATED
+                response = (
                     f"This issue has now recurred {old_issue.recurrence_count} "
                     f"times. Previous resolution "
                     f"({old_issue.resolution[:150]}) is not holding. "
                     f"I'm escalating to the operations team for a permanent fix."
                 )
+                state.save()
+                return response
 
             state.phase = ConversationPhase.IDLE
             recurrence_note = (
@@ -214,6 +221,7 @@ class Orchestrator:
                 if state.interrupt_requested:
                     state.interrupt_requested = False
                     state.is_agent_working = False
+                    state.phase = ConversationPhase.IDLE
                     return "Investigation paused. What would you like me to do?"
 
                 progress.on_iteration(iteration, max_iterations)
@@ -258,6 +266,9 @@ class Orchestrator:
                                 "tool": tool_name,
                                 "args": tool_args,
                                 "tier": tool_def.tier,
+                                "authorized_users": tool_args.get(
+                                    "authorized_users", []
+                                ),
                             }
                             summary = (
                                 f"{tool_name} on "
@@ -367,6 +378,7 @@ class Orchestrator:
                     )
                     state.add_message("assistant", final_response)
                     state.is_agent_working = False
+                    state.phase = ConversationPhase.IDLE
 
                     queued = self._drain_queued_messages(state, tracker)
                     if queued:
@@ -374,6 +386,7 @@ class Orchestrator:
                     return final_response
 
             state.is_agent_working = False
+            state.phase = ConversationPhase.IDLE
             max_iter_msg = (
                 "I've reached the maximum investigation steps. Here's what "
                 "I found so far — would you like me to continue, escalate, "
@@ -386,6 +399,7 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Processing error: {e}", exc_info=True)
             state.is_agent_working = False
+            state.phase = ConversationPhase.IDLE
             return (
                 "I encountered an error during investigation. "
                 "The operations team has been notified."
@@ -505,6 +519,7 @@ class Orchestrator:
                     active_issue.issue_id,
                     f"Approved and executed: {action_summary}",
                 )
+            state.phase = ConversationPhase.RESOLVED
             return (
                 f"Done. {action['tool']} completed successfully.\n"
                 f"Result: {json.dumps(result.data, default=str)[:300]}"

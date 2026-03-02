@@ -1,3 +1,12 @@
+> **Documentation Update (2026-03-02)**  
+> Patch release notes included in this version:
+> - Fixed circular import initialization in `agents` and `gateway` packages.
+> - Fixed approval and protected-workflow enforcement logic.
+> - Fixed tool result success/error propagation across execution paths.
+> - Improved busy-turn intent routing and queued message handling.
+> - Added cross-channel persona propagation (`business` and `technical`) and semantic approval handling.
+> - Validation status: `pytest -q tests` passed (`31 passed`).
+>
 
 ## 9. Phase 6 — RCA Engine (contd)
 
@@ -2261,3 +2270,4 @@ def get_rag_engine() -> PgVectorRAGEngine:
 ---
 
 *End of Implementation Guide — Version 2.0 — Updated 2026-02-28*
+
