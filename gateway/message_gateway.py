@@ -80,6 +80,12 @@ class MessageGateway:
         )
 
         # ── Fast path: agents NOT currently working ──
+        if state.phase == ConversationPhase.AWAITING_APPROVAL:
+            with lock:
+                return self.orchestrator.handle_message(
+                    user_message, state, on_progress=progress
+                )
+
         if not state.is_agent_working:
             with lock:
                 return self.orchestrator.handle_message(
@@ -116,13 +122,6 @@ class MessageGateway:
         self, message: str, state: ConversationState,
     ) -> MessageIntent:
         msg_lower = message.strip().lower()
-
-        if state.phase == ConversationPhase.AWAITING_APPROVAL:
-            approval_words = {
-                "approve", "yes", "go ahead", "proceed", "reject", "no",
-            }
-            if msg_lower in approval_words:
-                return MessageIntent.APPROVAL
 
         cancel_words = {"stop", "cancel", "never mind", "abort", "quit"}
         if msg_lower in cancel_words:

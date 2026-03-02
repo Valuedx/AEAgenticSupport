@@ -11,7 +11,7 @@ import logging
 
 from vertexai.generative_models import Content, Part
 
-from agents.approval_gate import ApprovalGate
+from agents.approval_gate import ApprovalGate, ApprovalIntent
 from agents.escalation import EscalationAgent
 from config.llm_client import llm_client
 from config.settings import CONFIG
@@ -62,7 +62,6 @@ class Orchestrator:
             if active:
                 active.touch()
                 tracker._persist_issue(active)
-            progress.on_phase("executing_fix")
             return self._handle_approval_response(user_message, state, tracker)
 
         # ── Classify message ──
@@ -437,19 +436,44 @@ class Orchestrator:
     def _handle_approval_response(self, user_message: str,
                                   state: ConversationState,
                                   tracker: IssueTracker) -> str:
-        decision = self.approval_gate.parse_approval_response(user_message)
+        classification = self.approval_gate.classify_approval_turn(
+            user_message=user_message,
+            pending_action=state.pending_action,
+            pending_summary=state.pending_action_summary,
+            conversation_messages=state.messages,
+        )
+        intent = classification.intent
 
-        if decision is None:
-            return (
-                "I didn't understand your response. "
-                "Please reply **approve** or **reject**."
+        if intent == ApprovalIntent.CLARIFY:
+            return self.approval_gate.format_clarification_prompt(
+                state.pending_action,
+                state.pending_action_summary,
             )
 
-        if not decision:
+        if intent == ApprovalIntent.CANCEL:
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
             state.pending_action_summary = ""
+            return "Understood. I cancelled the pending action. What should I do next?"
+
+        if intent in (ApprovalIntent.REJECT, ApprovalIntent.NEW_REQUEST):
+            state.phase = ConversationPhase.IDLE
+            state.pending_action = None
+            state.pending_action_summary = ""
+            if intent == ApprovalIntent.NEW_REQUEST:
+                return (
+                    "Understood. I will not execute the pending action.\n\n"
+                    + self._process_message(user_message, state, tracker)
+                )
             return "Action rejected. What would you like me to do instead?"
+
+        if intent != ApprovalIntent.APPROVE:
+            return (
+                "I couldn't confidently tell whether you want to approve, "
+                "reject, or ask a question. Please say what you want in "
+                "natural language, for example: 'yes proceed', "
+                "'no don't do this', or ask a question."
+            )
 
         action = state.pending_action
         if not action:

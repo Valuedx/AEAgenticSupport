@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import CONFIG
 from state.conversation_state import ConversationState, ConversationPhase
-from agents.approval_gate import ApprovalGate
+from agents.approval_gate import ApprovalGate, ApprovalIntent
 from templates.rca_templates import (
     render_business_rca,
     render_technical_rca,
@@ -114,6 +114,32 @@ class TestApprovalGate(unittest.TestCase):
 
     def test_parse_approval_ambiguous(self):
         self.assertIsNone(self.gate.parse_approval_response("maybe later"))
+
+    def test_parse_approval_semantic_yes(self):
+        self.assertTrue(
+            self.gate.parse_approval_response("sure, go ahead and restart it")
+        )
+
+    def test_parse_approval_semantic_no(self):
+        self.assertFalse(
+            self.gate.parse_approval_response("no, that's risky")
+        )
+
+    def test_classify_approval_clarification(self):
+        result = self.gate.classify_approval_turn(
+            "What exactly will this change?"
+        )
+        self.assertEqual(result.intent, ApprovalIntent.CLARIFY)
+
+    def test_classify_approval_new_request(self):
+        result = self.gate.classify_approval_turn(
+            "Don't do that, check logs instead."
+        )
+        self.assertEqual(result.intent, ApprovalIntent.NEW_REQUEST)
+
+    def test_classify_approval_reject_without_alternate_request(self):
+        result = self.gate.classify_approval_turn("No, don't run it.")
+        self.assertEqual(result.intent, ApprovalIntent.REJECT)
 
 
 class TestToolDefinition(unittest.TestCase):
