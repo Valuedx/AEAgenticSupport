@@ -59,13 +59,9 @@ def call_ae_api(method: str, endpoint: str,
     elif method == "POST":
         data = client.post(endpoint, payload=parsed_body)
     elif method == "PUT":
-        resp = client._client.put(endpoint, json=parsed_body or {})
-        resp.raise_for_status()
-        data = resp.json()
+        data = client.request("PUT", endpoint, payload=parsed_body or {})
     elif method == "DELETE":
-        resp = client._client.delete(endpoint, params=parsed_params)
-        resp.raise_for_status()
-        data = resp.json()
+        data = client.request("DELETE", endpoint, params=parsed_params)
     else:
         raise ValueError(f"Unsupported HTTP method: {method}")
 

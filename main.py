@@ -14,6 +14,7 @@ from config.settings import CONFIG
 from config.logging_setup import setup_logging
 from gateway.message_gateway import MessageGateway
 from rag.engine import get_rag_engine
+from state.agent_catalog import get_agent_catalog
 from tools.registry import tool_registry
 
 # Import tool modules so they self-register with the registry
@@ -23,9 +24,30 @@ import tools.file_tools        # noqa: F401
 import tools.remediation_tools # noqa: F401
 import tools.dependency_tools  # noqa: F401
 import tools.notification_tools  # noqa: F401
+import tools.general_tools  # noqa: F401
 
 app_logger, audit_logger = setup_logging()
 gateway = MessageGateway()
+
+# Load dynamic AE tools if enabled.
+try:
+    reload_summary = tool_registry.reload_automationedge_tools()
+    app_logger.info(
+        "Dynamic AE tools reload: enabled=%s registered=%s removed=%s skipped=%s collisions=%s",
+        reload_summary.get("enabled"),
+        reload_summary.get("registered"),
+        reload_summary.get("removed"),
+        reload_summary.get("skipped"),
+        len(reload_summary.get("collisions", [])),
+    )
+except Exception as e:
+    app_logger.warning(f"Dynamic AE tool sync skipped: {e}")
+
+# Keep default agent definition aligned with currently registered tools.
+try:
+    get_agent_catalog().ensure_default_agent_links(tool_registry.list_tools())
+except Exception as e:
+    app_logger.warning(f"Agent catalog initialization skipped: {e}")
 
 # Index tools into RAG on startup
 try:

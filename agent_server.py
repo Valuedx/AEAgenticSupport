@@ -1,42 +1,81 @@
 """
 Standalone agent HTTP server.
-Exposes the ops agent as a REST API so Cognibot custom hooks can
-call it via HTTP without needing heavy deps in Python 3.9.
 
 Endpoints:
-    POST /chat          JSON request/response (for Cognibot proxy)
-    POST /chat/stream   SSE streaming with progress (for webchat)
+    POST /chat
+    POST /chat/stream
     GET  /health
-    GET  /              Serves webchat.html
+    GET  /, /webchat
+    GET  /tools                 (management UI)
+    GET  /api/tools
+    POST /api/tools/sync
+    POST /api/tools/<tool_name>/test
+    GET/POST /api/agents
+    GET/PUT/DELETE /api/agents/<agent_id>
+    GET /api/agents/<agent_id>/interactions
 """
 from __future__ import annotations
 
 import json
-import os
-import sys
 import logging
+import os
 import queue
+import re
+import sys
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
+
+from config.settings import CONFIG
 from main import handle_chat_message
+from state.agent_catalog import get_agent_catalog
+from tools.registry import tool_registry
+
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 app = Flask(__name__)
 CORS(app)
 log = logging.getLogger("agent_server")
 
 
+def _admin_check():
+    required = str(CONFIG.get("AGENT_ADMIN_TOKEN", "")).strip()
+    if not required:
+        return None
+
+    provided = (request.headers.get("X-Admin-Token", "") or "").strip()
+    auth = (request.headers.get("Authorization", "") or "").strip()
+    if not provided and auth.lower().startswith("bearer "):
+        provided = auth.split(" ", 1)[1].strip()
+
+    if provided == required:
+        return None
+    return jsonify({"error": "unauthorized"}), 401
+
+
+def _bool_arg(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _slugify(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
+    return text or "agent"
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Non-streaming endpoint (backwards compat, used by Cognibot proxy)."""
     data = request.get_json(force=True, silent=True) or {}
-    message = data.get("message", "").strip()
+    message = str(data.get("message", "")).strip()
     if not message:
         return jsonify({"response": "Empty message received."}), 400
 
@@ -51,9 +90,8 @@ def chat():
 
 @app.route("/chat/stream", methods=["POST"])
 def chat_stream():
-    """SSE streaming endpoint — sends progress events then the final response."""
     data = request.get_json(force=True, silent=True) or {}
-    message = data.get("message", "").strip()
+    message = str(data.get("message", "")).strip()
     if not message:
         return jsonify({"response": "Empty message received."}), 400
 
@@ -76,12 +114,14 @@ def chat_stream():
                 on_progress=on_progress,
             )
             event_queue.put({"event": "done", "data": final})
-        except Exception as e:
-            log.error(f"Agent error: {e}", exc_info=True)
-            event_queue.put({
-                "event": "done",
-                "data": "I encountered an error. Please try again.",
-            })
+        except Exception as exc:
+            log.error("Agent error: %s", exc, exc_info=True)
+            event_queue.put(
+                {
+                    "event": "done",
+                    "data": "I encountered an error. Please try again.",
+                }
+            )
 
     thread = threading.Thread(target=run_agent, daemon=True)
     thread.start()
@@ -93,25 +133,19 @@ def chat_stream():
             except queue.Empty:
                 yield _sse("progress", "Still working...")
                 continue
-
             yield _sse(evt["event"], evt["data"])
-
             if evt["event"] == "done":
                 break
 
     return Response(
         stream_with_context(generate()),
         mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 def _sse(event: str, data: str) -> str:
-    escaped = json.dumps(data)
-    return f"event: {event}\ndata: {escaped}\n\n"
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 @app.route("/health", methods=["GET"])
@@ -122,20 +156,174 @@ def health():
 @app.route("/webchat", methods=["GET"])
 @app.route("/", methods=["GET"])
 def webchat_page():
-    html_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "webchat.html"
-    )
-    with open(html_path, "r", encoding="utf-8") as f:
-        return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+    html_path = os.path.join(os.path.dirname(__file__), "webchat.html")
+    with open(html_path, "r", encoding="utf-8") as handle:
+        return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/aistudio-webchat", methods=["GET"])
 def aistudio_webchat_page():
-    html_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "aistudio_webchat.html"
+    html_path = os.path.join(os.path.dirname(__file__), "aistudio_webchat.html")
+    with open(html_path, "r", encoding="utf-8") as handle:
+        return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/tools", methods=["GET"])
+def tools_page():
+    check = _admin_check()
+    if check:
+        return check
+    html_path = os.path.join(os.path.dirname(__file__), "agent_admin.html")
+    with open(html_path, "r", encoding="utf-8") as handle:
+        return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/api/tools", methods=["GET"])
+def api_tools():
+    check = _admin_check()
+    if check:
+        return check
+
+    do_sync = _bool_arg(request.args.get("sync"), default=False)
+    include_inactive = _bool_arg(request.args.get("includeInactive"), default=False)
+    sync_summary = None
+    if do_sync:
+        sync_summary = tool_registry.reload_automationedge_tools(
+            include_inactive=include_inactive
+        )
+
+    catalog = get_agent_catalog()
+    catalog.ensure_default_agent_links(tool_registry.list_tools())
+    tools = tool_registry.get_tool_inventory(catalog.get_agent_tool_map())
+    return jsonify(
+        {
+            "count": len(tools),
+            "tools": tools,
+            "sync": sync_summary,
+        }
     )
-    with open(html_path, "r", encoding="utf-8") as f:
-        return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/api/tools/sync", methods=["POST"])
+def api_tools_sync():
+    check = _admin_check()
+    if check:
+        return check
+
+    payload = request.get_json(force=True, silent=True) or {}
+    include_inactive = _bool_arg(payload.get("includeInactive"), default=False)
+    summary = tool_registry.reload_automationedge_tools(
+        include_inactive=include_inactive
+    )
+    get_agent_catalog().ensure_default_agent_links(tool_registry.list_tools())
+    return jsonify(summary)
+
+
+@app.route("/api/tools/<tool_name>/test", methods=["POST"])
+def api_tools_test(tool_name: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    payload = request.get_json(force=True, silent=True) or {}
+    args = payload.get("args", {})
+    if not isinstance(args, dict):
+        return jsonify({"error": "'args' must be an object"}), 400
+
+    result = tool_registry.execute(tool_name, **args)
+    status = 200 if result.success else 400
+    return jsonify(
+        {
+            "toolName": tool_name,
+            "success": result.success,
+            "data": result.data,
+            "error": result.error,
+        }
+    ), status
+
+
+@app.route("/api/agents", methods=["GET"])
+def api_agents_list():
+    check = _admin_check()
+    if check:
+        return check
+
+    catalog = get_agent_catalog()
+    agents = catalog.list_agents()
+    return jsonify({"count": len(agents), "agents": agents})
+
+
+@app.route("/api/agents", methods=["POST"])
+def api_agents_create():
+    check = _admin_check()
+    if check:
+        return check
+
+    payload = request.get_json(force=True, silent=True) or {}
+    if not payload.get("agentId"):
+        basis = payload.get("usecase") or payload.get("name") or "agent"
+        payload["agentId"] = _slugify(str(basis))
+    agent = get_agent_catalog().upsert_agent(payload)
+    return jsonify(agent), 201
+
+
+@app.route("/api/agents/<agent_id>", methods=["GET"])
+def api_agents_get(agent_id: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    agent = get_agent_catalog().get_agent(agent_id)
+    if not agent:
+        return jsonify({"error": "agent not found"}), 404
+    return jsonify(agent)
+
+
+@app.route("/api/agents/<agent_id>", methods=["PUT"])
+def api_agents_update(agent_id: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    payload = request.get_json(force=True, silent=True) or {}
+    payload["agentId"] = agent_id
+    agent = get_agent_catalog().upsert_agent(payload)
+    return jsonify(agent)
+
+
+@app.route("/api/agents/<agent_id>", methods=["DELETE"])
+def api_agents_delete(agent_id: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    deleted = get_agent_catalog().delete_agent(agent_id)
+    if not deleted:
+        return jsonify({"error": "agent not found"}), 404
+    return jsonify({"deleted": True, "agentId": agent_id})
+
+
+@app.route("/api/agents/<agent_id>/interactions", methods=["GET"])
+def api_agent_interactions(agent_id: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    limit = int(request.args.get("limit", 100))
+    rows = get_agent_catalog().list_interactions(agent_id=agent_id, limit=limit)
+    return jsonify({"count": len(rows), "interactions": rows})
+
+
+@app.route("/api/interactions", methods=["GET"])
+def api_interactions():
+    check = _admin_check()
+    if check:
+        return check
+
+    agent_id = request.args.get("agentId", "")
+    limit = int(request.args.get("limit", 100))
+    rows = get_agent_catalog().list_interactions(agent_id=agent_id, limit=limit)
+    return jsonify({"count": len(rows), "interactions": rows})
 
 
 if __name__ == "__main__":
@@ -143,3 +331,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("AGENT_SERVER_PORT", 5050))
     print(f"Agent server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+

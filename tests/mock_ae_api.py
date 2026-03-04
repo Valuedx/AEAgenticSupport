@@ -10,16 +10,79 @@ from flask import Flask, jsonify, request
 mock_app = Flask(__name__)
 
 WORKFLOWS = [
-    {"name": "Claims_Processing_Daily", "status": "active",
-     "last_run": "success", "schedule": "daily 06:00"},
-    {"name": "Policy_Renewal_Batch", "status": "active",
-     "last_run": "failed", "schedule": "daily 08:00"},
-    {"name": "Premium_Calculation", "status": "paused",
-     "last_run": "success", "schedule": "hourly"},
-    {"name": "Document_OCR_Pipeline", "status": "active",
-     "last_run": "running", "schedule": "continuous"},
-    {"name": "Agent_Commission_Report", "status": "active",
-     "last_run": "success", "schedule": "weekly Monday 07:00"},
+    {
+        "id": "wf-claims",
+        "name": "Claims_Processing_Daily",
+        "status": "active",
+        "last_run": "success",
+        "schedule": "daily 06:00",
+        "agenticAiToolConfiguration": {
+            "toolName": "run_claims_processing",
+            "toolDescription": "Run claims processing workflow for a batch date",
+            "status": "active",
+            "category": "claims",
+            "tags": ["claims", "batch"],
+            "tier": "medium_risk",
+        },
+        "configurationParameters": [
+            {
+                "name": "batch_date",
+                "type": "String",
+                "required": True,
+                "description": "Batch date in YYYYMMDD format",
+            },
+            {
+                "name": "validate_only",
+                "type": "Boolean",
+                "required": False,
+                "description": "Validate inputs only",
+            },
+        ],
+    },
+    {
+        "id": "wf-policy",
+        "name": "Policy_Renewal_Batch",
+        "status": "active",
+        "last_run": "failed",
+        "schedule": "daily 08:00",
+        "agenticAiToolConfiguration": {
+            "toolName": "trigger_policy_renewal",
+            "toolDescription": "Trigger policy renewal batch with optional region",
+            "status": "active",
+            "category": "policy",
+            "tags": ["policy", "renewal"],
+            "tier": "high_risk",
+        },
+        "configurationParameters": [
+            {
+                "name": "region",
+                "type": "String",
+                "required": False,
+                "description": "Optional region code",
+            }
+        ],
+    },
+    {
+        "id": "wf-premium",
+        "name": "Premium_Calculation",
+        "status": "paused",
+        "last_run": "success",
+        "schedule": "hourly",
+    },
+    {
+        "id": "wf-ocr",
+        "name": "Document_OCR_Pipeline",
+        "status": "active",
+        "last_run": "running",
+        "schedule": "continuous",
+    },
+    {
+        "id": "wf-commission",
+        "name": "Agent_Commission_Report",
+        "status": "active",
+        "last_run": "success",
+        "schedule": "weekly Monday 07:00",
+    },
 ]
 
 EXECUTIONS = [
@@ -43,6 +106,87 @@ EXECUTIONS = [
     }
     for i in range(1, 21)
 ]
+
+SESSIONS = set()
+
+
+def _validate_session():
+    token = request.headers.get("X-session-token", "")
+    return bool(token and token in SESSIONS)
+
+
+# â”€â”€ AE REST auth/execute/discovery endpoints â”€â”€
+
+@mock_app.route("/aeengine/rest/authenticate", methods=["POST"])
+def ae_authenticate():
+    username = (
+        request.form.get("username")
+        or (request.json or {}).get("username")
+        or ""
+    )
+    password = (
+        request.form.get("password")
+        or (request.json or {}).get("password")
+        or ""
+    )
+    if not username or not password:
+        return jsonify({"error": "username and password required"}), 400
+    token = f"mock-session-{random.randint(1000, 9999)}"
+    SESSIONS.add(token)
+    return jsonify({"token": token, "status": "success"})
+
+
+@mock_app.route("/aeengine/rest/execute", methods=["POST"])
+def ae_execute():
+    if not _validate_session():
+        return jsonify({"error": "invalid or missing session token"}), 401
+
+    data = request.json or {}
+    workflow_name = data.get("workflowName", "")
+    req_id = f"REQ-{random.randint(10000, 99999)}"
+    return jsonify({
+        "status": "QUEUED",
+        "requestId": req_id,
+        "workflowName": workflow_name,
+        "message": "Execution queued",
+        "params": data.get("params", []),
+    })
+
+
+@mock_app.route("/aeengine/rest/workflows", methods=["GET"])
+def ae_list_workflows():
+    if not _validate_session():
+        return jsonify({"error": "invalid or missing session token"}), 401
+
+    return jsonify({
+        "workflows": [
+            {
+                "id": wf.get("id"),
+                "name": wf.get("name"),
+                "workflowName": wf.get("name"),
+                "status": wf.get("status"),
+            }
+            for wf in WORKFLOWS
+        ]
+    })
+
+
+@mock_app.route("/aeengine/rest/workflows/<workflow_identifier>", methods=["GET"])
+def ae_workflow_details(workflow_identifier):
+    if not _validate_session():
+        return jsonify({"error": "invalid or missing session token"}), 401
+
+    wf = next(
+        (
+            item for item in WORKFLOWS
+            if item.get("id") == workflow_identifier
+            or item.get("name") == workflow_identifier
+        ),
+        None,
+    )
+    if not wf:
+        return jsonify({"error": "workflow not found"}), 404
+    return jsonify(wf)
 
 
 # ── Workflow endpoints ──
