@@ -29,16 +29,21 @@ def _has_pgvector(dsn: str) -> bool:
 def _get_embedding_dimension() -> int:
     """Derive vector dimension from the configured Vertex AI embedding model."""
     try:
-        import vertexai
-        from vertexai.language_models import TextEmbeddingModel
-        vertexai.init(
+        from google import genai
+        from google.genai import types
+        
+        client = genai.Client(
+            vertexai=True,
             project=CONFIG["GOOGLE_CLOUD_PROJECT"],
-            location=CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            location=CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1")
         )
         model_name = CONFIG.get("EMBEDDING_MODEL", "text-embedding-004")
-        model = TextEmbeddingModel.from_pretrained(model_name)
-        sample = model.get_embeddings(["dimension probe"])
-        dim = len(sample[0].values)
+        res = client.models.embed_content(
+            model=model_name,
+            contents=["dimension probe"],
+            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+        )
+        dim = len(res.embeddings[0].values)
         print(f"  Detected embedding dimension {dim} from model '{model_name}'")
         return dim
     except Exception as e:
@@ -106,6 +111,48 @@ CREATE TABLE IF NOT EXISTS conversation_state (
 
 CREATE INDEX IF NOT EXISTS idx_conv_state_updated
     ON conversation_state(updated_at);
+
+-- Tool execution audit log (Postgres-backed, survives restarts)
+-- Mirrors agent_catalog.json interactions but with full params + result
+CREATE TABLE IF NOT EXISTS tool_execution_log (
+    id              BIGSERIAL    PRIMARY KEY,
+    conversation_id VARCHAR(256) NOT NULL DEFAULT '',
+    agent_id        VARCHAR(128) NOT NULL DEFAULT 'unmapped',
+    tool_name       VARCHAR(256) NOT NULL,
+    params          JSONB        DEFAULT '{}'::jsonb,
+    result          JSONB        DEFAULT '{}'::jsonb,
+    success         BOOLEAN      NOT NULL DEFAULT FALSE,
+    error_message   TEXT         DEFAULT '',
+    duration_ms     INTEGER,
+    created_at      TIMESTAMPTZ  DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_exec_log_tool
+    ON tool_execution_log(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_exec_log_conv
+    ON tool_execution_log(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_tool_exec_log_created
+    ON tool_execution_log(created_at);
+
+-- Workflow catalog cache (T4 API workflow list, refreshed on startup/reload)
+-- Avoids repeated expensive T4 API calls for RAG tool discovery
+CREATE TABLE IF NOT EXISTS workflow_catalog (
+    workflow_id     VARCHAR(64)  NOT NULL,
+    org_code        VARCHAR(64)  NOT NULL DEFAULT '',
+    workflow_name   VARCHAR(512) NOT NULL,
+    description     TEXT         DEFAULT '',
+    category        VARCHAR(128) DEFAULT '',
+    active          BOOLEAN      DEFAULT TRUE,
+    parameters      JSONB        DEFAULT '[]'::jsonb,
+    raw_data        JSONB        DEFAULT '{}'::jsonb,
+    fetched_at      TIMESTAMPTZ  DEFAULT NOW(),
+    PRIMARY KEY (workflow_id, org_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_catalog_name
+    ON workflow_catalog(workflow_name);
+CREATE INDEX IF NOT EXISTS idx_workflow_catalog_active
+    ON workflow_catalog(active);
 """
 
 

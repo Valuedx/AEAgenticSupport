@@ -107,15 +107,45 @@ def index_past_incidents():
         logger.info(f"Indexed {len(docs)} past incidents")
 
 
+def index_t4_workflows():
+    """Fetch T4 workflows from the live API and index them into both:
+    - workflow_catalog (Postgres table) — searchable by name/ID
+    - rag_documents (collection='tools') — embedded for semantic RAG search
+
+    Uses sync_and_index_workflows() on the client so only one API call is made.
+    Skips silently if T4 is not configured or unreachable.
+    """
+    try:
+        from tools.automationedge_client import get_automationedge_client
+        from config.settings import CONFIG
+
+        # Only attempt if T4 credentials are configured
+        if not CONFIG.get("AE_USERNAME") and not CONFIG.get("AE_API_KEY"):
+            logger.info("T4 credentials not configured — skipping workflow index.")
+            return
+
+        client = get_automationedge_client()
+        result = client.sync_and_index_workflows()
+        logger.info(
+            "T4 workflow sync complete: db_synced=%d rag_indexed=%d",
+            result.get("db_synced", 0),
+            result.get("rag_indexed", 0),
+        )
+    except Exception as exc:
+        logger.warning("T4 workflow indexing failed (non-fatal): %s", exc)
+
+
 def index_all():
     logger.info("Starting full RAG index build...")
     index_kb_articles()
     index_sops()
     index_tool_docs()
     index_past_incidents()
+    index_t4_workflows()   # T4 workflow catalog → DB + RAG embeddings
     logger.info("RAG index build complete.")
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     index_all()
+

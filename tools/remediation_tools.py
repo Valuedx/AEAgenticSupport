@@ -47,16 +47,69 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
                 f"Manual trigger required."
             ),
         }
-    resp = get_ae_client().post(
-        f"/api/v1/workflows/{workflow_name}/trigger",
-        payload={"parameters": parameters or {}},
-    )
-    return {
-        "success": True,
-        "execution_id": resp.get("execution_id"),
-        "workflow_name": workflow_name,
-        "status": resp.get("status"),
-    }
+    
+    # ── "Ask Again" pattern ──
+    # Identify specific required parameters from the local catalog
+    client = get_ae_client()
+    schema = client.get_cached_workflow_parameters(workflow_name)
+    required = [p["name"] for p in schema if p.get("required") or p.get("is_required")]
+    missing = [p for p in required if not (parameters or {}).get(p)]
+
+    if missing:
+        # Build a friendly, specific question (mirrors dynamic tool behavior)
+        param_bullets = "\n".join(f"  • {p}" for p in missing)
+        friendly_name = workflow_name.replace("_", " ").replace("-", " ").title()
+        return {
+            "success": False,
+            "needs_user_input": True,
+            "question": (
+                f"I'm ready to help with **{friendly_name}**! Just need a few specific details first:\n"
+                f"{param_bullets}\n\n"
+                f"Please share these and I'll take care of the rest."
+            ),
+            "tool_name": "trigger_workflow",
+            "workflow_name": workflow_name,
+            "missing_params": missing
+        }
+
+    # Use the updated T4-compatible execute_workflow method
+    try:
+        raw = client.execute_workflow(
+            workflow_name=workflow_name,
+            params=parameters,
+            source="ops-agent-remediation"
+        )
+        
+        # Strict validation: T4 usually returns a Request ID
+        req_id = (
+            raw.get("automationRequestId") 
+            or raw.get("requestId") 
+            or raw.get("id")
+        )
+
+        # If we got a 200/201 but the body says success=False or has no ID, it's a failure
+        if not req_id and not raw.get("success", True):
+            error_msg = raw.get("errorMessage") or raw.get("message") or "T4 returned failure without details."
+            return {"success": False, "error": f"T4 execution failed: {error_msg}", "raw": raw}
+
+        if not req_id:
+            logger.warning(f"T4 trigger for {workflow_name} succeeded but returned no Request ID.")
+        
+        return {
+            "success": True,
+            "execution_id": req_id,
+            "workflow_name": workflow_name,
+            "status": raw.get("status") or raw.get("state") or "QUEUED",
+            "message": raw.get("message") or "Workflow triggered successfully.",
+            "request_id": req_id,
+            "raw": raw
+        }
+    except Exception as e:
+        logger.error(f"Failed to trigger workflow {workflow_name}: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 def requeue_item(queue_name: str, item_id: str) -> dict:
@@ -137,7 +190,7 @@ tool_registry.register(
     ToolDefinition(
         name="trigger_workflow",
         description=(
-            "Trigger a new execution of a workflow with optional parameters."
+            "Trigger a new execution of a workflow with required parameters."
         ),
         category="remediation",
         tier="medium_risk",
@@ -148,10 +201,10 @@ tool_registry.register(
             },
             "parameters": {
                 "type": "object",
-                "description": "Optional workflow parameters",
+                "description": "Workflow input parameters (as a dictionary)",
             },
         },
-        required_params=["workflow_name"],
+        required_params=["workflow_name", "parameters"],
     ),
     trigger_workflow,
 )

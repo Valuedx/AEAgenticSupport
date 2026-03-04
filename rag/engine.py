@@ -16,10 +16,14 @@ from typing import List
 import numpy as np
 from psycopg2.extras import Json, execute_values
 
-import vertexai
-from vertexai.language_models import TextEmbeddingModel
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    # Error will be caught if used, for now just log
+    logger.error("google-genai not installed. Run: pip install google-genai")
 
-from config.db import get_conn
+from config.db import get_conn, get_readonly_conn
 from config.settings import CONFIG
 
 logger = logging.getLogger("ops_agent.rag")
@@ -36,33 +40,53 @@ def _has_pgvector(conn) -> bool:
 
 
 class VertexEmbedder:
-    """Wraps the Vertex AI text-embedding model."""
+    """Wraps the Vertex AI text-embedding model using google-genai SDK (v3)."""
 
     def __init__(self, model_name: str = "text-embedding-004"):
-        vertexai.init(
-            project=CONFIG["GOOGLE_CLOUD_PROJECT"],
-            location=CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        self.project = CONFIG["GOOGLE_CLOUD_PROJECT"]
+        self.location = CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        self.model_name = model_name
+        
+        self.client = genai.Client(
+            vertexai=True,
+            project=self.project,
+            location=self.location
         )
-        self.model = TextEmbeddingModel.from_pretrained(model_name)
         self._dim = None
 
     @property
     def dimension(self) -> int:
         if self._dim is None:
-            sample = self.model.get_embeddings(["dimension probe"])
-            self._dim = len(sample[0].values)
+            sample = self.embed("dimension probe")
+            self._dim = len(sample)
         return self._dim
 
     def embed(self, text: str) -> list[float]:
-        result = self.model.get_embeddings([text])
-        return result[0].values
+        try:
+            res = self.client.models.embed_content(
+                model=self.model_name,
+                contents=[text],
+                config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+            )
+            return res.embeddings[0].values
+        except Exception as e:
+            logger.error(f"Embedding failed for '{text[:50]}...': {e}")
+            raise
 
     def embed_batch(self, texts: List[str]) -> List[list[float]]:
         all_vectors = []
         for i in range(0, len(texts), _EMBED_BATCH_SIZE):
             batch = texts[i:i + _EMBED_BATCH_SIZE]
-            results = self.model.get_embeddings(batch)
-            all_vectors.extend([r.values for r in results])
+            try:
+                res = self.client.models.embed_content(
+                    model=self.model_name,
+                    contents=batch,
+                    config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+                )
+                all_vectors.extend([emb.values for emb in res.embeddings])
+            except Exception as e:
+                logger.error(f"Batch embedding failed: {e}")
+                raise
         return all_vectors
 
 
@@ -128,6 +152,10 @@ class PgVectorRAGEngine:
                     ON rag_documents (collection);
                 """)
             conn.commit()
+
+    def get_conn_readonly(self):
+        """Context-managed read-only database connection."""
+        return get_readonly_conn()
 
     # ── Indexing ──
 

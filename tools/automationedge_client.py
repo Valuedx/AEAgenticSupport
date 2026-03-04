@@ -48,20 +48,23 @@ class AutomationEdgeClient:
             CONFIG.get("AE_AUTH_ENDPOINT", "/authenticate")
         ).strip() or "/authenticate"
         self.execute_endpoint = str(
-            CONFIG.get("AE_EXECUTE_ENDPOINT", "/execute")
-        ).strip() or "/execute"
+            CONFIG.get("AE_EXECUTE_ENDPOINT", "/{org_code}/execute")
+        ).strip() or "/{org_code}/execute"
+        # T4 /workflows/catalogue provides rich param metadata (displayName, optional, etc.)
+        # Ref: User-provided T4 Catalogue JSON
         self.workflows_endpoint = str(
-            CONFIG.get("AE_WORKFLOWS_ENDPOINT", "/workflows")
-        ).strip() or "/workflows"
+            CONFIG.get("AE_WORKFLOWS_ENDPOINT", "/workflows/catalogue")
+        ).strip() or "/workflows/catalogue"
+        self.workflows_runtime_endpoint = "/workflows/runtime"
         self.workflows_method = str(
             CONFIG.get("AE_WORKFLOWS_METHOD", "GET")
         ).strip().upper() or "GET"
         self.workflow_details_endpoint = str(
             CONFIG.get(
                 "AE_WORKFLOW_DETAILS_ENDPOINT",
-                "/workflows/{workflow_identifier}",
+                "/{org_code}/workflows/{workflow_identifier}/config",
             )
-        ).strip() or "/workflows/{workflow_identifier}"
+        ).strip() or "/{org_code}/workflows/{workflow_identifier}/config"
         self.workflow_details_method = str(
             CONFIG.get("AE_WORKFLOW_DETAILS_METHOD", "GET")
         ).strip().upper() or "GET"
@@ -117,7 +120,11 @@ class AutomationEdgeClient:
             return {"raw": response.text}
 
     def authenticate(self, force: bool = False) -> str:
-        """Authenticate against AE and cache session token."""
+        """Authenticate against AE and cache session token.
+
+        T4 /authenticate expects username+password as QUERY PARAMS (not form body).
+        Ref: code_ref.py t4_authenticate()
+        """
         if not self.use_session_auth:
             return ""
 
@@ -126,9 +133,10 @@ class AutomationEdgeClient:
                 return self._session_token
 
             auth_path = self._rest_path(self.auth_endpoint)
+            # T4 uses query params for auth, not form data
             response = self._client.post(
                 auth_path,
-                data={"username": self.username, "password": self.password},
+                params={"username": self.username, "password": self.password},
                 headers={"Accept": "application/json"},
             )
             response.raise_for_status()
@@ -239,10 +247,12 @@ class AutomationEdgeClient:
         self,
         *,
         workflow_name: str,
+        workflow_id: str = "",
         params: Optional[dict] = None,
         org_code: str = "",
         user_id: str = "",
         source: str = "ae-agentic-support",
+        mail_subject: str = "null",
         **extra_fields,
     ) -> dict:
         if not workflow_name:
@@ -253,55 +263,105 @@ class AutomationEdgeClient:
             "workflowName": workflow_name,
             "userId": user_id or self.default_user_id,
             "source": source,
+            "responseMailSubject": mail_subject or "null",
             "params": self._build_param_array(params or {}),
         }
         payload.update({k: v for k, v in extra_fields.items() if v is not None})
 
+        endpoint = self.execute_endpoint.format(
+            org_code=org_code or self.default_org_code
+        )
+
+        # code_ref.py sends workflow_name and workflow_id as query params too
+        q_params = {"workflow_name": workflow_name}
+        if workflow_id:
+            q_params["workflow_id"] = workflow_id
+
         return self._authorized_request(
             "POST",
-            self.execute_endpoint,
+            endpoint,
             payload=payload,
+            params=q_params,
             use_rest_prefix=True,
         )
 
-    def list_workflows(self) -> list[dict]:
-        payload = None
-        first_method = self.workflows_method
-        second_method = "POST" if first_method != "POST" else "GET"
+    def list_workflows(
+        self,
+        offset: int = 0,
+        page_size: int = 200,
+        all_pages: bool = True,
+    ) -> list[dict]:
+        """Fetch workflows from T4.
+        
+        Prioritizes /workflows/catalogue (rich metadata as per user request).
+        Falls back to /workflows/runtime if needed.
+        """
+        all_workflows: list[dict] = []
+        current_offset = offset
 
-        try:
-            payload = self._authorized_request(
-                first_method,
-                self.workflows_endpoint,
-                use_rest_prefix=True,
-            )
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status in {400, 404, 405, 500, 501}:
-                logger.info(
-                    "Workflow list via %s failed (%s). Retrying with %s.",
-                    first_method,
-                    status,
-                    second_method,
-                )
+        # Try Catalogue first (T4 specific richness)
+        while True:
+            try:
+                endpoint = self._rest_path(self.workflows_endpoint)
                 payload = self._authorized_request(
-                    second_method,
-                    self.workflows_endpoint,
-                    use_rest_prefix=True,
+                    "GET",
+                    endpoint,
+                    params={"offset": current_offset, "size": page_size},
                 )
-            else:
+            except httpx.HTTPStatusError as exc:
+                if current_offset == 0:
+                    logger.warning("T4 Catalogue GET failed (%s). Trying Runtime fallback.", exc.response.status_code)
+                    return self._list_workflows_runtime(offset, page_size, all_pages)
                 raise
 
-        workflows = self._extract_workflow_list(payload)
-        if not workflows:
-            logger.warning("AE workflow list API returned no workflows.")
-        return workflows
+            batch = self._extract_workflow_list(payload)
+            if not batch:
+                break
+            all_workflows.extend(batch)
+            logger.info("Workflows fetched (Catalogue) offset=%d -> %d records", current_offset, len(batch))
+            if not all_pages or len(batch) < page_size:
+                break
+            current_offset += page_size
+
+        return all_workflows
+
+    def _list_workflows_runtime(self, offset: int, page_size: int, all_pages: bool) -> list[dict]:
+        """Fallback to /workflows/runtime if Catalogue is unavailable."""
+        all_workflows: list[dict] = []
+        current_offset = offset
+        while True:
+            try:
+                endpoint = self._rest_path(self.workflows_runtime_endpoint)
+                payload = self._authorized_request(
+                    "GET",
+                    endpoint,
+                    params={"offset": current_offset, "size": page_size},
+                )
+            except httpx.HTTPStatusError as exc:
+                logger.warning("Workflow Runtime GET failed (%s). Trying POST.", exc.response.status_code)
+                payload = self._authorized_request(
+                    "POST",
+                    endpoint,
+                    params={"offset": current_offset, "size": page_size},
+                )
+            
+            batch = self._extract_workflow_list(payload)
+            if not batch:
+                break
+            all_workflows.extend(batch)
+            logger.info("Workflows fetched (Runtime) offset=%d -> %d records", current_offset, len(batch))
+            if not all_pages or len(batch) < page_size:
+                break
+            current_offset += page_size
+        return all_workflows
 
     def get_workflow_details(self, workflow_identifier: str) -> dict:
         if not workflow_identifier:
             raise ValueError("workflow_identifier is required")
 
+        org = self.default_org_code
         endpoint = self.workflow_details_endpoint.format(
+            org_code=org,
             workflow_identifier=workflow_identifier,
             workflow_id=workflow_identifier,
             workflow_name=workflow_identifier,
@@ -311,6 +371,322 @@ class AutomationEdgeClient:
             endpoint,
             use_rest_prefix=True,
         )
+
+    def get_execution_status(self, execution_id: str) -> dict:
+        """Get the status of a specific workflow execution.
+
+        Tries both paths per ref: code_ref.py t4_poll_status():
+        1. /workflowinstances/{id}  (global)
+        2. /{org_code}/workflowinstances/{id}  (org-scoped)
+        """
+        if not execution_id:
+            raise ValueError("execution_id is required")
+
+        paths = [
+            f"/workflowinstances/{execution_id}",
+            f"/{self.default_org_code}/workflowinstances/{execution_id}",
+        ]
+        last_exc: Optional[Exception] = None
+        for path in paths:
+            try:
+                result = self._authorized_request("GET", path, use_rest_prefix=True)
+                return result
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    last_exc = exc
+                    continue
+                raise
+        raise last_exc or RuntimeError(f"Could not fetch status for execution {execution_id}")
+
+    def poll_execution_status(
+        self,
+        execution_id: str,
+        poll_interval_sec: int = 3,
+        max_attempts: int = 100,
+        terminal_statuses: tuple = ("Complete", "Failure", "Error"),
+    ) -> dict:
+        """Poll execution status until terminal or max_attempts reached.
+
+        Ref: code_ref.py t4_poll_status()
+        Returns dict with 'status', 'execution_id', 'raw'.
+        """
+        import time
+
+        no_agent_threshold = 10
+        no_agent_counter = 0
+        raw = None
+
+        for attempt in range(max_attempts):
+            try:
+                raw = self.get_execution_status(execution_id)
+            except Exception as exc:
+                logger.warning("Poll attempt %d failed: %s", attempt + 1, exc)
+                if attempt > 5:
+                    raise
+                time.sleep(poll_interval_sec)
+                continue
+
+            status = raw.get("status", "pending") if isinstance(raw, dict) else "pending"
+            logger.info("Poll #%d execution_id=%s status=%s", attempt + 1, execution_id, status)
+
+            # Detect "no agent" condition (status stays New without an agent)
+            if status == "New" and not (raw or {}).get("agentName"):
+                no_agent_counter += 1
+                if no_agent_counter >= no_agent_threshold:
+                    status = "no_agent"
+            else:
+                no_agent_counter = 0
+
+            if status in terminal_statuses or status == "no_agent":
+                break
+
+            time.sleep(poll_interval_sec)
+
+        return {
+            "status": status if raw else "timeout",
+            "execution_id": execution_id,
+            "raw": raw,
+        }
+
+    def check_agent_status(self, org_code: str = "") -> list[dict]:
+        """Check T4 agent health via monitoring endpoint.
+
+        Ref: code_ref.py t4_check_agent_status() / t4_get_agent_monitoring()
+        Returns list of agent dicts with 'agentName', 'agentState', 'agentId'.
+        """
+        org = org_code or self.default_org_code
+        if not org:
+            logger.error("T4: org_code not configured — cannot check agents.")
+            return []
+
+        path = f"/{org}/monitoring/agents"
+        try:
+            result = self._authorized_request(
+                "POST",
+                path,
+                params={"type": "AGENT", "offset": 0, "size": 100},
+                use_rest_prefix=True,
+            )
+            agents: list[dict] = []
+            if isinstance(result, dict):
+                agents = result.get("data") or result.get("agents") or [result]
+            elif isinstance(result, list):
+                agents = result
+
+            logger.info("T4: agent check returned %d agent(s).", len(agents))
+            return agents
+        except Exception as exc:
+            logger.error("T4: agent status check failed: %s", exc)
+            return []
+
+    def sync_workflow_catalog(self, workflows: Optional[list[dict]] = None) -> int:
+        """Persist fetched T4 workflows to the Postgres workflow_catalog table.
+
+        Upserts by (workflow_id, org_code) so repeated calls stay idempotent.
+        Returns the number of rows upserted. Best-effort — never raises.
+        Ref: code_ref.py t4_fetch_all_workflows() \u2014 call after list_workflows().
+        """
+        try:
+            from psycopg2.extras import Json as PgJson, execute_values
+            from config.db import get_conn
+
+            if workflows is None:
+                workflows = self.list_workflows()
+
+            if not workflows:
+                return 0
+
+            org = self.default_org_code
+            rows = []
+            for wf in workflows:
+                wf_id = str(wf.get("workflowId") or wf.get("id") or "").strip()
+                wf_name = str(wf.get("workflowName") or wf.get("name") or "").strip()
+                if not wf_id or not wf_name:
+                    continue
+                rows.append((
+                    wf_id,
+                    org,
+                    wf_name,
+                    str(wf.get("description") or ""),
+                    str(wf.get("category") or ""),
+                    bool(wf.get("active", True)),
+                    PgJson(wf.get("parameters") or []),
+                    PgJson(wf),
+                ))
+
+            if not rows:
+                return 0
+
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    execute_values(
+                        cur,
+                        """
+                        INSERT INTO workflow_catalog
+                            (workflow_id, org_code, workflow_name, description,
+                             category, active, parameters, raw_data, fetched_at)
+                        VALUES %s
+                        ON CONFLICT (workflow_id, org_code) DO UPDATE SET
+                            workflow_name = EXCLUDED.workflow_name,
+                            description   = EXCLUDED.description,
+                            category      = EXCLUDED.category,
+                            active        = EXCLUDED.active,
+                            parameters    = EXCLUDED.parameters,
+                            raw_data      = EXCLUDED.raw_data,
+                            fetched_at    = NOW()
+                        """,
+                        rows,
+                        template=(
+                            "(%s, %s, %s, %s, %s, %s, %s, %s, NOW())"
+                        ),
+                    )
+                conn.commit()
+
+            logger.info("T4: synced %d workflows to workflow_catalog.", len(rows))
+            return len(rows)
+
+        except Exception as exc:
+            logger.warning("T4: workflow_catalog sync failed (non-fatal): %s", exc)
+            return 0
+
+    def index_workflows_to_rag(
+        self,
+        workflows: Optional[list[dict]] = None,
+    ) -> int:
+        """Index T4 workflows into the RAG rag_documents table (collection='tools').
+
+        Each workflow becomes a searchable embedding document so the orchestrator's
+        RAG search can surface T4 workflows by name, description, or category.
+        Returns the number of documents indexed.
+
+        Ref: code_ref.py t4_fetch_all_workflows() + rag.engine.index_tools()
+        """
+        try:
+            from rag.engine import get_rag_engine
+
+            if workflows is None:
+                workflows = self.list_workflows()
+
+            if not workflows:
+                return 0
+
+            docs: list[dict] = []
+            for wf in workflows:
+                wf_id = str(wf.get("workflowId") or wf.get("id") or "").strip()
+                wf_name = str(wf.get("workflowName") or wf.get("name") or "").strip()
+                if not wf_name:
+                    continue
+
+                description = str(wf.get("description") or wf_name)
+                category = str(wf.get("category") or "")
+                tags = wf.get("tags") or []
+                params = wf.get("parameters") or []
+
+                # Build rich content for semantic search
+                param_parts = []
+                for p in params:
+                    if isinstance(p, dict):
+                        p_name = p.get("name", "")
+                        # T4 Catalogue has 'displayName' and 'optional'
+                        disp = p.get("displayName") or p.get("displayname")
+                        req_str = "Required"
+                        if p.get("optional") is True:
+                            req_str = "Optional"
+                        
+                        p_desc = p.get("description") or p.get("helpText") or req_str
+                        label = f"{p_name} ({disp})" if disp and disp != p_name else p_name
+                        
+                        if p_name:
+                            param_parts.append(f"  • {label}: {p_desc}")
+                
+                param_text = "\n".join(param_parts) if param_parts else "None"
+
+                content = (
+                    f"Workflow: {wf_name}\n"
+                    f"Description: {description}\n"
+                    f"Category: {category}\n"
+                    f"Required Parameters:\n{param_text}\n"
+                )
+                if tags:
+                    content += f"Tags: {', '.join(str(t) for t in tags)}\n"
+
+                doc_id = f"t4-workflow-{wf_id}" if wf_id else f"t4-workflow-{wf_name}"
+                docs.append({
+                    "id": doc_id,
+                    "content": content,
+                    "collection": "tools",
+                    "metadata": {
+                        "tool_name": wf_name,
+                        "workflow_id": wf_id,
+                        "workflow_name": wf_name,
+                        "category": category,
+                        "source": "automationedge",
+                        "dynamic": True,
+                        "active": bool(wf.get("active", True)),
+                        "tags": tags,
+                        "tier": "medium_risk",
+                        "parameters": params, # Store raw params for tool call construction
+                    },
+                })
+
+            if not docs:
+                return 0
+
+            rag = get_rag_engine()
+            rag.index_documents(docs, collection="tools")
+            logger.info(
+                "T4: indexed %d workflows into RAG rag_documents(tools).", len(docs)
+            )
+            return len(docs)
+
+        except Exception as exc:
+            logger.warning(
+                "T4: workflow RAG indexing failed (non-fatal): %s", exc
+            )
+            return 0
+
+    def get_cached_workflow_parameters(self, workflow_name: str) -> list[dict]:
+        """Fetch workflow parameter schema from the local Postgres catalog.
+        
+        Returns a list of dicts: [{'name': '...', 'type': '...', 'required': bool, ...}]
+        Returns empty list if not found or DB error.
+        """
+        try:
+            from config.db import get_conn
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT parameters FROM workflow_catalog WHERE workflow_name = %s",
+                        (workflow_name,)
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return list(row[0])
+            return []
+        except Exception as exc:
+            logger.debug("T4: cached param lookup failed for %s: %s", workflow_name, exc)
+            return []
+
+    def sync_and_index_workflows(
+        self,
+        workflows: Optional[list[dict]] = None,
+    ) -> dict:
+        """Fetch T4 workflows once, then sync to DB and index for RAG in one shot.
+
+        Call this on startup or whenever dynamic tools are reloaded.
+        Returns counts: {'db_synced': N, 'rag_indexed': M}
+        """
+        if workflows is None:
+            workflows = self.list_workflows()
+
+        db_count = self.sync_workflow_catalog(workflows)
+        rag_count = self.index_workflows_to_rag(workflows)
+        logger.info(
+            "T4: sync_and_index done — db_synced=%d rag_indexed=%d",
+            db_count, rag_count,
+        )
+        return {"db_synced": db_count, "rag_indexed": rag_count}
+
 
     @staticmethod
     def _build_param_array(params: dict[str, Any]) -> list[dict]:
@@ -341,25 +717,42 @@ class AutomationEdgeClient:
 
     @staticmethod
     def _extract_workflow_list(payload: Any) -> list[dict]:
+        raw_list = []
         if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        if not isinstance(payload, dict):
-            return []
-
-        for key in ("workflows", "items", "results", "data", "records"):
-            val = payload.get(key)
-            if isinstance(val, list):
-                return [item for item in val if isinstance(item, dict)]
-
-        # Some APIs return {"data": {"workflows": [...]}}
-        data_block = payload.get("data")
-        if isinstance(data_block, dict):
-            for key in ("workflows", "items", "results", "records"):
-                val = data_block.get(key)
+            raw_list = [item for item in payload if isinstance(item, dict)]
+        elif isinstance(payload, dict):
+            for key in ("workflows", "items", "results", "data", "records"):
+                val = payload.get(key)
                 if isinstance(val, list):
-                    return [item for item in val if isinstance(item, dict)]
+                    raw_list = [item for item in val if isinstance(item, dict)]
+                    break
+            
+            if not raw_list:
+                data_block = payload.get("data")
+                if isinstance(data_block, dict):
+                    for key in ("workflows", "items", "results", "records"):
+                        val = data_block.get(key)
+                        if isinstance(val, list):
+                            raw_list = [item for item in val if isinstance(item, dict)]
+                            break
 
-        return []
+        # Normalize keys: T4 uses 'name' and 'id', but agent expects 'workflowName' and 'workflowId'
+        # Also map 'params' (Catalogue) to 'parameters' (Runtime/Agent)
+        normalized = []
+        for item in raw_list:
+            norm_item = dict(item)
+            if "name" in item and "workflowName" not in item:
+                norm_item["workflowName"] = item["name"]
+            if "id" in item and "workflowId" not in item:
+                norm_item["workflowId"] = item["id"]
+            
+            # Catalogue uses 'params', Runtime/Agent expects 'parameters'
+            if "params" in item and "parameters" not in item:
+                norm_item["parameters"] = item["params"]
+            
+            normalized.append(norm_item)
+
+        return normalized
 
     def close(self):
         self._client.close()

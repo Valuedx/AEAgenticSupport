@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 
-from vertexai.generative_models import Content, Part
+from google.genai import types
 
 from agents.approval_gate import ApprovalGate, ApprovalIntent
 from agents.escalation import EscalationAgent
@@ -190,9 +190,11 @@ class Orchestrator:
                                     query_embedding=query_vec)
             sop_hits = rag.search_sops(user_message, top_k=3,
                                        query_embedding=query_vec)
+            incident_hits = rag.search_past_incidents(user_message, top_k=3,
+                                                       query_embedding=query_vec)
 
             context_block = self._format_rag_context(
-                tool_hits[:5], kb_hits, sop_hits
+                tool_hits[:5], kb_hits, sop_hits, incident_hits
             )
 
             rag_tool_names = [
@@ -206,11 +208,9 @@ class Orchestrator:
             active_tool_names = self._extract_active_tool_names(vertex_tools)
 
             messages = [
-                Content(
+                types.Content(
                     role="user",
-                    parts=[Part.from_text(
-                        f"{context_block}\n\nUser: {user_message}"
-                    )],
+                    parts=[types.Part(text=f"{context_block}\n\nUser: {user_message}")],
                 )
             ]
 
@@ -239,58 +239,56 @@ class Orchestrator:
                 parts = candidate.content.parts
 
                 fn_calls = [
-                    p for p in parts
-                    if hasattr(p, 'function_call') and p.function_call
+                    p.function_call for p in parts
+                    if p.function_call
                 ]
                 tool_called = bool(fn_calls)
 
                 if tool_called:
                     needs_expansion = False
-                    for fc_part in fn_calls:
-                        fc = fc_part.function_call
+                    for fc in fn_calls:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
                         tool_def = tool_registry.get_tool(tool_name)
 
-                        if not tool_def:
-                            tool_def = tool_registry.resolve_discovered_tool(
-                                tool_name
-                            )
-                            if tool_def:
-                                needs_expansion = True
-
-                        if tool_def and self.approval_gate.needs_approval(
-                            tool_name, tool_def.tier, tool_args
-                        ):
-                            state.pending_action = {
-                                "tool": tool_name,
-                                "args": tool_args,
-                                "tier": tool_def.tier,
-                                "authorized_users": tool_args.get(
-                                    "authorized_users", []
-                                ),
-                            }
-                            summary = (
-                                f"{tool_name} on "
-                                f"{tool_args.get('workflow_name', 'unknown')}"
-                            )
-                            state.pending_action_summary = summary
-                            state.phase = ConversationPhase.AWAITING_APPROVAL
-                            state.is_agent_working = False
-                            return self.approval_gate.format_approval_prompt(
-                                self.approval_gate.create_approval_request(
-                                    tool_name, tool_def.tier,
-                                    tool_args, summary,
+                        if tool_def:
+                            # Check for missing required parameters first. 
+                            # If params are missing, we don't ask for approval yet.
+                            # We let the tool run (dynamic tools return a friendly prompt)
+                            # or the agent will naturally realize it needs them.
+                            missing = [p for p in tool_def.required_params if p not in tool_args]
+                            
+                            if not missing and self.approval_gate.needs_approval(
+                                tool_name, tool_def.tier, tool_args
+                            ):
+                                state.pending_action = {
+                                    "tool": tool_name,
+                                    "args": tool_args,
+                                    "tier": tool_def.tier,
+                                    "authorized_users": tool_args.get(
+                                        "authorized_users", []
+                                    ),
+                                }
+                                summary = (
+                                    f"{tool_name} on "
+                                    f"{tool_args.get('workflow_name', 'unknown')}"
                                 )
-                            )
+                                state.pending_action_summary = summary
+                                state.phase = ConversationPhase.AWAITING_APPROVAL
+                                state.is_agent_working = False
+                                return self.approval_gate.format_approval_prompt(
+                                    self.approval_gate.create_approval_request(
+                                        tool_name, tool_def.tier,
+                                        tool_args, summary,
+                                    )
+                                )
 
                     messages.append(candidate.content)
 
                     response_parts = []
                     discovered_names: list[str] = []
 
-                    for fc_part in fn_calls:
-                        fc = fc_part.function_call
+                    for fc in fn_calls:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
 
@@ -301,11 +299,13 @@ class Orchestrator:
                             )
                         if not tool_def:
                             response_parts.append(
-                                Part.from_function_response(
-                                    name=tool_name,
-                                    response={
-                                        "error": f"unknown tool '{tool_name}'"
-                                    },
+                                types.Part(
+                                    function_response=types.FunctionResponse(
+                                        name=tool_name,
+                                        response={
+                                            "error": f"unknown tool '{tool_name}'"
+                                        },
+                                    )
                                 )
                             )
                             continue
@@ -340,19 +340,30 @@ class Orchestrator:
                                     result.error[:100],
                                 )
 
+                        # Handle "Ask Again" pattern from Tool Result
                         result_payload = (
                             {"result": result.data}
-                            if result.success
+                            if result.success or (isinstance(result.data, dict) and result.data.get("needs_user_input"))
                             else {"error": result.error}
                         )
+
+                        if isinstance(result.data, dict) and result.data.get("needs_user_input"):
+                            question = result.data.get("question", "I need more information to proceed.")
+                            state.add_message("assistant", question)
+                            state.is_agent_working = False
+                            # We stop here and ask the user
+                            return question
+
                         response_parts.append(
-                            Part.from_function_response(
-                                name=tool_name,
-                                response=result_payload,
+                            types.Part(
+                                function_response=types.FunctionResponse(
+                                    name=tool_name,
+                                    response=result_payload,
+                                )
                             )
                         )
 
-                    messages.append(Content(parts=response_parts))
+                    messages.append(types.Content(role="model", parts=response_parts))
 
                     if discovered_names or needs_expansion:
                         expanded = list(active_tool_names) + discovered_names
@@ -367,7 +378,7 @@ class Orchestrator:
                     progress.on_phase("almost_done")
                     text_parts = [
                         p.text for p in parts
-                        if hasattr(p, 'text') and p.text
+                        if p.text
                     ]
                     final_response = "\n".join(text_parts) if text_parts else (
                         "I've completed my investigation. Let me know if "
@@ -601,7 +612,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
 
         return f"{base_prompt}\n{persona}\n{issue_context}"
 
-    def _format_rag_context(self, tool_hits, kb_hits, sop_hits) -> str:
+    def _format_rag_context(self, tool_hits, kb_hits, sop_hits, incident_hits=None) -> str:
         sections = []
         if kb_hits:
             kb_text = "\n".join(
@@ -613,6 +624,11 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
                 f"- {h.get('content', '')[:200]}" for h in sop_hits[:3]
             )
             sections.append(f"## SOPs\n{sop_text}")
+        if incident_hits:
+            inc_text = "\n".join(
+                f"- {h.get('content', '')[:250]}" for h in incident_hits[:3]
+            )
+            sections.append(f"## Past Incidents & Resolutions\n{inc_text}")
         if tool_hits:
             tool_text = "\n".join(
                 f"- {h.get('content', '')[:150]}" for h in tool_hits[:5]

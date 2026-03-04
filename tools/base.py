@@ -27,6 +27,11 @@ class ToolDefinition:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_rag_document(self) -> dict:
+        # Build a rich searchable content string that helps RAG surface this tool
+        param_desc = ", ".join(
+            f"{k} ({v.get('type', 'any')}{'*' if k in self.required_params else ''})"
+            for k, v in (self.parameters or {}).items()
+        )
         return {
             "id": f"tool-{self.name}",
             "content": (
@@ -34,19 +39,24 @@ class ToolDefinition:
                 f"Category: {self.category}\n"
                 f"Risk tier: {self.tier}\n"
                 f"Description: {self.description}\n"
-                f"Parameters: {self.parameters}\n"
-                f"Required: {self.required_params}"
+                f"Parameters: {param_desc}\n"
+                f"Required: {', '.join(self.required_params) or 'none'}"
             ),
             "metadata": {
                 "tool_name": self.name,
                 "category": self.category,
                 "tier": self.tier,
                 "source": self.metadata.get("source", "static"),
+                "workflow_name": self.metadata.get("workflow_name", ""),
+                "always_available": self.always_available,
+                "dynamic": bool(self.metadata.get("dynamic", False)),
+                "tags": self.metadata.get("tags", []),
             },
         }
 
+
     def to_llm_schema(self) -> dict:
-        """Return a schema compatible with Vertex AI FunctionDeclaration."""
+        """Return a schema compatible with GenAI / Vertex AI FunctionDeclaration."""
         return {
             "name": self.name,
             "description": self.description,
@@ -56,20 +66,6 @@ class ToolDefinition:
                 "required": self.required_params,
             },
         }
-
-    def to_vertex_function_declaration(self):
-        """Return a Vertex AI FunctionDeclaration object."""
-        from vertexai.generative_models import FunctionDeclaration
-
-        return FunctionDeclaration(
-            name=self.name,
-            description=self.description,
-            parameters={
-                "type": "object",
-                "properties": self.parameters,
-                "required": self.required_params,
-            },
-        )
 
 
 @dataclass

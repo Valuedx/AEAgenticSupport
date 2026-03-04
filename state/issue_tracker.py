@@ -18,6 +18,7 @@ from psycopg2.extras import Json
 from config.db import get_conn
 from config.llm_client import llm_client
 from config.settings import CONFIG
+from rag.engine import get_rag_engine
 
 logger = logging.getLogger("ops_agent.issue_tracker")
 
@@ -447,6 +448,7 @@ If no issue_id applies: CLASSIFICATION|none"""
             issue.touch()
             self._persist_issue(issue)
             logger.info(f"Resolved issue: {issue_id}")
+            self.sync_to_rag(issue_id)
 
     def reopen_issue(self, issue_id: str) -> Issue:
         if issue_id in self.issues:
@@ -518,6 +520,46 @@ If no issue_id applies: CLASSIFICATION|none"""
             logger.info(f"Resumed stale issue: {issue_id}")
             return issue
         return None
+
+    def sync_to_rag(self, issue_id: str):
+        """Index a resolved issue into the RAG 'past_incidents' collection."""
+        if issue_id not in self.issues:
+            return
+
+        issue = self.issues[issue_id]
+        if issue.status != IssueStatus.RESOLVED:
+            logger.warning(f"Attempted to RAG-sync unresolved issue {issue_id}")
+            return
+
+        # Format content for semantic search
+        content = (
+            f"Title: {issue.title}\n"
+            f"Description: {issue.description}\n"
+            f"Workflows: {', '.join(issue.workflows_involved)}\n"
+            f"Resolution: {issue.resolution}\n"
+            f"Root Cause: {issue.root_cause}\n"
+        )
+        if issue.findings:
+            content += "\nFindings:\n"
+            for f in issue.findings:
+                content += f"  - {f.get('note', f.get('finding', str(f)))}\n"
+
+        doc = {
+            "id": issue.issue_id,
+            "content": content,
+            "metadata": {
+                "issue_id": issue.issue_id,
+                "type": "incident",
+                "org_code": CONFIG.get("AE_ORG_CODE"),
+                "resolved_at": issue.resolved_at
+            }
+        }
+
+        try:
+            get_rag_engine().index_documents([doc], collection="past_incidents")
+            logger.info(f"Synced resolved issue {issue_id} to RAG (past_incidents)")
+        except Exception as e:
+            logger.warning(f"Failed to sync issue {issue_id} to RAG: {e}")
 
     # ── Query helpers ──
 

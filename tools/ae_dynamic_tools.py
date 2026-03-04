@@ -47,6 +47,7 @@ def _collect_parameter_lists(payload: Any, bag: list[list[dict]]):
                 "runtimeparameters",
                 "inputparameters",
                 "parameters",
+                "params",
                 "workflowparameters",
             }:
                 dict_items = [it for it in value if isinstance(it, dict)]
@@ -253,14 +254,22 @@ def extract_dynamic_tool_mapping(
         description_txt = str(
             _get_first_value(
                 param,
-                ("description", "helptext"),
+                ("displayname", "description", "helptext"),
                 f"Parameter '{name}'",
             )
             or f"Parameter '{name}'"
         )
         required_flag = _to_bool(
-            _get_first_value(param, ("required", "mandatory", "isrequired"), False)
+            _get_first_value(param, ("required", "mandatory", "isrequired"), None),
+            default=None
         )
+        if required_flag is None:
+            # T4 Catalogue uses 'optional': false for required
+            opt = param.get("optional")
+            if isinstance(opt, bool):
+                required_flag = not opt
+            else:
+                required_flag = False
 
         prop_schema = {"type": json_type, "description": description_txt}
         default_val = _get_first_value(param, ("defaultvalue", "default"), None)

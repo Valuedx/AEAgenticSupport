@@ -250,6 +250,11 @@ class ToolRegistry:
             skipped,
             len(collisions),
         )
+
+        # Sync all fetched workflows to Postgres workflow_catalog AND index embeddings in RAG.
+        # Single call re-uses the already-fetched `workflows` list — no extra API call.
+        sync_result = client.sync_and_index_workflows(workflows)
+
         return {
             "enabled": True,
             "removed": removed,
@@ -257,7 +262,10 @@ class ToolRegistry:
             "skipped": skipped,
             "collisions": collisions,
             "total_workflows": len(workflows),
+            "db_synced": sync_result.get("db_synced", 0),
+            "rag_indexed": sync_result.get("rag_indexed", 0),
         }
+
 
     def _make_dynamic_tool_handler(
         self,
@@ -267,11 +275,25 @@ class ToolRegistry:
         client = ae_client or get_automationedge_client()
 
         def _handler(**kwargs):
-            missing = [p for p in mapping.required_params if p not in kwargs]
+            # ── "Ask Again" pattern from code_ref.py remediation_agent_ask_params ──
+            # If required params are missing, return a structured request for them
+            # instead of a silent failure. The orchestrator will see needs_user_input=True
+            # and re-prompt the user with the question.
+            missing = [p for p in mapping.required_params if not kwargs.get(p)]
             if missing:
+                # Build a friendly, conversational question (mirrors code_ref.py pattern)
+                param_bullets = "\n".join(f"  • {p}" for p in missing)
+                friendly_name = mapping.workflow_name.replace("_", " ").replace("-", " ").title()
+                question = (
+                    f"I'm ready to help with **{friendly_name}**! Just need a few details first:\n"
+                    f"{param_bullets}\n\n"
+                    f"Please share these and I'll take care of the rest."
+                )
                 return {
                     "success": False,
-                    "error": "Missing required parameter(s): " + ", ".join(missing),
+                    "needs_user_input": True,
+                    "missing_params": missing,
+                    "question": question,
                     "tool_name": mapping.tool_name,
                     "workflow_name": mapping.workflow_name,
                 }
@@ -310,15 +332,14 @@ class ToolRegistry:
 
         return _handler
 
+
     # -----------------------------------------------------------------
     # Vertex AI tool objects
     # -----------------------------------------------------------------
 
     def get_vertex_tools(self) -> list:
-        from vertexai.generative_models import Tool
-
-        declarations = [t.to_vertex_function_declaration() for t in self._tools.values()]
-        return [Tool(function_declarations=declarations)]
+        declarations = [t.to_llm_schema() for t in self._tools.values()]
+        return [{"function_declarations": declarations}]
 
     def get_vertex_tools_filtered(
         self,
@@ -329,8 +350,6 @@ class ToolRegistry:
 
         if len(self._tools) <= MAX_TOOLS_FOR_FULL_CATALOG:
             return self.get_vertex_tools()
-
-        from vertexai.generative_models import Tool
 
         selected: dict[str, ToolDefinition] = {}
         for tool_def in self._tools.values():
@@ -345,14 +364,14 @@ class ToolRegistry:
         if "discover_tools" in self._tools:
             selected["discover_tools"] = self._tools["discover_tools"]
 
-        declarations = [t.to_vertex_function_declaration() for t in selected.values()]
+        declarations = [t.to_llm_schema() for t in selected.values()]
         logger.info(
             "Filtered tools: %s/%s (%s)",
             len(selected),
             len(self._tools),
             ", ".join(selected.keys()),
         )
-        return [Tool(function_declarations=declarations)]
+        return [{"function_declarations": declarations}]
 
     # -----------------------------------------------------------------
     # discover_tools meta-tool

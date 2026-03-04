@@ -12,7 +12,10 @@ logger = logging.getLogger("ops_agent.tools.dependency")
 
 
 def get_workflow_dependencies(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/dependencies")
+    # Most AE versions wrap dependencies in the workflow config or a specific endpoint
+    # For now, let's try to generalize or use the detail endpoint if appropriate
+    # but the 404 was specifically on /config.
+    resp = get_ae_client().get_workflow_details(workflow_name)
     return {
         "workflow_name": workflow_name,
         "upstream": resp.get("upstream", []),
@@ -22,7 +25,7 @@ def get_workflow_dependencies(workflow_name: str) -> dict:
 
 
 def get_workflow_config(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/config")
+    resp = get_ae_client().get_workflow_details(workflow_name)
     return {
         "workflow_name": workflow_name,
         "input_paths": resp.get("input_paths", []),
@@ -34,10 +37,12 @@ def get_workflow_config(workflow_name: str) -> dict:
 
 
 def get_schedule_info(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/schedule")
+    # Schedules are often part of the config or a sibling endpoint
+    # We'll use the client's abstraction if available, or fetch config for now
+    resp = get_ae_client().get_workflow_details(workflow_name)
     return {
         "workflow_name": workflow_name,
-        "cron_expression": resp.get("cronExpression"),
+        "cron_expression": resp.get("cronExpression") or resp.get("parameters", {}).get("cronExpression"),
         "next_run": resp.get("nextRun"),
         "last_run": resp.get("lastRun"),
         "timezone": resp.get("timezone"),

@@ -11,7 +11,8 @@ logger = logging.getLogger("ops_agent.tools.status")
 
 
 def check_workflow_status(workflow_name: str) -> dict:
-    resp = get_ae_client().get(f"/api/v1/workflows/{workflow_name}/status")
+    org = get_ae_client().default_org_code
+    resp = get_ae_client().get(f"/{org}/workflows/{workflow_name}/status")
     return {
         "workflow_name": workflow_name,
         "status": resp.get("status", "UNKNOWN"),
@@ -23,8 +24,9 @@ def check_workflow_status(workflow_name: str) -> dict:
 
 
 def list_recent_failures(hours: int = 24, limit: int = 20) -> dict:
+    org = get_ae_client().default_org_code
     resp = get_ae_client().get(
-        "/api/v1/failures/recent",
+        f"/{org}/failures/recent",
         params={"hours": hours, "limit": limit},
     )
     failures = resp.get("failures", [])
@@ -36,7 +38,8 @@ def list_recent_failures(hours: int = 24, limit: int = 20) -> dict:
 
 
 def get_system_health() -> dict:
-    resp = get_ae_client().get("/api/v1/system/health")
+    org = get_ae_client().default_org_code
+    resp = get_ae_client().get(f"/{org}/system/health")
     agents = resp.get("agents", [])
     online = sum(1 for a in agents if a.get("status") == "online")
     return {
@@ -50,9 +53,8 @@ def get_system_health() -> dict:
 
 
 def get_queue_status(queue_name: str) -> dict:
-    resp = get_ae_client().get(
-        f"/api/v1/queues/{queue_name}/status",
-    )
+    org = get_ae_client().default_org_code
+    resp = get_ae_client().get(f"/{org}/queues/{queue_name}/status")
     return {
         "queue_name": queue_name,
         "pending": resp.get("pending", 0),
@@ -63,12 +65,293 @@ def get_queue_status(queue_name: str) -> dict:
 
 
 def get_agent_status(agent_name: str = "") -> dict:
+    """Check T4 agent health via POST /monitoring/agents.
+
+    Ref: code_ref.py t4_check_agent_status() / t4_get_agent_monitoring()
+    """
+    client = get_ae_client()
+    agents = client.check_agent_status()
+
+    if not agents:
+        return {
+            "success": False,
+            "agents": [],
+            "total": 0,
+            "message": "No agents found or monitoring endpoint unreachable.",
+        }
+
     if agent_name:
-        return get_ae_client().get(f"/api/v1/agents/{agent_name}/status")
-    return get_ae_client().get("/api/v1/agents/status")
+        agents = [a for a in agents if a.get("agentName", "") == agent_name]
+
+    selected = next(
+        (a for a in agents if a.get("agentState", "").upper() in ("CONNECTED", "RUNNING")),
+        agents[0] if agents else {},
+    )
+
+    return {
+        "success": True,
+        "agents": agents,
+        "total": len(agents),
+        "selected_agent": {
+            "name": selected.get("agentName", "Unknown"),
+            "id": selected.get("agentId") or selected.get("id"),
+            "state": selected.get("agentState", "UNKNOWN"),
+        },
+    }
 
 
-# ── Register status tools ──
+def t4_check_agent_status_tool(agent_name: str = "") -> dict:
+    """T4 Status Check Agent — mirrors code_ref.py t4_get_agent_details().
+
+    Uses POST /monitoring/agents endpoint and selects the best available agent.
+    """
+    client = get_ae_client()
+    agents = client.check_agent_status()
+
+    if not agents:
+        return {
+            "success": False,
+            "agents": [],
+            "state": "NO_AGENTS",
+            "message": "No agents returned. Check T4_ORG_CODE and T4 connectivity.",
+        }
+
+    if agent_name:
+        named = [a for a in agents if a.get("agentName") == agent_name]
+        if named:
+            agents = named
+
+    selected = next(
+        (a for a in agents if a.get("agentState", "").upper() in ("CONNECTED", "RUNNING")),
+        agents[0],
+    )
+
+    state = selected.get("agentState", "UNKNOWN").upper()
+    is_healthy = state in ("CONNECTED", "RUNNING", "ACTIVE")
+
+    return {
+        "success": True,
+        "agent_name": selected.get("agentName", "Unknown"),
+        "agent_id": selected.get("agentId") or selected.get("id"),
+        "agent_state": state,
+        "is_healthy": is_healthy,
+        "all_agents": agents,
+        "message": (
+            f"Agent '{selected.get('agentName')}' is {state} and healthy."
+            if is_healthy
+            else f"Agent '{selected.get('agentName')}' is {state} — may need attention."
+        ),
+    }
+
+
+def t4_execute_and_poll(
+    workflow_name: str,
+    workflow_id: str,
+    params: dict = None,
+    poll_interval_sec: int = 5,
+    max_poll_attempts: int = 60,
+) -> dict:
+    """T4 Execution Agent — execute a workflow and poll until complete.
+
+    Ref: code_ref.py t4_execute_workflow() + t4_poll_status()
+    Builds the correct T4 payload: orgCode, workflowName, params list format.
+    """
+    client = get_ae_client()
+    org = client.default_org_code
+
+    # ── "Ask Again" pattern ──
+    # Identify specific required parameters from the local catalog
+    schema = client.get_cached_workflow_parameters(workflow_name)
+    required = [p["name"] for p in schema if p.get("required") or p.get("is_required")]
+    missing = [p for p in required if not (params or {}).get(p)]
+
+    if missing:
+        # Build a friendly, specific question (mirrors dynamic tool behavior)
+        param_bullets = "\n".join(f"  • {p}" for p in missing)
+        friendly_name = workflow_name.replace("_", " ").replace("-", " ").title()
+        return {
+            "success": False,
+            "needs_user_input": True,
+            "question": (
+                f"I'm ready to help with **{friendly_name}**! Just need a few specific details first:\n"
+                f"{param_bullets}\n\n"
+                f"Please share these and I'll take care of the rest."
+            ),
+            "tool_name": "t4_execute_and_poll",
+            "workflow_name": workflow_name,
+            "missing_params": missing
+        }
+
+    # Execute via the updated client method (handles payload format + query params automatically)
+    try:
+        raw = client.execute_workflow(
+            workflow_name=workflow_name,
+            workflow_id=workflow_id,
+            params=params,
+            source="ae-agentic-support-status-check"
+        )
+    except Exception as exc:
+        logger.error("T4 execute failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+    request_id = (
+        execute_resp.get("automationRequestId")
+        or execute_resp.get("requestId")
+        or execute_resp.get("id")
+    )
+    if not request_id:
+        return {
+            "success": False,
+            "error": "T4 did not return a request/execution ID.",
+            "raw": execute_resp,
+        }
+
+    logger.info(
+        "T4 execute: workflow=%s request_id=%s — polling...", workflow_name, request_id
+    )
+
+    poll_result = client.poll_execution_status(
+        execution_id=str(request_id),
+        poll_interval_sec=poll_interval_sec,
+        max_attempts=max_poll_attempts,
+    )
+
+    status = poll_result.get("status", "unknown")
+    raw = poll_result.get("raw") or {}
+
+    # ── Extract detailed workflowResponse ──
+    detailed_msg = ""
+    wf_resp_str = raw.get("workflowResponse")
+    if wf_resp_str:
+        try:
+            import json
+            wf_resp = json.loads(wf_resp_str)
+            detailed_msg = wf_resp.get("message") or ""
+        except Exception:
+            pass
+
+    status_messages = {
+        "Complete": f"'{workflow_name}' completed successfully! {detailed_msg}".strip(),
+        "Failure": f"'{workflow_name}' encountered a failure. Check logs for details.",
+        "no_agent": "No automation agent was available. Please check agent health.",
+        "timeout": "Execution timed out waiting for a result.",
+        "Error": f"'{workflow_name}' encountered an error.",
+    }
+
+    return {
+        "success": status == "Complete",
+        "status": status,
+        "request_id": str(request_id),
+        "workflow_name": workflow_name,
+        "message": status_messages.get(status, f"Status: {status}"),
+        "raw": raw,
+    }
+
+
+def get_execution_status(execution_id: str) -> dict:
+    """Get status of a specific workflow execution by ID.
+
+    Tries both global and org-scoped T4 workflowinstances paths.
+    Ref: code_ref.py t4_poll_status() dual-URL logic.
+    """
+    resp = get_ae_client().get_execution_status(execution_id)
+    return {
+        "execution_id": execution_id,
+        "status": resp.get("status", "UNKNOWN"),
+        "workflow_name": resp.get("workflowName") or resp.get("workflow_name"),
+        "agent_name": resp.get("agentName"),
+        "start_time": resp.get("startTime") or resp.get("createdDate"),
+        "end_time": resp.get("endTime"),
+        "error_message": resp.get("errorMessage") or resp.get("errorDetails"),
+        "raw": resp,
+    }
+
+
+# ── Register tools ──
+
+tool_registry.register(
+    ToolDefinition(
+        name="t4_execute_and_poll",
+        description=(
+            "T4 Execution Agent: Execute a specific T4 workflow by name and ID, "
+            "then poll until it completes (Complete/Failure/Error). "
+            "Returns final status, request ID, and result message. "
+            "Use this when the user wants to RUN or TRIGGER an automation workflow."
+        ),
+        category="remediation",
+        tier="medium_risk",
+        parameters={
+            "workflow_name": {
+                "type": "string",
+                "description": "The exact T4 workflow name",
+            },
+            "workflow_id": {
+                "type": "string",
+                "description": "The numeric T4 workflow ID",
+            },
+            "params": {
+                "type": "object",
+                "description": "Key-value dict of workflow input parameters",
+            },
+            "poll_interval_sec": {
+                "type": "integer",
+                "description": "Seconds between status polls (default 5)",
+            },
+            "max_poll_attempts": {
+                "type": "integer",
+                "description": "Max polls before giving up (default 60)",
+            },
+        },
+        required_params=["workflow_name", "workflow_id"],
+        always_available=True,
+    ),
+    t4_execute_and_poll,
+)
+
+tool_registry.register(
+    ToolDefinition(
+        name="t4_check_agent_status",
+        description=(
+            "T4 Status Check Agent: Check if a T4 automation agent is RUNNING/CONNECTED "
+            "using the POST /monitoring/agents endpoint. "
+            "Returns agent name, ID, state, and is_healthy flag. "
+            "Use this when the user asks 'is my agent running?' or 'check agent health'."
+        ),
+        category="status",
+        tier="read_only",
+        parameters={
+            "agent_name": {
+                "type": "string",
+                "description": "Agent name to check (empty = check first/best agent)",
+            },
+        },
+        required_params=[],
+        always_available=True,
+    ),
+    t4_check_agent_status_tool,
+)
+
+tool_registry.register(
+    ToolDefinition(
+        name="get_execution_status",
+        description=(
+            "Get detailed status of a specific workflow execution by ID. "
+            "Checks both global and org-scoped T4 workflowinstances endpoints. "
+            "Use for async tracking after triggering a workflow."
+        ),
+        category="status",
+        tier="read_only",
+        parameters={
+            "execution_id": {
+                "type": "string",
+                "description": "The automation request ID / execution ID to track",
+            },
+        },
+        required_params=["execution_id"],
+        always_available=True,
+    ),
+    get_execution_status,
+)
 
 tool_registry.register(
     ToolDefinition(
@@ -156,8 +439,8 @@ tool_registry.register(
     ToolDefinition(
         name="get_agent_status",
         description=(
-            "Check if AE agents/bots are online, their CPU/memory usage, "
-            "and current workload."
+            "Check if T4 AE agents/bots are online using the T4 monitoring API. "
+            "Returns agent state (RUNNING/CONNECTED/STOPPED) for all or a named agent."
         ),
         category="status",
         tier="read_only",

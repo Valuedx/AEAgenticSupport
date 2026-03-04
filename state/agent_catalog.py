@@ -229,6 +229,59 @@ class AgentCatalog:
             store["interactions"] = interactions
             self._save(store)
 
+        # Dual-write to Postgres tool_execution_log (best-effort)
+        self._log_to_postgres(
+            tool_name=tool_name,
+            params=params,
+            success=success,
+            error=error,
+            conversation_id=conversation_id,
+            matched_agents=matched_agents,
+        )
+
+    def _log_to_postgres(
+        self,
+        *,
+        tool_name: str,
+        params: dict,
+        success: bool,
+        error: str = "",
+        conversation_id: str = "",
+        matched_agents: list[str] | None = None,
+    ):
+        """Write tool execution event to Postgres tool_execution_log.
+
+        Best-effort — never raises. Falls back silently if DB unavailable.
+        """
+        try:
+            from config.db import get_conn
+            from psycopg2.extras import Json as PgJson
+
+            agents = matched_agents or ["unmapped"]
+            trimmed_params = self._trim_params(params)
+
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    for agent_id in agents:
+                        cur.execute("""
+                            INSERT INTO tool_execution_log
+                                (conversation_id, agent_id, tool_name,
+                                 params, success, error_message)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                        """, (
+                            conversation_id or "",
+                            agent_id,
+                            tool_name,
+                            PgJson(trimmed_params),
+                            bool(success),
+                            str(error or ""),
+                        ))
+                conn.commit()
+        except Exception:
+            # Never let DB errors block tool execution logging
+            pass
+
+
     def list_interactions(self, agent_id: str = "", limit: int = 100) -> list[dict]:
         with self._lock:
             store = self._load()

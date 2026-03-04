@@ -1,63 +1,104 @@
-"""
-LLM client using Google Vertex AI (Gemini models).
-Supports both on-prem service account auth and Workload Identity.
-"""
-
 import logging
+import typing
 
 from tenacity import retry, stop_after_attempt, wait_exponential
-import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    # Fallback for environments where it's not installed yet
+    logger = logging.getLogger("ops_agent.llm")
+    logger.error("google-genai not installed. Run: pip install google-genai")
+    raise
 
 from config.settings import CONFIG
 
 logger = logging.getLogger("ops_agent.llm")
 
-vertexai.init(
-    project=CONFIG["GOOGLE_CLOUD_PROJECT"],
-    location=CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-)
-
-
 class VertexAIClient:
+    """LLM client using the newer google-genai SDK (v3)."""
 
     def __init__(self):
+        self.project = CONFIG["GOOGLE_CLOUD_PROJECT"]
+        self.location = CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1")
         self.model_name = CONFIG.get("VERTEX_AI_MODEL", "gemini-2.0-flash")
-        self.model = GenerativeModel(self.model_name)
-        self.gen_config = GenerationConfig(
-            temperature=0.1,
-            max_output_tokens=4096,
-            top_p=0.95,
+        
+        # Initialize the GenAI client
+        self.client = genai.Client(
+            vertexai=True,
+            project=self.project,
+            location=self.location
         )
+        
+        self.default_temp = 0.1
+        self.default_max_tokens = 4096
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def chat(self, prompt: str, system: str = "",
              temperature: float = None, max_tokens: int = None) -> str:
-        config = GenerationConfig(
-            temperature=temperature or self.gen_config.temperature,
-            max_output_tokens=max_tokens or self.gen_config.max_output_tokens,
+        """Simple text generation with optional system prompt."""
+        contents = [genai_types.Content(role="user", parts=[genai_types.Part(text=prompt)])]
+        
+        system_instruction = None
+        if system:
+            system_instruction = genai_types.Content(
+                role="system", 
+                parts=[genai_types.Part(text=system)]
+            )
+
+        config = genai_types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=temperature or self.default_temp,
+            max_output_tokens=max_tokens or self.default_max_tokens,
             top_p=0.95,
         )
-        model = GenerativeModel(
-            self.model_name,
-            system_instruction=system if system else None,
+
+        resp = self.client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=config
         )
-        response = model.generate_content(prompt, generation_config=config)
-        return response.text
+        
+        # Extract text from the new response structure
+        return self._extract_text(resp)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-    def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        system: str = "") -> dict:
-        model = GenerativeModel(
-            self.model_name,
-            system_instruction=system if system else None,
-        )
-        response = model.generate_content(
-            messages,
+    def chat_with_tools(self, messages: list, tools: list,
+                         system: str = "") -> typing.Any:
+        """Chat loop with tool supporting function declarations."""
+        system_instruction = None
+        if system:
+            system_instruction = genai_types.Content(
+                role="system", 
+                parts=[genai_types.Part(text=system)]
+            )
+
+        config = genai_types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=self.default_temp,
+            max_output_tokens=self.default_max_tokens,
             tools=tools,
-            generation_config=self.gen_config,
+        )
+
+        # The SDK handles the message list (list of Content objects) directly
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=messages,
+            config=config
         )
         return response
+
+    def _extract_text(self, resp) -> str:
+        """Helper to extract text from Candidate parts."""
+        buf = []
+        for candidate in getattr(resp, "candidates", []):
+            content = getattr(candidate, "content", None)
+            if not content: continue
+            for part in getattr(content, "parts", []):
+                t = getattr(part, "text", None)
+                if t:
+                    buf.append(str(t))
+        return "".join(buf)
 
 
 llm_client = VertexAIClient()
