@@ -1,3 +1,9 @@
+> **Documentation Update (2026-03-04)**  
+> Patch release notes included in this version:
+> - Added tenant-validated T4 request/response behavior for auth, workflow list, and workflow details.
+> - Added method-level configuration notes (`AE_WORKFLOWS_METHOD`, `AE_WORKFLOW_DETAILS_METHOD`).
+> - Added token-field compatibility note (`sessionToken` vs `token`).
+>
 # AutomationEdge REST API Cheat Sheet
 
 ## Base URL

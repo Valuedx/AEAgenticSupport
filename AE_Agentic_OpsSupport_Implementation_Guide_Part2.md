@@ -1,3 +1,11 @@
+> **Documentation Update (2026-03-04)**  
+> Patch release notes included in this version:
+> - Added `AutomationEdgeClient` with session-token auth (`/authenticate`), workflow execution (`/execute`), and workflow discovery APIs.
+> - Added dynamic AutomationEdge tool discovery and registry reload flow (`reload_automationedge_tools`).
+> - Added tools/agents management APIs and UI (`/tools`, `/api/tools`, `/api/agents`) with agent-tool linking and interaction logs.
+> - Added tenant validation notes for T4 (`sessionToken`, `POST /workflows`, `GET /workflows/{id}`).
+> - Validation status: targeted test suite passed (`33 passed`).
+>
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
 > - Fixed circular import initialization in `agents` and `gateway` packages.
@@ -2269,5 +2277,4 @@ def get_rag_engine() -> PgVectorRAGEngine:
 
 ---
 
-*End of Implementation Guide — Version 2.0 — Updated 2026-02-28*
-
+*End of Implementation Guide — Version 2.0 — Updated 2026-03-04*

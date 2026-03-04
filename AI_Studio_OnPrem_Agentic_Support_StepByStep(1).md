@@ -1,3 +1,11 @@
+> **Documentation Update (2026-03-04)**  
+> Patch release notes included in this version:
+> - Added AutomationEdge session-token REST client support and configurable workflow discovery methods.
+> - Added dynamic AE tool sync and mapping into the tool registry for agentic usecases.
+> - Added tools/agents management UI and APIs for viewing/maintaining agent definitions, tool links, and interactions.
+> - Added T4 tenant validation notes: token field `sessionToken`, workflow list via `POST /workflows`, details via `GET /workflows/{id}`.
+> - Validation status: targeted test suite passed (`33 passed`).
+>
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
 > - Fixed circular import initialization in `agents` and `gateway` packages.
@@ -1458,5 +1466,5 @@ Key things to remember:
 
 ---
 
-**Generated:** 2026-02-20 06:19:06 | **Last updated:** 2026-03-01
+**Generated:** 2026-02-20 06:19:06 | **Last updated:** 2026-03-04
 

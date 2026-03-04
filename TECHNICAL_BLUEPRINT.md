@@ -1,3 +1,11 @@
+> **Documentation Update (2026-03-04)**  
+> Patch release notes included in this version:
+> - Added AutomationEdge session-auth client architecture with token caching and one-time 401 re-auth retry.
+> - Added dynamic AE workflow-to-tool mapping pipeline and runtime reload behavior.
+> - Added agent catalog architecture for per-usecase agent definitions and linked tool interactions.
+> - Added management APIs and UI endpoints for tools/agents administration.
+> - Validation status: targeted test suite passed (`33 passed`).
+>
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
 > - Fixed circular import initialization in `agents` and `gateway` packages.
@@ -10,7 +18,7 @@
 ## AutomationEdge Agentic Support — Technical Blueprint
 
 **Version:** 1.0  
-**Last updated:** 2026-03-02
+**Last updated:** 2026-03-04
 
 ---
 

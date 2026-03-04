@@ -1,3 +1,11 @@
+> **Documentation Update (2026-03-04)**  
+> Patch release notes included in this version:
+> - Added AE session-token setup variables (`AE_USERNAME`, `AE_PASSWORD`, `AE_TOKEN_FIELD`, `AE_WORKFLOWS_METHOD`, `AE_WORKFLOW_DETAILS_METHOD`).
+> - Added guidance for dynamic AE tool sync and tools/agents management APIs/UI.
+> - Added fallback compatibility notes for tenants using `sessionToken` and `POST /workflows`.
+> - Added agent catalog settings (`AGENT_CATALOG_PATH`, `AGENT_ADMIN_TOKEN`, interaction log limit).
+> - Validation status: targeted test suite passed (`33 passed`).
+>
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
 > - Fixed circular import initialization in `agents` and `gateway` packages.
@@ -1268,5 +1276,5 @@ This ensures:
 ---
 
 **Document version:** 3.0
-**Last updated:** 2026-03-01
+**Last updated:** 2026-03-04
 

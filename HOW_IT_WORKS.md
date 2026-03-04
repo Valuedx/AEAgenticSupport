@@ -1,3 +1,11 @@
+> **Documentation Update (2026-03-04)**  
+> Patch release notes included in this version:
+> - Added AutomationEdge session-token client path with auth/execute/workflow-discovery compatibility handling.
+> - Added runtime dynamic tool synchronization from AE workflows.
+> - Added agent definition catalog, agent-tool linking, and interaction logging model.
+> - Added management surface for tools/agents (`/tools` UI and `/api/tools`, `/api/agents` endpoints).
+> - Validation status: targeted test suite passed (`33 passed`).
+>
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
 > - Fixed circular import initialization in `agents` and `gateway` packages.
