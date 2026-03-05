@@ -57,6 +57,7 @@ class ConversationState:
 
         self.pending_action: Optional[dict] = None
         self.pending_action_summary: str = ""
+        self.param_collection: dict = {}
         self.rca_data: Optional[dict] = None
 
         # Concurrency
@@ -137,6 +138,7 @@ class ConversationState:
                 "affected_workflows": self.affected_workflows,
                 "pending_action": self.pending_action,
                 "pending_action_summary": self.pending_action_summary,
+                "param_collection": self.param_collection,
             }
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -191,6 +193,7 @@ class ConversationState:
                         state.pending_action_summary = data.get(
                             "pending_action_summary", ""
                         )
+                        state.param_collection = data.get("param_collection", {}) or {}
                         for f_data in data.get("findings", []):
                             state.findings.append(Finding(**f_data))
         except Exception as e:

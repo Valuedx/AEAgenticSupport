@@ -52,7 +52,17 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
     # Identify specific required parameters from the local catalog
     client = get_ae_client()
     schema = client.get_cached_workflow_parameters(workflow_name)
-    required = [p["name"] for p in schema if p.get("required") or p.get("is_required")]
+    required = []
+    for p in schema:
+        name = p.get("name")
+        if not name:
+            continue
+        opt = p.get("optional")
+        optional_false = opt is False or (
+            isinstance(opt, str) and opt.strip().lower() in {"false", "0", "no", "n"}
+        )
+        if p.get("required") or p.get("is_required") or optional_false:
+            required.append(name)
     missing = [p for p in required if not (parameters or {}).get(p)]
 
     if missing:
@@ -74,8 +84,10 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
 
     # Use the updated T4-compatible execute_workflow method
     try:
+        workflow_id = client.get_cached_workflow_id(workflow_name)
         raw = client.execute_workflow(
             workflow_name=workflow_name,
+            workflow_id=workflow_id,
             params=parameters,
             source="ops-agent-remediation"
         )

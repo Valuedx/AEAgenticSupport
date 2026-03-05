@@ -390,7 +390,8 @@ class ToolRegistry:
             if query and query.strip():
                 rag_hits = get_rag_engine().search_tools(query, top_k=top_k)
                 for hit in rag_hits:
-                    tool_name = hit.get("metadata", {}).get(
+                    metadata = hit.get("metadata", {}) or {}
+                    tool_name = metadata.get(
                         "tool_name", hit.get("id", "").removeprefix("tool-")
                     )
                     td = self._tools.get(tool_name)
@@ -404,6 +405,31 @@ class ToolRegistry:
                                 "tier": td.tier,
                                 "source": md.get("source", "static"),
                                 "similarity": round(hit.get("similarity", 0), 3),
+                            }
+                        )
+                    else:
+                        # RAG-only workflow/tool hit (not currently registered as executable tool).
+                        # Return it with explicit execution guidance so the LLM can use trigger_workflow.
+                        wf_name = (
+                            metadata.get("workflow_name")
+                            or metadata.get("workflowName")
+                            or tool_name
+                        )
+                        results.append(
+                            {
+                                "name": tool_name,
+                                "workflow_name": wf_name,
+                                "description": metadata.get("description", ""),
+                                "category": metadata.get("category", "automationedge"),
+                                "tier": metadata.get("tier", "medium_risk"),
+                                "source": metadata.get("source", "automationedge"),
+                                "similarity": round(hit.get("similarity", 0), 3),
+                                "registered": False,
+                                "use_tool": "trigger_workflow",
+                                "hint": (
+                                    "Tool not registered directly. Use trigger_workflow "
+                                    "with workflow_name and parameters."
+                                ),
                             }
                         )
 

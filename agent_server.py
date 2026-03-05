@@ -193,12 +193,72 @@ def api_tools():
         )
 
     catalog = get_agent_catalog()
-    catalog.ensure_default_agent_links(tool_registry.list_tools())
-    tools = tool_registry.get_tool_inventory(catalog.get_agent_tool_map())
+    
+    # Collect all tool names: from registry (active) + from RAG (searchable)
+    all_tool_names = set(tool_registry.list_tools())
+    try:
+        from rag.engine import get_rag_engine
+        rag_hits = get_rag_engine().list_collection("tools")
+        for hit in rag_hits:
+            meta = hit.get("metadata", {})
+            name = meta.get("tool_name")
+            if not name:
+                raw_id = hit.get("id", "")
+                if raw_id.startswith("tool-"):
+                    name = raw_id.removeprefix("tool-")
+                elif raw_id.startswith("t4-workflow-"):
+                    name = raw_id.removeprefix("t4-workflow-")
+                else:
+                    name = raw_id
+            if name:
+                all_tool_names.add(name)
+    except Exception as exc:
+        log.warning("Failed to fetch tool names from RAG for agent linking: %s", exc)
+
+    catalog.ensure_default_agent_links(list(all_tool_names))
+    tools_inventory = tool_registry.get_tool_inventory(catalog.get_agent_tool_map())
+
+    # ── Merge tools from RAG database for inventory UI ──
+    try:
+        # Initialize seen with existing tools from registry
+        seen_names = {t["toolName"] for t in tools_inventory}
+        
+        for hit in rag_hits:
+            meta = hit.get("metadata", {})
+            name = meta.get("tool_name")
+            if not name:
+                raw_id = hit.get("id", "")
+                if raw_id.startswith("tool-"):
+                    name = raw_id.removeprefix("tool-")
+                elif raw_id.startswith("t4-workflow-"):
+                    name = raw_id.removeprefix("t4-workflow-")
+                else:
+                    name = raw_id
+            
+            if name and name not in seen_names:
+                tools_inventory.append({
+                    "toolName": name,
+                    "workflowName": meta.get("workflow_name", ""),
+                    "description": meta.get("description", ""),
+                    "category": meta.get("category", ""),
+                    "tier": meta.get("tier", "medium_risk"),
+                    "source": meta.get("source", "automationedge"),
+                    "dynamic": True,
+                    "active": meta.get("active", True),
+                    "tags": meta.get("tags", []),
+                    "parameters": meta.get("parameters", []),
+                    "linkedAgents": ["ops_orchestrator"], # Since we just linked them all
+                })
+                seen_names.add(name)
+        # Sort again: Source=static first, then Name
+        tools_inventory.sort(key=lambda t: (0 if t.get("source") == "static" else 1, t["toolName"]))
+    except Exception as exc:
+        log.warning("Failed to merge RAG tools into inventory: %s", exc)
+
     return jsonify(
         {
-            "count": len(tools),
-            "tools": tools,
+            "count": len(tools_inventory),
+            "tools": tools_inventory,
             "sync": sync_summary,
         }
     )

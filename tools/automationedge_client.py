@@ -366,11 +366,30 @@ class AutomationEdgeClient:
             workflow_id=workflow_identifier,
             workflow_name=workflow_identifier,
         )
-        return self._authorized_request(
-            self.workflow_details_method,
+        fallback_paths = [
             endpoint,
-            use_rest_prefix=True,
-        )
+            f"/{org}/workflows/{workflow_identifier}/config" if org else "",
+            f"/workflows/{workflow_identifier}/config",
+            f"/{org}/workflows/{workflow_identifier}" if org else "",
+            f"/workflows/{workflow_identifier}",
+        ]
+        fallback_paths = [p for p in fallback_paths if p]
+
+        last_exc: Optional[Exception] = None
+        for use_prefix in (True, False):
+            for path in fallback_paths:
+                try:
+                    return self._authorized_request(
+                        self.workflow_details_method,
+                        path,
+                        use_rest_prefix=use_prefix,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {400, 404, 500}:
+                        last_exc = exc
+                        continue
+                    raise
+        raise last_exc or RuntimeError(f"Could not fetch workflow details for {workflow_identifier}")
 
     def get_execution_status(self, execution_id: str) -> dict:
         """Get the status of a specific workflow execution.
@@ -387,16 +406,111 @@ class AutomationEdgeClient:
             f"/{self.default_org_code}/workflowinstances/{execution_id}",
         ]
         last_exc: Optional[Exception] = None
-        for path in paths:
-            try:
-                result = self._authorized_request("GET", path, use_rest_prefix=True)
-                return result
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    last_exc = exc
-                    continue
-                raise
+        
+        # T4 variability: try with and without /aeengine/rest prefix
+        for use_prefix in (False, True):
+            for path in paths:
+                try:
+                    result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
+                    return result
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {400, 404, 500}:
+                        last_exc = exc
+                        continue
+                    raise
         raise last_exc or RuntimeError(f"Could not fetch status for execution {execution_id}")
+
+    def get_workflow_latest_instance(self, workflow_name: str, org_code: str = "") -> dict:
+        """Get latest workflow instance for a workflow.
+
+        Tries org-scoped and global variants, with and without REST prefix.
+        Returns the first item when API returns a list.
+        """
+        name = str(workflow_name or "").strip()
+        if not name:
+            raise ValueError("workflow_name is required")
+
+        org = (org_code or self.default_org_code or "").strip()
+        paths = []
+        if org:
+            paths.append(f"/{org}/workflows/{name}/instances")
+        paths.append(f"/workflows/{name}/instances")
+
+        last_exc: Optional[Exception] = None
+        for use_prefix in (False, True):
+            for path in paths:
+                try:
+                    result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
+                    if isinstance(result, list):
+                        return result[0] if result else {}
+                    return result if isinstance(result, dict) else {}
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {400, 404, 500}:
+                        last_exc = exc
+                        continue
+                    raise
+
+        raise last_exc or RuntimeError(
+            f"Could not fetch latest instance for workflow '{workflow_name}'"
+        )
+
+    def get_workflow_instances(self, workflow_name: str, limit: int = 10, org_code: str = "") -> list[dict]:
+        """Get recent workflow instances with endpoint fallbacks."""
+        name = str(workflow_name or "").strip()
+        if not name:
+            raise ValueError("workflow_name is required")
+
+        org = (org_code or self.default_org_code or "").strip()
+        paths = []
+        if org:
+            paths.append(f"/{org}/workflows/{name}/instances")
+        paths.append(f"/workflows/{name}/instances")
+
+        last_exc: Optional[Exception] = None
+        for use_prefix in (False, True):
+            for path in paths:
+                try:
+                    result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
+                    if isinstance(result, list):
+                        return result[: max(limit, 1)]
+                    if isinstance(result, dict):
+                        items = result.get("instances") or result.get("executions") or []
+                        if isinstance(items, list):
+                            return items[: max(limit, 1)]
+                        return [result]
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {400, 404, 500}:
+                        last_exc = exc
+                        continue
+                    raise
+        raise last_exc or RuntimeError(f"Could not fetch instances for workflow '{workflow_name}'")
+
+    def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
+        """Get execution logs by execution id with T4 fallback paths."""
+        if not execution_id:
+            raise ValueError("execution_id is required")
+
+        paths = [
+            f"/workflowinstances/{execution_id}/logs",
+            f"/{self.default_org_code}/workflowinstances/{execution_id}/logs",
+            f"/executions/{execution_id}/logs",
+        ]
+        last_exc: Optional[Exception] = None
+        for use_prefix in (False, True):
+            for path in paths:
+                try:
+                    return self._authorized_request(
+                        "GET",
+                        path,
+                        params={"tail": tail},
+                        use_rest_prefix=use_prefix,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {400, 404, 500}:
+                        last_exc = exc
+                        continue
+                    raise
+        raise last_exc or RuntimeError(f"Could not fetch logs for execution {execution_id}")
 
     def poll_execution_status(
         self,
@@ -563,6 +677,7 @@ class AutomationEdgeClient:
         """
         try:
             from rag.engine import get_rag_engine
+            from tools.ae_dynamic_tools import extract_dynamic_tool_mapping
 
             if workflows is None:
                 workflows = self.list_workflows()
@@ -577,21 +692,27 @@ class AutomationEdgeClient:
                 if not wf_name:
                     continue
 
-                description = str(wf.get("description") or wf_name)
-                category = str(wf.get("category") or "")
-                tags = wf.get("tags") or []
-                params = wf.get("parameters") or []
+                # Try to extract configured tool name for stable ID
+                mapping = extract_dynamic_tool_mapping(wf)
+                
+                # FALLBACK: If no explicit mapping, use raw metadata so it's still searchable
+                display_name = mapping.tool_name if mapping else wf_name
+                description = mapping.description if mapping else str(wf.get("description") or f"Execute workflow {wf_name}")
+                category = mapping.category if mapping else str(wf.get("category") or "automationedge")
+                tags = mapping.tags if mapping else (wf.get("tags") or [])
+                params = mapping.parameter_meta if mapping else (wf.get("parameters") or [])
+                active = mapping.active if mapping else bool(wf.get("active", True))
+                tier = mapping.tier if mapping else "medium_risk"
 
                 # Build rich content for semantic search
                 param_parts = []
                 for p in params:
                     if isinstance(p, dict):
                         p_name = p.get("name", "")
-                        # T4 Catalogue has 'displayName' and 'optional'
-                        disp = p.get("displayName") or p.get("displayname")
-                        req_str = "Required"
-                        if p.get("optional") is True:
-                            req_str = "Optional"
+                        disp = p.get("displayName") or p.get("displayname") or p.get("description")
+                        # Catalogue uses 'optional': false for required
+                        req = p.get("required") or p.get("is_required") or p.get("optional") is False
+                        req_str = "Required" if req else "Optional"
                         
                         p_desc = p.get("description") or p.get("helpText") or req_str
                         label = f"{p_name} ({disp})" if disp and disp != p_name else p_name
@@ -602,7 +723,8 @@ class AutomationEdgeClient:
                 param_text = "\n".join(param_parts) if param_parts else "None"
 
                 content = (
-                    f"Workflow: {wf_name}\n"
+                    f"Workflow Tool: {display_name}\n"
+                    f"Technical Name: {wf_name}\n"
                     f"Description: {description}\n"
                     f"Category: {category}\n"
                     f"Required Parameters:\n{param_text}\n"
@@ -610,22 +732,23 @@ class AutomationEdgeClient:
                 if tags:
                     content += f"Tags: {', '.join(str(t) for t in tags)}\n"
 
-                doc_id = f"t4-workflow-{wf_id}" if wf_id else f"t4-workflow-{wf_name}"
+                # UNIFIED ID: tool-{tool_name} matches ToolDefinition.to_rag_document()
+                doc_id = f"tool-{display_name}"
                 docs.append({
                     "id": doc_id,
                     "content": content,
                     "collection": "tools",
                     "metadata": {
-                        "tool_name": wf_name,
+                        "tool_name": display_name,
                         "workflow_id": wf_id,
                         "workflow_name": wf_name,
                         "category": category,
                         "source": "automationedge",
                         "dynamic": True,
-                        "active": bool(wf.get("active", True)),
+                        "active": active,
                         "tags": tags,
-                        "tier": "medium_risk",
-                        "parameters": params, # Store raw params for tool call construction
+                        "tier": tier,
+                        "parameters": params, # STORE PARAMETERS FOR UI DISCOVERY
                     },
                 })
 
@@ -666,6 +789,24 @@ class AutomationEdgeClient:
         except Exception as exc:
             logger.debug("T4: cached param lookup failed for %s: %s", workflow_name, exc)
             return []
+
+    def get_cached_workflow_id(self, workflow_name: str) -> str:
+        """Fetch workflow_id from local workflow_catalog for a workflow name."""
+        try:
+            from config.db import get_conn
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT workflow_id FROM workflow_catalog WHERE workflow_name = %s",
+                        (workflow_name,),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return str(row[0])
+            return ""
+        except Exception as exc:
+            logger.debug("T4: cached workflow_id lookup failed for %s: %s", workflow_name, exc)
+            return ""
 
     def sync_and_index_workflows(
         self,

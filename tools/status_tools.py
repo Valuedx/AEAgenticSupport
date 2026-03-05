@@ -11,15 +11,27 @@ logger = logging.getLogger("ops_agent.tools.status")
 
 
 def check_workflow_status(workflow_name: str) -> dict:
-    org = get_ae_client().default_org_code
-    resp = get_ae_client().get(f"/{org}/workflows/{workflow_name}/status")
+    # Resolve endpoint variations via client fallback (prefix + org/global paths).
+    try:
+        data = get_ae_client().get_workflow_latest_instance(workflow_name)
+    except Exception as exc:
+        logger.warning("check_workflow_status fallback failed for %s: %s", workflow_name, exc)
+        return {
+            "workflow_name": workflow_name,
+            "status": "UNKNOWN",
+            "last_execution_status": None,
+            "request_id": None,
+            "agent": None,
+            "error_message": str(exc),
+        }
+
     return {
         "workflow_name": workflow_name,
-        "status": resp.get("status", "UNKNOWN"),
-        "last_execution_status": resp.get("last_execution_status"),
-        "schedule": resp.get("schedule"),
-        "agent": resp.get("agent"),
-        "error_message": resp.get("errorMessage"),
+        "status": data.get("status", "UNKNOWN"),
+        "last_execution_status": data.get("status"),
+        "request_id": data.get("automationRequestId") or data.get("id"),
+        "agent": data.get("agentName"),
+        "error_message": data.get("errorMessage") or data.get("errorDetails"),
     }
 
 
@@ -162,7 +174,11 @@ def t4_execute_and_poll(
     # ── "Ask Again" pattern ──
     # Identify specific required parameters from the local catalog
     schema = client.get_cached_workflow_parameters(workflow_name)
-    required = [p["name"] for p in schema if p.get("required") or p.get("is_required")]
+    # T4 Catalogue uses 'optional': false for required parameters
+    required = [
+        p["name"] for p in schema 
+        if p.get("required") or p.get("is_required") or p.get("optional") is False
+    ]
     missing = [p for p in required if not (params or {}).get(p)]
 
     if missing:
@@ -184,7 +200,7 @@ def t4_execute_and_poll(
 
     # Execute via the updated client method (handles payload format + query params automatically)
     try:
-        raw = client.execute_workflow(
+        execute_resp = client.execute_workflow(
             workflow_name=workflow_name,
             workflow_id=workflow_id,
             params=params,

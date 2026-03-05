@@ -56,7 +56,7 @@ CONFIG = {
     "AE_WORKFLOWS_ENDPOINT": os.environ.get("AE_WORKFLOWS_ENDPOINT", "/workflows"),
     "AE_WORKFLOWS_METHOD": os.environ.get("AE_WORKFLOWS_METHOD", "GET"),
     "AE_WORKFLOW_DETAILS_ENDPOINT": os.environ.get(
-        "AE_WORKFLOW_DETAILS_ENDPOINT", "/workflows/{workflow_identifier}"
+        "AE_WORKFLOW_DETAILS_ENDPOINT", "/{org_code}/workflows/{workflow_identifier}/config"
     ),
     "AE_WORKFLOW_DETAILS_METHOD": os.environ.get(
         "AE_WORKFLOW_DETAILS_METHOD", "GET"

@@ -252,6 +252,22 @@ class PgVectorRAGEngine:
             for r in rows
         ]
 
+    def list_collection(self, collection: str) -> list[dict]:
+        """Fetch all documents in a collection without semantic searching."""
+        with self.get_conn_readonly() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, content, metadata
+                    FROM rag_documents
+                    WHERE collection = %s
+                    ORDER BY id ASC
+                """, (collection,))
+                rows = cur.fetchall()
+        return [
+            {"id": r[0], "content": r[1], "metadata": r[2]}
+            for r in rows
+        ]
+
     def _search_numpy(self, query: str, collection: str,
                       top_k: int,
                       query_embedding: list[float] | None = None,
