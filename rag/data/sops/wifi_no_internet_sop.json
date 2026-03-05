@@ -1,0 +1,9 @@
+{
+  "id": "sop-wifi-no-internet",
+  "title": "SOP: WiFi Connected but No Internet",
+  "content": "When users report WiFi is connected but internet is not working, follow these steps:\n\nStep 1: Verify basic connectivity.\n- Check if the user can open the gateway IP.\n- Check if other users on the same network are affected.\n\nStep 2: Validate IP and DNS.\n- Confirm the device has a valid IP, subnet, gateway, and DNS.\n- If IP is APIPA (169.254.x.x), renew DHCP lease.\n\nStep 3: Test DNS resolution.\n- Ping a public IP (for example 8.8.8.8).\n- If IP works but domain fails, set DNS to approved resolver and flush DNS cache.\n\nStep 4: Restart network stack.\n- Disable/enable WiFi adapter.\n- Reconnect to SSID.\n- If needed, restart the endpoint and network access point.\n\nStep 5: Check policy blocks.\n- Verify NAC, firewall, or proxy policy is not blocking internet.\n\nStep 6: Escalate if unresolved.\n- Create incident with test results (gateway reachability, IP config, DNS test).\n- Assign to Network team.",
+  "metadata": {
+    "category": "sop",
+    "tags": ["wifi", "internet", "dns", "network", "troubleshooting"]
+  }
+}

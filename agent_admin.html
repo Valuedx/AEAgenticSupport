@@ -180,6 +180,34 @@
   .pill.err { border-color: #f2b8b5; color: var(--err); background: #fef3f2; }
   .pill.warn { border-color: #fbd08b; color: var(--warn); background: #fff7e9; }
   .muted { color: var(--ink-soft); }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 16px;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal-card {
+    width: min(760px, 100%);
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    background: #f8fcfc;
+  }
+  .modal-body { padding: 14px; }
 
   @media (max-width: 1120px) {
     .grid { grid-template-columns: 1fr; }
@@ -303,6 +331,84 @@
           </div>
         </div>
       </div>
+
+      <div class="panel">
+        <h3>SOP Assistant</h3>
+        <div class="panel-body">
+          <div class="toolbar">
+            <input id="sopQuery" placeholder="Describe issue for SOP guidance (e.g., wifi connection issue)">
+            <button class="btn" onclick="runSopAssist()">Find SOP Steps</button>
+            <span class="status" id="sopStatus"></span>
+          </div>
+          <div id="sopSteps" class="muted" style="margin-bottom:10px;"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Similarity</th>
+                  <th>SOP Snippet</th>
+                </tr>
+              </thead>
+              <tbody id="sopRows"></tbody>
+            </table>
+          </div>
+
+          <div class="toolbar" style="margin-top:14px;">
+            <button class="btn" type="button" onclick="openSopModal()">Add SOP</button>
+            <button class="btn ghost" type="button" onclick="openSopModal(true)">Edit Selected SOP</button>
+          </div>
+
+          <h3 style="margin-top:14px; border:0; padding:0;">Saved SOPs</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Title</th>
+                  <th>Tags</th>
+                  <th>Preview</th>
+                </tr>
+              </thead>
+              <tbody id="sopListRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="sopModal" class="modal-backdrop" onclick="handleSopModalBackdrop(event)">
+    <div class="modal-card">
+      <div class="modal-head">
+        <strong id="sopModalTitle">Add / Update SOP</strong>
+        <button class="btn ghost" type="button" onclick="closeSopModal()">Close</button>
+      </div>
+      <div class="modal-body">
+        <label>SOP ID (optional, for update)</label>
+        <input id="sopId" placeholder="sop-wifi-connectivity-check">
+
+        <div class="row">
+          <div>
+            <label>Title</label>
+            <input id="sopTitle" placeholder="WiFi Connectivity Recovery">
+          </div>
+          <div>
+            <label>Reference ID (optional)</label>
+            <input id="sopRefId" placeholder="SOP-NET-001">
+          </div>
+        </div>
+
+        <label>Tags (comma-separated)</label>
+        <input id="sopTags" placeholder="wifi, network, troubleshooting">
+
+        <label>SOP Content</label>
+        <textarea id="sopContent" placeholder="Step 1: Check adapter...&#10;Step 2: Verify gateway..."></textarea>
+
+        <div class="form-actions">
+          <button class="btn" type="button" onclick="saveSop()">Save SOP</button>
+          <button class="btn ghost" type="button" onclick="clearSopForm()">Clear</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -311,6 +417,7 @@
     tools: [],
     agents: [],
     interactions: [],
+    sops: [],
     selectedAgentId: '',
   };
 
@@ -512,18 +619,21 @@
 
   async function reloadAll() {
     try {
-      const [toolsRes, agentsRes, interactionsRes] = await Promise.all([
+      const [toolsRes, agentsRes, interactionsRes, sopsRes] = await Promise.all([
         apiFetch('/api/tools'),
         apiFetch('/api/agents'),
         apiFetch('/api/interactions?limit=200'),
+        apiFetch('/api/sops?limit=300'),
       ]);
       state.tools = toolsRes.tools || [];
       state.agents = agentsRes.agents || [];
       state.interactions = interactionsRes.interactions || [];
+      state.sops = sopsRes.sops || [];
       renderToolSelect();
       renderTools();
       renderAgents();
       renderInteractions();
+      renderSopList();
       if (state.selectedAgentId) {
         selectAgent(state.selectedAgentId);
       }
@@ -539,6 +649,146 @@
       .replaceAll('>', '&gt;')
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
+  }
+
+  function extractActionSteps(text) {
+    const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const steps = [];
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+      const isStep = ['check', 'verify', 'ensure', 'restart', 'retry', 'validate', 'confirm', 'contact'].some(k => lower.includes(k));
+      if (!isStep) continue;
+      if (line.length < 14) continue;
+      if (!steps.includes(line)) steps.push(line);
+      if (steps.length >= 5) break;
+    }
+    return steps;
+  }
+
+  async function runSopAssist() {
+    const query = (document.getElementById('sopQuery').value || '').trim();
+    if (!query) {
+      setStatus('sopStatus', 'Enter a query.');
+      return;
+    }
+    try {
+      setStatus('sopStatus', 'Searching SOPs...');
+      const payload = await apiFetch('/api/tools/search_knowledge_base/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          args: { query, collection: 'sops', top_k: 5 }
+        }),
+      });
+
+      const result = (payload.data || {});
+      const rows = document.getElementById('sopRows');
+      rows.innerHTML = '';
+      const hits = result.results || [];
+      const stepPool = [];
+
+      hits.forEach(hit => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${escapeHtml(hit.similarity)}</td>
+          <td>${escapeHtml(hit.content || '')}</td>
+        `;
+        rows.appendChild(tr);
+        stepPool.push(...extractActionSteps(hit.content || ''));
+      });
+
+      const uniqueSteps = [];
+      stepPool.forEach(s => { if (!uniqueSteps.includes(s)) uniqueSteps.push(s); });
+      const stepsWrap = document.getElementById('sopSteps');
+      if (uniqueSteps.length) {
+        stepsWrap.innerHTML = '<strong>Suggested SOP steps:</strong><br>' +
+          uniqueSteps.slice(0, 5).map(s => `- ${escapeHtml(s)}`).join('<br>');
+      } else {
+        stepsWrap.innerHTML = '<span class="muted">No actionable SOP steps found for this query.</span>';
+      }
+
+      setStatus('sopStatus', `${hits.length} SOP hit(s)`);
+    } catch (e) {
+      setStatus('sopStatus', 'SOP search failed: ' + e.message);
+    }
+  }
+
+  function renderSopList() {
+    const rows = document.getElementById('sopListRows');
+    rows.innerHTML = '';
+    (state.sops || []).forEach(s => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="mono">${escapeHtml(s.id || '')}</td>
+        <td>${escapeHtml(s.title || '')}</td>
+        <td>${escapeHtml((s.tags || []).join(', '))}</td>
+        <td class="muted">${escapeHtml(s.preview || '')}</td>
+      `;
+      tr.onclick = () => {
+        document.getElementById('sopId').value = s.id || '';
+        document.getElementById('sopTitle').value = s.title || '';
+        document.getElementById('sopRefId').value = s.reference_id || '';
+        document.getElementById('sopTags').value = (s.tags || []).join(', ');
+      };
+      rows.appendChild(tr);
+    });
+  }
+
+  function clearSopForm() {
+    document.getElementById('sopId').value = '';
+    document.getElementById('sopTitle').value = '';
+    document.getElementById('sopRefId').value = '';
+    document.getElementById('sopTags').value = '';
+    document.getElementById('sopContent').value = '';
+  }
+
+  function openSopModal(requireExisting = false) {
+    if (requireExisting && !document.getElementById('sopId').value.trim()) {
+      setStatus('sopStatus', 'Select a saved SOP row first to edit.');
+      return;
+    }
+    document.getElementById('sopModal').classList.add('open');
+  }
+
+  function closeSopModal() {
+    document.getElementById('sopModal').classList.remove('open');
+  }
+
+  function handleSopModalBackdrop(evt) {
+    if (evt.target && evt.target.id === 'sopModal') {
+      closeSopModal();
+    }
+  }
+
+  async function saveSop() {
+    const sopId = (document.getElementById('sopId').value || '').trim();
+    const title = (document.getElementById('sopTitle').value || '').trim();
+    const reference_id = (document.getElementById('sopRefId').value || '').trim();
+    const tags = (document.getElementById('sopTags').value || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const content = (document.getElementById('sopContent').value || '').trim();
+
+    if (!content) {
+      setStatus('sopStatus', 'SOP content is required.');
+      return;
+    }
+
+    try {
+      setStatus('sopStatus', 'Saving SOP...');
+      await apiFetch('/api/sops', {
+        method: 'POST',
+        body: JSON.stringify({ id: sopId, title, reference_id, tags, content }),
+      });
+      setStatus('sopStatus', 'SOP saved and embedded.');
+      clearSopForm();
+      closeSopModal();
+      const sopRes = await apiFetch('/api/sops?limit=300');
+      state.sops = sopRes.sops || [];
+      renderSopList();
+    } catch (e) {
+      setStatus('sopStatus', 'Save failed: ' + e.message);
+    }
   }
 
   (function init() {

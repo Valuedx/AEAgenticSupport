@@ -23,6 +23,7 @@ import queue
 import re
 import sys
 import threading
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -384,6 +385,92 @@ def api_interactions():
     limit = int(request.args.get("limit", 100))
     rows = get_agent_catalog().list_interactions(agent_id=agent_id, limit=limit)
     return jsonify({"count": len(rows), "interactions": rows})
+
+
+@app.route("/api/sops", methods=["GET"])
+def api_sops_list():
+    check = _admin_check()
+    if check:
+        return check
+
+    limit = int(request.args.get("limit", 200))
+    try:
+        from rag.engine import get_rag_engine
+        docs = get_rag_engine().list_collection("sops")
+        docs = docs[: max(limit, 1)]
+        items = []
+        for d in docs:
+            md = d.get("metadata") or {}
+            items.append(
+                {
+                    "id": d.get("id", ""),
+                    "title": md.get("title") or d.get("id", ""),
+                    "tags": md.get("tags", []),
+                    "reference_id": md.get("reference_id", ""),
+                    "created_at": md.get("created_at", ""),
+                    "preview": str(d.get("content", ""))[:220],
+                }
+            )
+        return jsonify({"count": len(items), "sops": items})
+    except Exception as exc:
+        log.error("Failed to list SOPs: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/sops", methods=["POST"])
+def api_sops_upsert():
+    check = _admin_check()
+    if check:
+        return check
+
+    payload = request.get_json(force=True, silent=True) or {}
+    title = str(payload.get("title", "")).strip()
+    content = str(payload.get("content", "")).strip()
+    sop_id = str(payload.get("id", "")).strip()
+    reference_id = str(payload.get("reference_id", "")).strip()
+    tags = payload.get("tags", [])
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    if not isinstance(tags, list):
+        tags = []
+
+    if not content:
+        return jsonify({"error": "content is required"}), 400
+
+    if not title:
+        title = "Untitled SOP"
+
+    if not sop_id:
+        sop_id = f"sop-{_slugify(title)}"
+
+    composed_content = f"{title}\n\n{content}"
+    doc = {
+        "id": sop_id,
+        "content": composed_content,
+        "metadata": {
+            "title": title,
+            "reference_id": reference_id,
+            "tags": tags,
+            "source": "admin_ui",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+    try:
+        from rag.engine import get_rag_engine
+        get_rag_engine().index_documents([doc], collection="sops")
+        return jsonify(
+            {
+                "saved": True,
+                "id": sop_id,
+                "title": title,
+                "reference_id": reference_id,
+                "tags": tags,
+            }
+        )
+    except Exception as exc:
+        log.error("Failed to save SOP: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
 
 
 if __name__ == "__main__":

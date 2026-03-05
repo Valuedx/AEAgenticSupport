@@ -355,16 +355,67 @@ class AutomationEdgeClient:
             current_offset += page_size
         return all_workflows
 
+    def resolve_cached_workflow_name(self, workflow_name: str) -> str:
+        """Resolve workflow name from local catalog using safe exact-match variants."""
+        name = str(workflow_name or "").strip()
+        if not name:
+            return ""
+
+        variants = []
+        base = name.replace("-", "_").replace(" ", "_").strip()
+        if base:
+            variants.append(base)
+            if base.upper().startswith("WF_"):
+                variants.append(base[3:])
+            else:
+                variants.append(f"WF_{base}")
+
+        seen = set()
+        ordered = []
+        for v in variants:
+            key = v.lower()
+            if key not in seen:
+                seen.add(key)
+                ordered.append(v)
+
+        try:
+            from config.db import get_conn
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    for candidate in ordered:
+                        cur.execute(
+                            "SELECT workflow_name FROM workflow_catalog WHERE lower(workflow_name) = lower(%s) LIMIT 1",
+                            (candidate,),
+                        )
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            return str(row[0])
+            return ""
+        except Exception as exc:
+            logger.debug("T4: cached workflow name resolution failed for %s: %s", workflow_name, exc)
+            return ""
+
     def get_workflow_details(self, workflow_identifier: str) -> dict:
         if not workflow_identifier:
             raise ValueError("workflow_identifier is required")
 
+        wf_ident = str(workflow_identifier).strip()
+        if not wf_ident.isdigit():
+            resolved = self.resolve_cached_workflow_name(wf_ident)
+            if resolved:
+                wf_ident = resolved
+            elif not wf_ident.upper().startswith("WF_"):
+                raise ValueError(
+                    f"Workflow '{workflow_identifier}' was not found in catalog. "
+                    "Please use the exact workflow name (usually starts with WF_)."
+                )
+
         org = self.default_org_code
         endpoint = self.workflow_details_endpoint.format(
             org_code=org,
-            workflow_identifier=workflow_identifier,
-            workflow_id=workflow_identifier,
-            workflow_name=workflow_identifier,
+            workflow_identifier=wf_ident,
+            workflow_id=wf_ident,
+            workflow_name=wf_ident,
         )
         fallback_paths = [
             endpoint,
@@ -429,6 +480,15 @@ class AutomationEdgeClient:
         name = str(workflow_name or "").strip()
         if not name:
             raise ValueError("workflow_name is required")
+
+        resolved = self.resolve_cached_workflow_name(name)
+        if resolved:
+            name = resolved
+        elif not name.upper().startswith("WF_"):
+            raise ValueError(
+                f"Workflow '{workflow_name}' was not found in catalog. "
+                "Please use the exact workflow name (usually starts with WF_)."
+            )
 
         org = (org_code or self.default_org_code or "").strip()
         paths = []

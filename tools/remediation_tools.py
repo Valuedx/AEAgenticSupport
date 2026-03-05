@@ -4,6 +4,7 @@ Higher-risk actions require approval via the ApprovalGate.
 """
 
 import logging
+import json
 
 from config.settings import CONFIG
 from tools.base import ToolDefinition, get_ae_client
@@ -106,15 +107,89 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
 
         if not req_id:
             logger.warning(f"T4 trigger for {workflow_name} succeeded but returned no Request ID.")
-        
+
+        # Poll execution status every 2 seconds for a short window, then decide response.
+        final_status = raw.get("status") or raw.get("state") or "QUEUED"
+        poll_raw = {}
+        if req_id:
+            try:
+                poll = client.poll_execution_status(
+                    execution_id=str(req_id),
+                    poll_interval_sec=2,
+                    max_attempts=15,
+                )
+                final_status = poll.get("status", final_status)
+                poll_raw = poll.get("raw") or {}
+            except Exception as poll_exc:
+                logger.warning("Status poll failed for %s (%s): %s", workflow_name, req_id, poll_exc)
+
+        # Pull friendly details from workflowResponse if available.
+        detail_msg = ""
+        wf_response = (poll_raw or {}).get("workflowResponse")
+        if wf_response:
+            try:
+                parsed = json.loads(wf_response)
+                detail_msg = str(parsed.get("message") or "").strip()
+            except Exception:
+                pass
+
+        status_upper = str(final_status or "").upper()
+        if status_upper in {"COMPLETE"}:
+            return {
+                "success": True,
+                "execution_id": req_id,
+                "workflow_name": workflow_name,
+                "status": "Complete",
+                "message": detail_msg or f"{workflow_name} completed successfully.",
+                "request_id": req_id,
+                "raw": poll_raw or raw,
+            }
+
+        if status_upper in {"FAILURE", "ERROR"}:
+            error_msg = (
+                (poll_raw or {}).get("errorMessage")
+                or (poll_raw or {}).get("errorDetails")
+                or detail_msg
+                or f"{workflow_name} execution failed."
+            )
+            return {
+                "success": False,
+                "execution_id": req_id,
+                "workflow_name": workflow_name,
+                "status": final_status,
+                "error": error_msg,
+                "request_id": req_id,
+                "raw": poll_raw or raw,
+            }
+
+        # Pending / queued / new / timeout / no_agent path.
+        # If still pending, check agent health and provide natural guidance.
+        agent_data = client.check_agent_status()
+        healthy_agent = next(
+            (a for a in agent_data if str(a.get("agentState", "")).upper() in {"CONNECTED", "RUNNING", "ACTIVE"}),
+            None,
+        )
+
+        if status_upper in {"NO_AGENT"} or not healthy_agent:
+            pending_msg = (
+                "The request is still pending and no active automation agent is available right now. "
+                "Please contact your administrator to start or reconnect the agent."
+            )
+        else:
+            pending_msg = (
+                "Your request has been accepted and is currently queued (pending execution). "
+                "The agent is online; execution should start shortly."
+            )
+
         return {
             "success": True,
             "execution_id": req_id,
             "workflow_name": workflow_name,
-            "status": raw.get("status") or raw.get("state") or "QUEUED",
-            "message": raw.get("message") or "Workflow triggered successfully.",
+            "status": final_status or "QUEUED",
+            "message": pending_msg,
             "request_id": req_id,
-            "raw": raw
+            "raw": poll_raw or raw,
+            "agent_status": healthy_agent.get("agentState") if healthy_agent else "UNAVAILABLE",
         }
     except Exception as e:
         logger.error(f"Failed to trigger workflow {workflow_name}: {e}")

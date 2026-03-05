@@ -1,0 +1,9 @@
+{
+  "id": "sop-dns-resolution-issue",
+  "title": "SOP: DNS Resolution Issue",
+  "content": "Apply this SOP when users can reach IP addresses but not hostnames.\n\nStep 1: Verify symptom.\n- Confirm ping by IP succeeds and hostname lookup fails.\n\nStep 2: Inspect DNS configuration.\n- Validate DNS servers assigned to endpoint.\n- Ensure DNS suffix/search domain is correct.\n\nStep 3: Flush and retest.\n- Flush DNS cache on endpoint.\n- Retry lookup and browser access.\n\nStep 4: Check DNS server health.\n- Verify resolver availability and response time.\n- Confirm zone records exist and are not stale.\n\nStep 5: Validate network path and firewall.\n- Ensure DNS ports are not blocked.\n- Check forwarding rules and conditional resolvers.\n\nStep 6: Escalate with diagnostics.\n- Include failing hostname, resolver used, nslookup output, and timestamps.",
+  "metadata": {
+    "category": "sop",
+    "tags": ["dns", "hostname", "resolver", "network", "lookup"]
+  }
+}

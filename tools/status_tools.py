@@ -3,6 +3,7 @@ Status & health monitoring tools.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from tools.base import ToolDefinition, get_ae_client
 from tools.registry import tool_registry
@@ -36,17 +37,83 @@ def check_workflow_status(workflow_name: str) -> dict:
 
 
 def list_recent_failures(hours: int = 24, limit: int = 20) -> dict:
-    org = get_ae_client().default_org_code
-    resp = get_ae_client().get(
-        f"/{org}/failures/recent",
-        params={"hours": hours, "limit": limit},
-    )
-    failures = resp.get("failures", [])
-    return {
+    client = get_ae_client()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(hours, 1))
+
+    # T4-compatible fallbacks for workflow instances listing.
+    candidates = [
+        ("POST", "/workflowinstances", True),
+        ("POST", f"/{client.default_org_code}/workflowinstances", True),
+        ("GET", "/workflowinstances", True),
+        ("GET", f"/{client.default_org_code}/workflowinstances", True),
+        ("POST", "/workflowinstances", False),
+        ("GET", "/workflowinstances", False),
+    ]
+
+    data = []
+    last_error = ""
+    for method, path, use_rest_prefix in candidates:
+        try:
+            resp = client.request(
+                method,
+                path,
+                params={"offset": 0, "size": max(limit * 3, 20), "order": "desc"},
+                use_rest_prefix=use_rest_prefix,
+            )
+            if isinstance(resp, dict):
+                data = resp.get("data") or resp.get("instances") or resp.get("executions") or []
+            elif isinstance(resp, list):
+                data = resp
+            if isinstance(data, list):
+                break
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+
+    if not isinstance(data, list):
+        data = []
+
+    failures = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status", "")).upper()
+        if status not in {"FAILURE", "ERROR", "FAILED"}:
+            continue
+
+        ts_ms = item.get("createdDate") or item.get("lastUpdatedDate") or item.get("completedDate")
+        ts = None
+        if isinstance(ts_ms, (int, float)):
+            try:
+                ts = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+            except Exception:
+                ts = None
+        if ts and ts < cutoff:
+            continue
+
+        failures.append(
+            {
+                "execution_id": item.get("id") or item.get("automationRequestId"),
+                "workflow_name": item.get("workflowName")
+                or ((item.get("workflowConfiguration") or {}).get("name")),
+                "status": item.get("status"),
+                "agent_name": item.get("agentName"),
+                "error_message": item.get("errorMessage") or item.get("errorDetails"),
+                "created_date": item.get("createdDate"),
+                "completed_date": item.get("completedDate"),
+            }
+        )
+        if len(failures) >= limit:
+            break
+
+    result = {
         "failures": failures,
-        "total_count": resp.get("total", len(failures)),
+        "total_count": len(failures),
         "time_window_hours": hours,
     }
+    if not failures and last_error:
+        result["warning"] = f"No recent failures found. Last endpoint error: {last_error}"
+    return result
 
 
 def get_system_health() -> dict:

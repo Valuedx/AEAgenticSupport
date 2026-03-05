@@ -1,0 +1,9 @@
+{
+  "id": "sop-wifi-auth-failure",
+  "title": "SOP: WiFi Authentication Failure",
+  "content": "Use this SOP when users get invalid credentials or authentication failure on WiFi.\n\nStep 1: Confirm identity source.\n- Verify username format and domain.\n- Confirm account is active and not locked.\n\nStep 2: Validate access policy.\n- Check if user/group is allowed on the SSID.\n- Verify device compliance policy if NAC is enabled.\n\nStep 3: Remove stale profile.\n- Forget the WiFi network profile.\n- Re-add SSID with approved security settings.\n\nStep 4: Check certificate/time sync.\n- For EAP-TLS or cert-based auth, confirm certificate validity.\n- Ensure endpoint time is synchronized.\n\nStep 5: Review RADIUS/controller logs.\n- Capture rejection reason code.\n- Correlate timestamp with user attempt.\n\nStep 6: Escalate with evidence.\n- Raise incident with username, SSID, time, controller log reason, and endpoint details.",
+  "metadata": {
+    "category": "sop",
+    "tags": ["wifi", "authentication", "radius", "ssid", "access"]
+  }
+}

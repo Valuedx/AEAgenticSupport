@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from google.genai import types
 
@@ -66,6 +67,20 @@ class Orchestrator:
             response = self._handle_approval_response(
                 user_message, state, tracker
             )
+            state.save()
+            return response
+
+        # Conversational router (LLM-based): ACK/SMALLTALK/GENERAL/OPS.
+        conv_route = self._classify_conversational_route(user_message, tracker)
+        if conv_route in {"ACK", "SMALLTALK", "GENERAL"}:
+            response = self._build_conversational_response(
+                user_message=user_message,
+                route=conv_route,
+                tracker=tracker,
+            )
+            state.phase = ConversationPhase.IDLE
+            state.is_agent_working = False
+            state.add_message("assistant", response)
             state.save()
             return response
 
@@ -167,6 +182,94 @@ class Orchestrator:
         state.save()
         return response
 
+    def _classify_conversational_route(
+        self,
+        user_message: str,
+        tracker: IssueTracker | None = None,
+    ) -> str:
+        """LLM router for conversational turns. Returns: ACK, SMALLTALK, GENERAL, or OPS."""
+        text = str(user_message or "").strip()
+        if not text:
+            return "GENERAL"
+
+        active_issue = tracker.get_active_issue() if tracker else None
+        active_status = active_issue.status.value if active_issue else "none"
+
+        best_similarity = 0.0
+        try:
+            rag = get_rag_engine()
+            query_vec = rag.embed_query(text)
+            tool_hits = rag.search_tools(text, top_k=5, query_embedding=query_vec)
+            for hit in tool_hits or []:
+                if not isinstance(hit, dict):
+                    continue
+                try:
+                    best_similarity = max(best_similarity, float(hit.get("similarity", 0.0) or 0.0))
+                except Exception:
+                    continue
+        except Exception:
+            best_similarity = 0.0
+
+        try:
+            route = llm_client.chat(
+                (
+                    "Classify this user message for routing.\n"
+                    "Return exactly one token: ACK, SMALLTALK, GENERAL, or OPS.\n"
+                    "ACK = brief acknowledgement or thanks.\n"
+                    "SMALLTALK = greeting/chit-chat without a task.\n"
+                    "GENERAL = non-ops/general question not requiring workflows/tools/SOP.\n"
+                    "OPS = any operations/support/troubleshooting/automation workflow intent.\n"
+                    f"Active issue status: {active_status}\n"
+                    f"Tool relevance score (0-1): {best_similarity:.3f}\n"
+                    f'User message: "{text}"'
+                ),
+                system="Be strict and output one token only.",
+                temperature=0.0,
+                max_tokens=8,
+            ).strip().upper()
+            if route in {"ACK", "SMALLTALK", "GENERAL", "OPS"}:
+                return route
+        except Exception:
+            pass
+
+        return "OPS" if best_similarity >= 0.52 else "GENERAL"
+
+    def _build_conversational_response(
+        self,
+        *,
+        user_message: str,
+        route: str,
+        tracker: IssueTracker | None = None,
+    ) -> str:
+        text = str(user_message or "").strip()
+        if route == "ACK":
+            active = tracker.get_active_issue() if tracker else None
+            if active and active.status == IssueStatus.RESOLVED:
+                return "You're welcome. This issue is resolved. If it comes back, share the details and I'll check."
+            return "You're welcome. Share any issue when ready and I'll help."
+
+        if route == "SMALLTALK":
+            return "Hi. I can help with AutomationEdge and IT ops issues. Tell me what you need."
+
+        try:
+            return llm_client.chat(
+                (
+                    "Respond naturally and briefly to the user's general message.\n"
+                    "Do not mention tools, workflows, SOPs, or incidents.\n"
+                    "End with one short line that you can also help with AutomationEdge issues.\n"
+                    f"Route: {route}\n"
+                    f'User message: "{text}"'
+                ),
+                system="You are a polite, concise assistant.",
+                temperature=0.5,
+                max_tokens=120,
+            ).strip()
+        except Exception:
+            return (
+                "Got it. If you need anything else, tell me.\n"
+                "I can also help with AutomationEdge issues anytime."
+            )
+
     # =====================================================================
     # Core investigation / remediation loop
     # =====================================================================
@@ -228,6 +331,7 @@ class Orchestrator:
                 user_message=user_message,
                 state=state,
                 active_issue=active_issue,
+                sop_hits=sop_hits,
             )
             if preflight:
                 state.add_message("assistant", preflight)
@@ -418,10 +522,17 @@ class Orchestrator:
                         p.text for p in parts
                         if p.text
                     ]
-                    final_response = "\n".join(text_parts) if text_parts else (
-                        "I've completed my investigation. Let me know if "
-                        "you need anything else."
-                    )
+                    # If no tool was called and tool relevance is weak, prefer SOP-guided resolution.
+                    if self._should_use_sop_fallback(tool_hits, sop_hits):
+                        final_response = self._build_sop_fallback_response(
+                            user_message=user_message,
+                            sop_hits=sop_hits,
+                        )
+                    else:
+                        final_response = "\n".join(text_parts) if text_parts else (
+                            "I've completed my investigation. Let me know if "
+                            "you need anything else."
+                        )
                     final_response = self._filter_for_persona(
                         final_response, state
                     )
@@ -596,9 +707,10 @@ class Orchestrator:
             state.phase = ConversationPhase.RESOLVED
             return self._format_completion_message(action["tool"], result.data)
 
-        return (
-            f"The action failed: {result.error}\n"
-            f"Would you like me to try something else or escalate?"
+        return self._build_action_failure_response(
+            action_tool=str(action.get("tool") or ""),
+            action_args=action.get("args") or {},
+            error_text=result.error,
         )
 
     @staticmethod
@@ -701,6 +813,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         user_message: str,
         state: ConversationState,
         active_issue=None,
+        sop_hits: list[dict] | None = None,
     ) -> str | None:
         """For workflow-execution intents, ask for all required params up front.
 
@@ -839,10 +952,16 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             "matched_tool": selected_hit,
             "auto_execute": False,
         }
+        sop_guidance = self._extract_sop_param_hints(
+            workflow_name=workflow_name,
+            required_params=required,
+            sop_hits=sop_hits or [],
+        )
         return self._build_param_request_message(
             workflow_name=workflow_name,
             items=pretty_items,
             intro="I can help with that.",
+            sop_guidance=sop_guidance,
         )
 
     def _is_execution_request(self, user_message: str) -> bool:
@@ -938,9 +1057,10 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
                 state.phase = ConversationPhase.RESOLVED
                 return self._format_completion_message(tool_name, result.data or {})
 
-            return (
-                f"The action failed: {result.error}\n"
-                "Would you like me to try something else or escalate?"
+            return self._build_action_failure_response(
+                action_tool=tool_name,
+                action_args=action_args,
+                error_text=result.error,
             )
 
         # Otherwise move to approval flow.
@@ -1143,6 +1263,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         workflow_name: str,
         items: list[tuple[str, str]],
         intro: str = "",
+        sop_guidance: list[str] | None = None,
     ) -> str:
         friendly_wf = self._humanize_workflow_name(workflow_name)
         lines = []
@@ -1152,10 +1273,13 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             else:
                 lines.append(f"- {label}")
         prefix = f"{intro} " if intro else ""
-        return (
+        msg = (
             f"{prefix}To continue with {friendly_wf}, please share:\n"
             + "\n".join(lines)
         )
+        if sop_guidance:
+            msg += "\n\nPlease follow these guidelines:\n" + "\n".join(f"- {g}" for g in sop_guidance[:3])
+        return msg
 
     @staticmethod
     def _humanize_workflow_name(workflow_name: str) -> str:
@@ -1164,3 +1288,144 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             name = name[3:]
         name = name.replace("_", " ").replace("-", " ").strip()
         return name.title() if name else "this workflow"
+
+    def _extract_sop_param_hints(
+        self,
+        *,
+        workflow_name: str,
+        required_params: list[str],
+        sop_hits: list[dict],
+    ) -> list[str]:
+        """Extract concise SOP-backed hints tied to required params."""
+        if not sop_hits or not required_params:
+            return []
+
+        wf_norm = workflow_name.lower()
+        hints: list[str] = []
+        required_norm = {self._norm_param_key(p): p for p in required_params}
+
+        for hit in sop_hits[:3]:
+            content = str(hit.get("content") or "")
+            if not content:
+                continue
+            lower = content.lower()
+            # Prefer SOPs clearly related to this workflow when detectable.
+            if wf_norm not in lower and "leave" not in lower and "payslip" not in lower and "employee" not in lower:
+                continue
+            for raw_line in content.splitlines():
+                line = raw_line.strip(" -*\t")
+                if not line:
+                    continue
+                line_lower = line.lower()
+                # Keep only lines that likely guide input formatting or required values.
+                if not any(tok in line_lower for tok in ("format", "date", "required", "must", "value", "start", "end", "id", "type")):
+                    continue
+                for p_norm, p_name in required_norm.items():
+                    if p_norm and p_norm in self._norm_param_key(line_lower):
+                        cleaned = line.strip()
+                        if cleaned and cleaned not in hints:
+                            hints.append(cleaned)
+                        break
+
+        return hints[:3]
+
+    def _build_action_failure_response(self, *, action_tool: str, action_args: dict, error_text: str) -> str:
+        """Natural fallback message with SOP-guided steps."""
+        workflow_name = str(
+            (action_args or {}).get("workflow_name")
+            or (action_args or {}).get("workflow")
+            or ""
+        ).strip()
+        wf_label = self._humanize_workflow_name(workflow_name) if workflow_name else "this request"
+
+        if action_tool == "create_incident_ticket":
+            title = str((action_args or {}).get("title") or "Support Incident").strip()
+            guidance = self._get_sop_troubleshooting_steps(f"{title} {error_text}")
+            msg = (
+                "I couldn't reach the incident system automatically, but I can still help you resolve this.\n"
+                f"Issue: {title}"
+            )
+            if guidance:
+                msg += "\n\nRecommended troubleshooting steps:\n" + "\n".join(f"- {g}" for g in guidance)
+            msg += (
+                "\n\nIf you'd like, I can retry ticket creation or prepare an escalation summary for manual handoff."
+            )
+            return msg
+
+        guidance = self._get_sop_troubleshooting_steps(f"{workflow_name or ''} {error_text}")
+        msg = f"I couldn't complete the action for {wf_label} automatically."
+        if guidance:
+            msg += "\n\nRecommended troubleshooting steps:\n" + "\n".join(f"- {g}" for g in guidance)
+        msg += "\n\nWould you like me to retry, create an incident ticket, or escalate?"
+        return msg
+
+    def _get_sop_troubleshooting_steps(self, query: str) -> list[str]:
+        """Extract short SOP-like action steps for user-facing recovery guidance."""
+        try:
+            rag = get_rag_engine()
+            hits = rag.search_sops(query, top_k=3)
+        except Exception:
+            return []
+
+        steps: list[str] = []
+        for hit in hits:
+            content = str(hit.get("content") or "")
+            for raw in content.splitlines():
+                line = raw.strip(" -*\t")
+                if not line:
+                    continue
+                lower = line.lower()
+                if not any(k in lower for k in ("check", "verify", "ensure", "restart", "retry", "validate", "confirm", "collect", "contact")):
+                    continue
+                if len(line) < 18:
+                    continue
+                if line not in steps:
+                    steps.append(line)
+                if len(steps) >= 3:
+                    return steps
+        return steps
+
+    @staticmethod
+    def _should_use_sop_fallback(tool_hits: list[dict], sop_hits: list[dict], threshold: float = 0.52) -> bool:
+        """Use SOP fallback when no strong tool match exists."""
+        if not sop_hits:
+            return False
+        best_tool_similarity = 0.0
+        for hit in tool_hits or []:
+            try:
+                best_tool_similarity = max(best_tool_similarity, float(hit.get("similarity", 0.0) or 0.0))
+            except Exception:
+                continue
+        return best_tool_similarity < threshold
+
+    def _build_sop_fallback_response(self, user_message: str, sop_hits: list[dict]) -> str:
+        """Provide direct SOP-based guidance when tool coverage is missing."""
+        steps = self._get_sop_troubleshooting_steps(user_message)
+        if not steps:
+            # Secondary parse directly from provided SOP hits.
+            for hit in sop_hits[:3]:
+                content = str(hit.get("content") or "")
+                for raw in content.splitlines():
+                    line = raw.strip(" -*\t")
+                    if not line:
+                        continue
+                    if len(line) < 18:
+                        continue
+                    if any(k in line.lower() for k in ("check", "verify", "ensure", "restart", "retry", "validate", "contact")):
+                        steps.append(line)
+                    if len(steps) >= 3:
+                        break
+                if len(steps) >= 3:
+                    break
+
+        if steps:
+            return (
+                "I couldn’t find a direct automation tool for this request, but here are SOP-based steps to resolve it:\n"
+                + "\n".join(f"- {s}" for s in steps[:3])
+                + "\n\nIf you want, I can also create an incident ticket for follow-up."
+            )
+
+        return (
+            "I couldn’t find a matching tool or a strong SOP for this request yet. "
+            "Please share one more detail (system name, error message, or workflow name), and I’ll guide you step-by-step."
+        )

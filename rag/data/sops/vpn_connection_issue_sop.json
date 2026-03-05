@@ -1,0 +1,9 @@
+{
+  "id": "sop-vpn-connection-issue",
+  "title": "SOP: VPN Connection Troubleshooting",
+  "content": "Follow this SOP when users cannot connect to corporate VPN.\n\nStep 1: Confirm service availability.\n- Check VPN gateway health and outage advisories.\n- Validate user internet access before VPN.\n\nStep 2: Validate credentials and MFA.\n- Verify account is active.\n- Confirm MFA challenge is completed and not timing out.\n\nStep 3: Verify VPN client state.\n- Confirm client version is supported.\n- Restart VPN client service and retry.\n\nStep 4: Check endpoint/network conflicts.\n- Disable conflicting adapters or split tunnel conflicts.\n- Ensure local firewall/AV is not blocking VPN process.\n\nStep 5: Collect logs and codes.\n- Capture exact VPN error code and timestamp.\n- Gather client logs for authentication and tunnel setup.\n\nStep 6: Escalate if unresolved.\n- Create incident with user ID, VPN profile, error code, and collected logs.\n- Assign to Security/Network operations.",
+  "metadata": {
+    "category": "sop",
+    "tags": ["vpn", "remote-access", "mfa", "network", "security"]
+  }
+}

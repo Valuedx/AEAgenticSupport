@@ -1,0 +1,9 @@
+{
+  "id": "sop-network-adapter-reset",
+  "title": "SOP: Network Adapter Recovery (Windows Endpoint)",
+  "content": "Use this SOP when endpoint network intermittently drops or adapter is unstable.\n\nStep 1: Identify adapter state.\n- Check if WiFi/Ethernet adapter is enabled and driver is loaded.\n- Note any adapter warnings in Device Manager.\n\nStep 2: Perform adapter reset.\n- Disable then re-enable adapter.\n- Reconnect to known network profile.\n\nStep 3: Reset TCP/IP stack.\n- Run approved network reset commands per endpoint policy.\n- Reboot endpoint after reset.\n\nStep 4: Update driver and power settings.\n- Update NIC driver to approved version.\n- Disable aggressive power-saving on network adapter.\n\nStep 5: Validate after recovery.\n- Test gateway reachability, DNS lookup, and target application access.\n\nStep 6: Escalate hardware suspect cases.\n- If issue recurs after reset and driver update, raise hardware/desktop support ticket.",
+  "metadata": {
+    "category": "sop",
+    "tags": ["network", "adapter", "endpoint", "windows", "recovery"]
+  }
+}
