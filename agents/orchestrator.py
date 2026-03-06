@@ -293,6 +293,14 @@ class Orchestrator:
         state.phase = ConversationPhase.INVESTIGATING
         progress.on_phase("investigating")
 
+        # Feature 2.2: Language Detection
+        if len(state.messages) <= 3:
+            detected = self._detect_language(user_message)
+            if detected != state.preferred_language:
+                state.preferred_language = detected
+                logger.info(f"Language switch detected: {detected}")
+                state.save()
+
         try:
             system_prompt = self._build_system_prompt(state, tracker)
             rag = get_rag_engine()
@@ -814,6 +822,24 @@ class Orchestrator:
         names.discard("")
         return names
 
+    def _detect_language(self, text: str) -> str:
+        """Detect the ISO 639-1 language code of the text using LLM."""
+        if not text or len(text.strip()) < 5:
+            return "en"
+        try:
+            prompt = (
+                "Detect the language of the following text. "
+                "Return ONLY the ISO 639-1 language code (e.g. 'en', 'es', 'fr', 'hi', 'zh'). "
+                "If unsure, return 'en'.\n\n"
+                f"Text: {text[:200]}"
+            )
+            # Use raw chat to avoid recursion
+            response = llm_client.chat(prompt, system="You are a language detector.")
+            lang = str(response).strip().lower()
+            return lang[:2].replace(".", "") if len(lang) >= 2 else "en"
+        except Exception:
+            return "en"
+
     # =====================================================================
     # Prompt building
     # =====================================================================
@@ -865,7 +891,10 @@ Currently focused issue: {active.issue_id if active else 'None'}
 
 IMPORTANT: Scope your investigation to the currently focused issue."""
 
-        return f"{base_prompt}\n{persona}\n{issue_context}"
+        lang_instr = f"\n## Response Language: {state.preferred_language.upper()}\n"
+        lang_instr += f"IMPORTANT: Respond to the user in {state.preferred_language.upper()} only. Keep internal reasoning (if any) or tool outputs as is, but the final text to the user MUST be in {state.preferred_language.upper()}."
+
+        return f"{base_prompt}\n{persona}\n{issue_context}\n{lang_instr}"
 
     def _preflight_workflow_param_collection(
         self,

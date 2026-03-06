@@ -1,10 +1,13 @@
+> **Documentation Update (2026-03-06)**  
+> Patch release notes:
+> - **Multi-Agent Orchestration (Feature 2.1)**: Refactored existing monolithic orchestrator into a Multi-Agent Supervisor system. Added `DiagnosticAgent` and `RemediationAgent` specialists with A2A delegation protocol.
+> - **Hybrid Search (Feature 2.2)**: Upgraded RAG engine to support hybrid search using `pgvector` (semantic) + `tsvector` (keyword) + Reciprocal Rank Fusion (RRF). Added `DocumentProcessor` for PDF/Markdown/JSON with table extraction.
+> - **Multi-Language Support**: Added dynamic LLM-based language detection and localized system instruction propagation.
+> - **Enterprise Security (Feature 2.6)**: Implemented RBAC-based approval gates and automatic PII masking in JSON logs.
+> - **Proactive Monitoring**: Added background `Scheduler` and `/api/webhooks` endpoint for event-driven autonomous response.
+> - Validation status: `test_a2a_delegation.py` and `test_rag_hybrid.py` passed.
+>
 > **Documentation Update (2026-03-04)**  
-> Patch release notes included in this version:
-> - Added AutomationEdge session-auth client architecture with token caching and one-time 401 re-auth retry.
-> - Added dynamic AE workflow-to-tool mapping pipeline and runtime reload behavior.
-> - Added agent catalog architecture for per-usecase agent definitions and linked tool interactions.
-> - Added management APIs and UI endpoints for tools/agents administration.
-> - Validation status: targeted test suite passed (`33 passed`).
 >
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
@@ -31,7 +34,7 @@
 
 **Core pieces:**
 - **LLM + RAG layer**: Gemini (Vertex AI) plus PostgreSQL/pgvector.
-- **Agent orchestration**: Orchestrator + gateway + state.
+- **Agent orchestration**: Supervisor (Orchestrator) + Specialists (Diagnostic, Remediation) + AgentRouter + Gateway + State.
 - **Tool layer**: Typed tools over AE REST APIs and DB.
 - **Chat interfaces**:
   - AI Studio web chat / Extension.
@@ -39,7 +42,7 @@
   - Standalone webchat via `agent_server.py`.
 
 Request path examples:
-- **AI Studio webchat → `main.py` → `MessageGateway` → `Orchestrator` → tools + RAG → response**
+- **AI Studio webchat → `main.py` → `MessageGateway` → `AgentRouter` → `Supervisor` → (Delegation) → `Specialist` → tools + Hybrid RAG → response**
 - **MS Teams → Azure Bot → Cognibot hooks → `support_agent` → tools + RAG → response**
 - **Browser webchat → `agent_server.py` → `MessageGateway` → `Orchestrator` → tools + RAG → response**
 
@@ -53,16 +56,21 @@ Request path examples:
   - `logging_setup.py`: Application + audit loggers.
   - `classification_signals.py`: Heuristic patterns for classifiers.
 - **`agents/`**
-  - `orchestrator.py`: Main reasoning loop (tools + RAG + persona filtering).
-  - `approval_gate.py`: Risk tiering and approval workflow.
+  - `agent_router.py`: Central dispatcher for scoring and routing messages to agents.
+  - `orchestrator_agent.py`: The **Supervisor** Agent. Coordinates high-level planning and chooses specialists.
+  - `diagnostic_agent.py`: **Techncial Specialist**. Investigates logs, status, and infrastructure.
+  - `remediation_agent.py`: **Resolution Specialist**. Restarts workflows and executes fixes.
+  - `approval_gate.py`: RBAC-aware risk tiering and approval workflow.
   - `escalation.py`: Escalation logic and notifications.
   - `rca_agent.py`: Business and technical RCA generation + indexing into RAG.
+  - `scheduler.py`: Background tasks for proactive health checks and webhook handling.
 - **`tools/`**
   - `base.py`: AE API client and `ToolDefinition`.
   - `registry.py`: Tool catalog, categories, and registration.
   - `*_tools.py`: Typed tools grouped by concern (status, logs, files, remediation, etc.).
 - **`rag/`**
-  - `engine.py`: RAG engine using PostgreSQL/pgvector with numpy fallback.
+  - `engine.py`: Hybrid RAG engine (Vector + Keyword + RRF) using `pgvector` and `tsvector`.
+  - `processor.py`: Advanced document processing for PDF (tables), MD, and JSON.
   - `index_all.py`: Index builder for KB, SOPs, tool docs, past incidents.
   - `data/`: Content collections (`kb_articles/`, `sops/`, `tool_docs/`, `past_incidents/`).
 - **`gateway/`**

@@ -704,7 +704,32 @@ def api_webhook_log():
         return jsonify({"error": str(exc)}), 500
 
 
-# ── History & Session Management endpoints ──────────────────────────
+@app.route("/api/webhooks", methods=["POST"])
+def api_webhooks():
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        from agents.scheduler import get_webhook_handler
+        result = get_webhook_handler().handle_event(payload)
+        return jsonify({
+            "success": result.success,
+            "message": result.message,
+            "alerts_generated": len(result.alerts)
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/status", methods=["GET"])
+def api_scheduler_status():
+    try:
+        from agents.scheduler import get_scheduler
+        return jsonify(get_scheduler().to_dict())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/logs", methods=["GET"])
+def api_scheduler_logs():
 
 @app.route("/api/history/search", methods=["GET"])
 def api_history_search():

@@ -136,5 +136,14 @@ CONFIG = {
         "medium_risk": 20,
         "low_risk": 10,
         "read_only": 0
-    }
+    },
+
+    # Proactive Monitoring & Scheduling (Feature 2.2)
+    "ENABLE_PROACTIVE_MONITORING": os.environ.get("ENABLE_PROACTIVE_MONITORING", "true").lower() == "true",
+    "HEALTH_CHECK_INTERVAL_SECONDS": int(os.environ.get("HEALTH_CHECK_INTERVAL_SECONDS", "300")),
+    "ENABLE_DAILY_SUMMARY": os.environ.get("ENABLE_DAILY_SUMMARY", "true").lower() == "true",
+    "DAILY_SUMMARY_HOUR": int(os.environ.get("DAILY_SUMMARY_HOUR", "8")),
+    "MONITORED_WORKFLOWS": [
+        w.strip() for w in os.environ.get("MONITORED_WORKFLOWS", "").split(",") if w.strip()
+    ],
 }

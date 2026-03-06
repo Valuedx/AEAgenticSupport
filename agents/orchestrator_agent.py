@@ -16,11 +16,12 @@ from agents.base_agent import (
     AgentResult,
     AgentStatus,
     BaseAgent,
+    DelegationRequest,
 )
 from agents.orchestrator import Orchestrator
 from agents.agent_context import SharedContext
 from gateway.progress import ProgressCallback, create_noop_progress
-from state.conversation_state import ConversationState
+from state.conversation_state import ConversationState, ConversationPhase
 
 logger = logging.getLogger("ops_agent.agents.orchestrator_agent")
 
@@ -97,6 +98,34 @@ class OrchestratorAgent(BaseAgent):
             )
 
         try:
+            # ── A2A Delegation check (Feature 2.1) ──
+            # If the user is asking for a restart/fix and we aren't already in execution phase,
+            # delegate to the remediation specialist.
+            if any(w in user_message.lower() for w in ("restart", "fix", "resolve", "run tool")):
+                if state.phase != ConversationPhase.EXECUTING:
+                    logger.info("Orchestrator delegating to remediation_agent")
+                    return AgentResult(
+                        response="I'm handing this over to our Remediation Specialist to execute the fix.",
+                        delegation=DelegationRequest(
+                            target_agent_id="remediation_agent",
+                            reason="User requested corrective action",
+                            context={"phase": state.phase.value}
+                        )
+                    )
+
+            # If the user is asking "Why" or for "Logs", delegate to diagnostics.
+            if any(w in user_message.lower() for w in ("why", "logs", "debug", "investigate")):
+                if state.phase == ConversationPhase.IDLE:
+                    logger.info("Orchestrator delegating to diagnostic_agent")
+                    return AgentResult(
+                        response="I'll have our Diagnostic Specialist look into the logs and system status for you.",
+                        delegation=DelegationRequest(
+                            target_agent_id="diagnostic_agent",
+                            reason="User requested technical investigation",
+                            context={"phase": state.phase.value}
+                        )
+                    )
+
             response_text = self._orchestrator.handle_message(
                 user_message=user_message,
                 state=state,

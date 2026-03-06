@@ -404,7 +404,7 @@ class ToolRegistry:
                                 "category": td.category,
                                 "tier": td.tier,
                                 "source": md.get("source", "static"),
-                                "similarity": round(hit.get("similarity", 0), 3),
+                                "score": round(hit.get("rrf_score", hit.get("similarity", 0)), 3),
                             }
                         )
                     else:
@@ -423,7 +423,7 @@ class ToolRegistry:
                                 "category": metadata.get("category", "automationedge"),
                                 "tier": metadata.get("tier", "medium_risk"),
                                 "source": metadata.get("source", "automationedge"),
-                                "similarity": round(hit.get("similarity", 0), 3),
+                                "score": round(hit.get("rrf_score", hit.get("similarity", 0)), 3),
                                 "registered": False,
                                 "use_tool": "trigger_workflow",
                                 "hint": (

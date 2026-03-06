@@ -1,10 +1,13 @@
+> **Documentation Update (2026-03-06)**  
+> Patch release notes:
+> - **Multi-Agent Orchestration (Feature 2.1)**: Refactored existing monolithic orchestrator into a Multi-Agent Supervisor system. Added `DiagnosticAgent` and `RemediationAgent` specialists with A2A delegation protocol.
+> - **Hybrid Search (Feature 2.2)**: Upgraded RAG engine to support hybrid search using `pgvector` (semantic) + `tsvector` (keyword) + Reciprocal Rank Fusion (RRF). Added `DocumentProcessor` for PDF/Markdown/JSON with table extraction.
+> - **Multi-Language Support**: Added dynamic LLM-based language detection and localized system instruction propagation.
+> - **Enterprise Security (Feature 2.6)**: Implemented RBAC-based approval gates and automatic PII masking in JSON logs.
+> - **Proactive Monitoring**: Added background `Scheduler` and `/api/webhooks` endpoint for event-driven autonomous response.
+> - Validation status: `test_a2a_delegation.py` and `test_rag_hybrid.py` passed.
+>
 > **Documentation Update (2026-03-04)**  
-> Patch release notes included in this version:
-> - Added AE session-token setup variables (`AE_USERNAME`, `AE_PASSWORD`, `AE_TOKEN_FIELD`, `AE_WORKFLOWS_METHOD`, `AE_WORKFLOW_DETAILS_METHOD`).
-> - Added guidance for dynamic AE tool sync and tools/agents management APIs/UI.
-> - Added fallback compatibility notes for tenants using `sessionToken` and `POST /workflows`.
-> - Added agent catalog settings (`AGENT_CATALOG_PATH`, `AGENT_ADMIN_TOKEN`, interaction log limit).
-> - Validation status: targeted test suite passed (`33 passed`).
 >
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
@@ -113,10 +116,14 @@ AEAgenticSupport/
 │   ├── llm_client.py                    #   Vertex AI (Gemini) client
 │   └── logging_setup.py                 #   App + audit loggers
 ├── agents/
-│   ├── orchestrator.py                  #   Main investigation/remediation loop
-│   ├── approval_gate.py                 #   Approval logic
+│   ├── agent_router.py                  #   Central agent dispatcher
+│   ├── orchestrator_agent.py            #   Supervisor agent (A2A gateway)
+│   ├── diagnostic_agent.py              #   Technical Specialist (logs/status)
+│   ├── remediation_agent.py             #   Resolution Specialist (restarts/fixes)
+│   ├── approval_gate.py                 #   RBAC-aware approval logic
 │   ├── escalation.py                    #   Escalation agent
-│   └── rca_agent.py                     #   RCA generation
+│   ├── rca_agent.py                     #   RCA generation
+│   └── scheduler.py                     #   Proactive background tasks
 ├── tools/
 │   ├── base.py                          #   AE API client, ToolDefinition
 │   ├── registry.py                      #   Tool registry
@@ -128,7 +135,8 @@ AEAgenticSupport/
 │   ├── dependency_tools.py              #   4 dependency/config tools
 │   └── notification_tools.py            #   2 notification tools
 ├── rag/
-│   ├── engine.py                        #   RAG engine (VertexEmbedder, pgvector or numpy fallback)
+│   ├── engine.py                        #   Hybrid RAG (Vector + Keyword + RRF)
+│   ├── processor.py                     #   Document processing (PDF/Tables/MD)
 │   ├── index_all.py                     #   Index builder script
 │   └── data/
 │       ├── kb_articles/                 #   Knowledge base JSON/MD files
@@ -284,24 +292,23 @@ TOOL_AUTH_TOKEN=your-ae-service-account-api-key
 
 # Agent Behaviour
 MAX_AGENT_ITERATIONS=15
-MAX_RAG_TOOLS=12           # When catalog >30 tools: max RAG-matched tools sent to LLM
+MAX_RAG_TOOLS=12
 MAX_RESTARTS_PER_WORKFLOW=3
 MAX_BULK_OPERATIONS=10
 STALE_ISSUE_MINUTES=30
 RECURRENCE_ESCALATION_THRESHOLD=3
 
-# Protected Workflows (comma-separated)
-PROTECTED_WORKFLOWS=regulatory_report_irdai
+# Proactive Monitoring & Scheduling (Feature 2.2)
+ENABLE_PROACTIVE_MONITORING=true
+HEALTH_CHECK_INTERVAL_SECONDS=300
+ENABLE_DAILY_SUMMARY=true
+DAILY_SUMMARY_HOUR=8
+MONITORED_WORKFLOWS=inventory_sync,claims_batch
 
-# Logging
-LOG_DIR=/opt/automationedge/aistudio/scripts/ops_agent/logs
-LOG_LEVEL=INFO
-
-# Agentic mode (true = full LLM orchestrator, false = deterministic plan-execute)
-USE_AGENTIC_MODE=true
-
-# Progress streaming (true = Cognibot sends intermediate progress messages during investigation)
-AGENT_PROGRESS_ENABLED=true
+# RBAC & Security (Feature 2.6)
+RBAC_ENABLED=true
+AGENT_ADMIN_TOKEN=your-random-secret
+# (Roles and ranks are defined in config/settings.py)
 ```
 
 ### 3.2 Set environment variables on the server

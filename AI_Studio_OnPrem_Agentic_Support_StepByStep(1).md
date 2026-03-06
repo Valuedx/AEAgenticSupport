@@ -1,10 +1,13 @@
+> **Documentation Update (2026-03-06)**  
+> Patch release notes:
+> - **Multi-Agent Orchestration (Feature 2.1)**: Refactored existing monolithic orchestrator into a Multi-Agent Supervisor system. Added `DiagnosticAgent` and `RemediationAgent` specialists with A2A delegation protocol.
+> - **Hybrid Search (Feature 2.2)**: Upgraded RAG engine to support hybrid search using `pgvector` (semantic) + `tsvector` (keyword) + Reciprocal Rank Fusion (RRF). Added `DocumentProcessor` for PDF/Markdown/JSON with table extraction.
+> - **Multi-Language Support**: Added dynamic LLM-based language detection and localized system instruction propagation.
+> - **Enterprise Security (Feature 2.6)**: Implemented RBAC-based approval gates and automatic PII masking in JSON logs.
+> - **Proactive Monitoring**: Added background `Scheduler` and `/api/webhooks` endpoint for event-driven autonomous response.
+> - Validation status: `test_a2a_delegation.py` and `test_rag_hybrid.py` passed.
+>
 > **Documentation Update (2026-03-04)**  
-> Patch release notes included in this version:
-> - Added AutomationEdge session-token REST client support and configurable workflow discovery methods.
-> - Added dynamic AE tool sync and mapping into the tool registry for agentic usecases.
-> - Added tools/agents management UI and APIs for viewing/maintaining agent definitions, tool links, and interactions.
-> - Added T4 tenant validation notes: token field `sessionToken`, workflow list via `POST /workflows`, details via `GET /workflows/{id}`.
-> - Validation status: targeted test suite passed (`33 passed`).
 >
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:

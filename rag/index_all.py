@@ -13,45 +13,32 @@ import logging
 import os
 
 from rag.engine import get_rag_engine
+from rag.document_processor import DocumentProcessor
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.rag.indexer")
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+processor = DocumentProcessor()
 
-
-def _load_json_files(directory: str) -> list[dict]:
-    docs = []
-    pattern = os.path.join(directory, "**", "*.json")
-    for filepath in glob.glob(pattern, recursive=True):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                docs.extend(data)
-            elif isinstance(data, dict):
-                docs.append(data)
-        except Exception as e:
-            logger.warning(f"Failed to load {filepath}: {e}")
-    return docs
-
-
-def _load_markdown_files(directory: str) -> list[dict]:
-    docs = []
-    pattern = os.path.join(directory, "**", "*.md")
-    for filepath in glob.glob(pattern, recursive=True):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-            doc_id = os.path.splitext(os.path.basename(filepath))[0]
-            docs.append({
-                "id": doc_id,
-                "content": content,
-                "metadata": {"source": filepath, "type": "markdown"},
-            })
-        except Exception as e:
-            logger.warning(f"Failed to load {filepath}: {e}")
-    return docs
+def _load_files_from_dir(directory: str) -> list[dict]:
+    """Uniformly load and process files using DocumentProcessor."""
+    all_chunks = []
+    # Support multiple extensions: pdf, md, json
+    extensions = ["*.pdf", "*.md", "*.json"]
+    
+    for ext in extensions:
+        pattern = os.path.join(directory, "**", ext)
+        for filepath in glob.glob(pattern, recursive=True):
+            logger.info(f"Processing: {filepath}")
+            chunks = processor.process_file(filepath)
+            for chunk in chunks:
+                all_chunks.append({
+                    "id": chunk.id,
+                    "content": chunk.content,
+                    "metadata": chunk.metadata
+                })
+    return all_chunks
 
 
 def index_kb_articles():
@@ -59,10 +46,10 @@ def index_kb_articles():
     if not os.path.isdir(kb_dir):
         logger.info("No kb_articles directory found, skipping.")
         return
-    docs = _load_json_files(kb_dir) + _load_markdown_files(kb_dir)
+    docs = _load_files_from_dir(kb_dir)
     if docs:
         get_rag_engine().index_documents(docs, collection="kb_articles")
-        logger.info(f"Indexed {len(docs)} KB articles")
+        logger.info(f"Indexed {len(docs)} segments from KB articles")
 
 
 def index_sops():
@@ -70,27 +57,24 @@ def index_sops():
     if not os.path.isdir(sop_dir):
         logger.info("No sops directory found, skipping.")
         return
-    docs = _load_json_files(sop_dir) + _load_markdown_files(sop_dir)
+    docs = _load_files_from_dir(sop_dir)
     if docs:
         get_rag_engine().index_documents(docs, collection="sops")
-        logger.info(f"Indexed {len(docs)} SOPs")
+        logger.info(f"Indexed {len(docs)} segments from SOPs")
 
 
 def index_tool_docs():
     tool_doc_dir = os.path.join(DATA_DIR, "tool_docs")
     extra_docs = []
     if os.path.isdir(tool_doc_dir):
-        extra_docs = (
-            _load_json_files(tool_doc_dir)
-            + _load_markdown_files(tool_doc_dir)
-        )
+        extra_docs = _load_files_from_dir(tool_doc_dir)
 
     registry_docs = tool_registry.get_all_rag_documents()
     all_docs = registry_docs + extra_docs
     if all_docs:
         get_rag_engine().index_documents(all_docs, collection="tools")
         logger.info(
-            f"Indexed {len(all_docs)} tool documents "
+            f"Indexed {len(all_docs)} tool document segments "
             f"({len(registry_docs)} from registry, "
             f"{len(extra_docs)} from files)"
         )
@@ -101,10 +85,10 @@ def index_past_incidents():
     if not os.path.isdir(incident_dir):
         logger.info("No past_incidents directory found, skipping.")
         return
-    docs = _load_json_files(incident_dir) + _load_markdown_files(incident_dir)
+    docs = _load_files_from_dir(incident_dir)
     if docs:
         get_rag_engine().index_documents(docs, collection="past_incidents")
-        logger.info(f"Indexed {len(docs)} past incidents")
+        logger.info(f"Indexed {len(docs)} segments from past incidents")
 
 
 def index_t4_workflows():

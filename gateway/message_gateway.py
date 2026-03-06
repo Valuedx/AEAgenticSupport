@@ -62,6 +62,14 @@ class MessageGateway:
                     orch_agent = OrchestratorAgent()
                     registry.register(orch_agent)
 
+                # Feature 2.1: Specialty agents
+                if not registry.get("diagnostic_agent"):
+                    from agents.diagnostic_agent import DiagnosticAgent
+                    registry.register(DiagnosticAgent())
+                if not registry.get("remediation_agent"):
+                    from agents.remediation_agent import RemediationAgent
+                    registry.register(RemediationAgent())
+
                 self._agent_router = get_agent_router()
                 logger.info(
                     "Multi-agent router initialized with %d agent(s)",

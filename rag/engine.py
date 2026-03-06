@@ -127,14 +127,21 @@ class PgVectorRAGEngine:
                             metadata    JSONB DEFAULT '{{}}'::jsonb,
                             collection  TEXT NOT NULL,
                             embedding   vector({self.embed_dim}),
+                            tsv         tsvector,
                             created_at  TIMESTAMPTZ DEFAULT NOW()
                         );
                     """)
+                    # Ensure column exists if table was created earlier
+                    cur.execute("ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS tsv tsvector;")
                     cur.execute("""
                         CREATE INDEX IF NOT EXISTS idx_rag_embedding
                         ON rag_documents
                         USING hnsw (embedding vector_cosine_ops)
                         WITH (m = 16, ef_construction = 64);
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_rag_tsv 
+                        ON rag_documents USING GIN (tsv);
                     """)
                 else:
                     cur.execute("""
@@ -144,9 +151,11 @@ class PgVectorRAGEngine:
                             metadata    JSONB DEFAULT '{}'::jsonb,
                             collection  TEXT NOT NULL,
                             embedding   JSONB DEFAULT '[]'::jsonb,
+                            tsv         TEXT,
                             created_at  TIMESTAMPTZ DEFAULT NOW()
                         );
                     """)
+                    cur.execute("ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS tsv TEXT;")
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_rag_collection
                     ON rag_documents (collection);
@@ -179,31 +188,34 @@ class PgVectorRAGEngine:
                     execute_values(
                         cur,
                         """INSERT INTO rag_documents
-                               (id, content, metadata, collection, embedding)
+                               (id, content, metadata, collection, embedding, tsv)
                            VALUES %s
                            ON CONFLICT (id) DO UPDATE SET
                              content   = EXCLUDED.content,
                              metadata  = EXCLUDED.metadata,
-                             embedding = EXCLUDED.embedding""",
+                             embedding = EXCLUDED.embedding,
+                             tsv       = EXCLUDED.tsv""",
                         values,
-                        template="(%s, %s, %s, %s, %s::vector)",
+                        template="(%s, %s, %s, %s, %s::vector, to_tsvector('english', %s))",
                     )
                 else:
                     for doc, emb in zip(documents, embeddings):
                         cur.execute("""
                             INSERT INTO rag_documents
-                                (id, content, metadata, collection, embedding)
-                            VALUES (%s, %s, %s, %s, %s)
+                                (id, content, metadata, collection, embedding, tsv)
+                            VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT (id) DO UPDATE SET
                               content   = EXCLUDED.content,
                               metadata  = EXCLUDED.metadata,
-                              embedding = EXCLUDED.embedding
+                              embedding = EXCLUDED.embedding,
+                              tsv       = EXCLUDED.tsv
                         """, (
                             doc["id"],
                             doc["content"],
                             Json(doc.get("metadata", {})),
                             collection,
                             Json(emb),
+                            doc["content"],
                         ))
             conn.commit()
         logger.info(
@@ -224,8 +236,11 @@ class PgVectorRAGEngine:
 
     def search(self, query: str, collection: str,
                top_k: int = 5,
-               query_embedding: list[float] | None = None) -> list[dict]:
+               query_embedding: list[float] | None = None,
+               hybrid: bool = True) -> list[dict]:
         if self._use_pgvector:
+            if hybrid:
+                return self._search_hybrid(query, collection, top_k, query_embedding)
             return self._search_pgvector(query, collection, top_k,
                                          query_embedding)
         return self._search_numpy(query, collection, top_k, query_embedding)
@@ -252,6 +267,50 @@ class PgVectorRAGEngine:
             for r in rows
         ]
 
+    def _search_hybrid(self, query: str, collection: str,
+                       top_k: int,
+                       query_embedding: list[float] | None = None,
+                       ) -> list[dict]:
+        query_emb = query_embedding or self.embedder.embed(query)
+        # RRF k parameter
+        k = 60
+        
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    WITH vector_search AS (
+                      SELECT id, content, metadata,
+                             ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector) as rank_vector
+                      FROM rag_documents
+                      WHERE collection = %s
+                      LIMIT {top_k * 2}
+                    ),
+                    text_search AS (
+                      SELECT id, content, metadata,
+                             ROW_NUMBER() OVER (ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', %s)) DESC) as rank_text
+                      FROM rag_documents
+                      WHERE collection = %s 
+                        AND tsv @@ plainto_tsquery('english', %s)
+                      LIMIT {top_k * 2}
+                    )
+                    SELECT 
+                        COALESCE(v.id, t.id),
+                        COALESCE(v.content, t.content),
+                        COALESCE(v.metadata, t.metadata),
+                        (1.0 / ({k} + COALESCE(v.rank_vector, 1000))) + 
+                        (1.0 / ({k} + COALESCE(t.rank_text, 1000))) as rrf_score
+                    FROM vector_search v
+                    FULL OUTER JOIN text_search t ON v.id = t.id
+                    ORDER BY rrf_score DESC
+                    LIMIT %s;
+                """, (query_emb, collection, query, collection, query, top_k))
+                rows = cur.fetchall()
+        
+        return [
+            {"id": r[0], "content": r[1], "metadata": r[2], "rrf_score": r[3]}
+            for r in rows
+        ]
+
     def list_collection(self, collection: str) -> list[dict]:
         """Fetch all documents in a collection without semantic searching."""
         with self.get_conn_readonly() as conn:
@@ -269,13 +328,15 @@ class PgVectorRAGEngine:
         ]
 
     def _search_numpy(self, query: str, collection: str,
-                      top_k: int,
-                      query_embedding: list[float] | None = None,
-                      ) -> list[dict]:
+                       top_k: int,
+                       query_embedding: list[float] | None = None,
+                       ) -> list[dict]:
         query_emb = np.array(
             query_embedding if query_embedding is not None
             else self.embedder.embed(query)
         )
+        query_words = set(query.lower().split())
+        
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -290,19 +351,28 @@ class PgVectorRAGEngine:
 
         results = []
         for row in rows:
-            doc_emb = np.array(row[3])
+            doc_id, content, metadata, raw_emb = row
+            doc_emb = np.array(raw_emb)
+            
+            # Semantic similarity
             norm_q = np.linalg.norm(query_emb)
             norm_d = np.linalg.norm(doc_emb)
-            if norm_q == 0 or norm_d == 0:
-                sim = 0.0
-            else:
-                sim = float(np.dot(query_emb, doc_emb) / (norm_q * norm_d))
+            sim = float(np.dot(query_emb, doc_emb) / (norm_q * norm_d)) if norm_q > 0 and norm_d > 0 else 0.0
+            
+            # Simple keyword overlap (for non-pgvector fallback)
+            doc_words = set(content.lower().split())
+            keyword_score = len(query_words & doc_words) / len(query_words) if query_words else 0.0
+            
+            # Combine 50/50 for fallback
+            combined = (0.5 * sim) + (0.5 * keyword_score)
+            
             results.append({
-                "id": row[0], "content": row[1],
-                "metadata": row[2], "similarity": sim,
+                "id": doc_id, "content": content,
+                "metadata": metadata, "similarity": sim,
+                "rrf_score": combined # naming for consistency
             })
 
-        results.sort(key=lambda r: r["similarity"], reverse=True)
+        results.sort(key=lambda r: r["rrf_score"], reverse=True)
         return results[:top_k]
 
     # ── Convenience wrappers ──

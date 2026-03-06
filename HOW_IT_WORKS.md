@@ -1,10 +1,13 @@
+> **Documentation Update (2026-03-06)**  
+> Patch release notes:
+> - **Multi-Agent Orchestration (Feature 2.1)**: Refactored existing monolithic orchestrator into a Multi-Agent Supervisor system. Added `DiagnosticAgent` and `RemediationAgent` specialists with A2A delegation protocol.
+> - **Hybrid Search (Feature 2.2)**: Upgraded RAG engine to support hybrid search using `pgvector` (semantic) + `tsvector` (keyword) + Reciprocal Rank Fusion (RRF). Added `DocumentProcessor` for PDF/Markdown/JSON with table extraction.
+> - **Multi-Language Support**: Added dynamic LLM-based language detection and localized system instruction propagation.
+> - **Enterprise Security (Feature 2.6)**: Implemented RBAC-based approval gates and automatic PII masking in JSON logs.
+> - **Proactive Monitoring**: Added background `Scheduler` and `/api/webhooks` endpoint for event-driven autonomous response.
+> - Validation status: `test_a2a_delegation.py` and `test_rag_hybrid.py` passed.
+>
 > **Documentation Update (2026-03-04)**  
-> Patch release notes included in this version:
-> - Added AutomationEdge session-token client path with auth/execute/workflow-discovery compatibility handling.
-> - Added runtime dynamic tool synchronization from AE workflows.
-> - Added agent definition catalog, agent-tool linking, and interaction logging model.
-> - Added management surface for tools/agents (`/tools` UI and `/api/tools`, `/api/agents` endpoints).
-> - Validation status: targeted test suite passed (`33 passed`).
 >
 > **Documentation Update (2026-03-02)**  
 > Patch release notes included in this version:
@@ -141,23 +144,14 @@ Responsibilities:
 
 2. **Concurrent message handling:**
    - If **no agent currently working** → call:
-     - `self.orchestrator.handle_message(user_message, state)`
-   - If **agent already working**:
-     - Classify new message intent via `_classify_message_intent`:
-       - `ADDITIVE` (extra details for current issue)
-       - `INTERRUPT` (urgent, switch topics)
-       - `CANCEL` (stop current work)
-       - `APPROVAL` (approve/reject)
-       - `NEW_REQUEST` (queue for later)
-     - Uses:
-       - Simple keyword rules (`stop`, `urgent`, etc.).
-       - LLM classification via `config/llm_client.py` for ambiguous cases.
-
-3. **Queueing and flags:**
-   - Queues follow‑up user messages in `ConversationState`.
-   - Sets `interrupt_requested` when user demands interruption or cancel.
-
-At the end of this step, a message plus its session context are passed to the **Orchestrator**.
+  3. **Agent Selection & Delegation (A2A):**
+   - Normalizes message and calls `AgentRouter.route()`.
+   - `AgentRouter` scores the user message against all registered agents (`Supervisor`, `Diagnostic`, `Remediation`).
+   - If `Supervisor` is selected, it can proactively hand off to specialists:
+     - **File:** `agents/orchestrator_agent.py` (Supervisor)
+     - Technical Investigate → `diagnostic_agent.py`
+     - Fix/Restart → `remediation_agent.py`
+   - Messages can contain a delegation chain (e.g., Supervisor → Diagnostic).
 
 ---
 
@@ -246,10 +240,11 @@ The orchestrator (Step 5) always operates within the context of the **current is
      - A natural‑language answer is produced, or
      - `MAX_AGENT_ITERATIONS` is hit (safety stop).
 
-- **Tool selection strategy** (large catalogs):
-  - Always include **always‑available** tools:
-    - Core status/logs + general tools (`call_ae_api`, `query_database`, `search_knowledge_base`).
-  - Use RAG (`rag/engine.py`) to select up to `MAX_RAG_TOOLS` highest‑relevance typed tools.
+- **Tool selection & retrieval strategy** (large catalogs):
+  - Use **Hybrid RAG** (`rag/engine.py`) to select tools:
+    - Semantic search (pgvector) matches conceptual intent.
+    - Keyword search (tsvector) matches specific workflow names or IDs.
+    - RRF (Reciprocal Rank Fusion) merges results for high accuracy.
   - Include `discover_tools` meta‑tool to let the LLM search mid‑conversation.
 
 ### 5.4 Integrating findings with IssueTracker
@@ -306,7 +301,10 @@ High‑level behaviour:
    - Max bulk operations.
    - Recurrence thresholds.
    - Protected workflows (never auto‑restart).
-3. Decide whether:
+3. **RBAC Policy Check:**
+   - Checks user role (admin, dev, support) against tool tier (high_risk, medium_risk, etc).
+   - If role rank < minimum required rank for tier → block and require approval from authorized user.
+4. Decide whether:
    - Auto‑run the tool.
    - Require explicit approval.
    - Block and suggest escalation.

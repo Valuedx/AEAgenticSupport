@@ -64,6 +64,7 @@ class ConversationState:
         self.summary: str = ""
         self.is_human_handoff: bool = False
         self.tags: list[str] = []
+        self.preferred_language: str = "en" # Feature 2.2
 
         # Concurrency
         self.is_agent_working: bool = False
@@ -161,6 +162,7 @@ class ConversationState:
                 "pending_action": self.pending_action,
                 "pending_action_summary": self.pending_action_summary,
                 "param_collection": self.param_collection,
+                "preferred_language": self.preferred_language,
             }
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -222,6 +224,7 @@ class ConversationState:
                             "pending_action_summary", ""
                         )
                         state.param_collection = data.get("param_collection", {}) or {}
+                        state.preferred_language = data.get("preferred_language", "en")
                         for f_data in data.get("findings", []):
                             state.findings.append(Finding(**f_data))
         except Exception as e:
@@ -240,6 +243,7 @@ class ConversationState:
             "is_agent_working": self.is_agent_working,
             "summary": self.summary,
             "is_human_handoff": self.is_human_handoff,
+            "preferred_language": self.preferred_language,
         }
 
     # ── History & Search ───────────────────────────────────────────
