@@ -140,6 +140,25 @@ CREATE TABLE IF NOT EXISTS user_feedback (
 CREATE INDEX IF NOT EXISTS idx_user_feedback_conv
     ON user_feedback(conversation_id);
 
+-- FEATURE 2.4.2: Audit log for human-in-the-loop approvals
+CREATE TABLE IF NOT EXISTS approval_audit_log (
+    id              SERIAL PRIMARY KEY,
+    conversation_id VARCHAR(256) NOT NULL,
+    request_id      VARCHAR(64)  NOT NULL,
+    tool_name       VARCHAR(256) NOT NULL,
+    tool_params     JSONB,
+    requester_role  VARCHAR(32),
+    approver_id     VARCHAR(256),
+    status          VARCHAR(32),  -- PENDING, APPROVED, REJECTED, CANCELLED
+    tier            VARCHAR(32),
+    summary         TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    decided_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_audit_conv 
+    ON approval_audit_log(conversation_id);
+
 -- Migrations for existing deployments
 ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS summary TEXT;
 ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS is_human_handoff BOOLEAN DEFAULT FALSE;

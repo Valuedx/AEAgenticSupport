@@ -14,6 +14,9 @@ from typing import Optional
 from config.settings import CONFIG
 from config.llm_client import llm_client
 
+from config.db import get_conn
+from psycopg2.extras import Json
+
 logger = logging.getLogger("ops_agent.approval")
 
 SAFE_TIERS = {"read_only"}
@@ -116,10 +119,10 @@ class ApprovalGate:
 
         return tier in APPROVAL_REQUIRED_TIERS
 
-    def create_approval_request(self, tool_name: str, tier: str,
+    def create_approval_request(self, conversation_id: str, tool_name: str, tier: str,
                                 params: dict,
                                 summary: str) -> ApprovalRequest:
-        return ApprovalRequest(
+        req = ApprovalRequest(
             tool_name=tool_name,
             tool_params=params,
             tier=tier,
@@ -129,6 +132,43 @@ class ApprovalGate:
             ),
             summary=summary,
         )
+        # Log to DB
+        self.log_request(conversation_id, req)
+        return req
+
+    def log_request(self, conversation_id: str, request: ApprovalRequest):
+        """Record the initial approval request in the audit log."""
+        try:
+            req_id = self._generate_request_id()
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO approval_audit_log 
+                        (conversation_id, request_id, tool_name, tool_params, status, tier, summary)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (conversation_id, req_id, request.tool_name, Json(request.tool_params), 'PENDING', request.tier, request.summary))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to log approval request: {e}")
+
+    def log_decision(self, conversation_id: str, status: str, approver_id: str = ""):
+        """Record the decision (APPROVED/REJECTED/CANCELLED) in the audit log."""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    # We update the latest pending request for this conversation
+                    cur.execute("""
+                        UPDATE approval_audit_log 
+                        SET status = %s, approver_id = %s, decided_at = NOW()
+                        WHERE conversation_id = %s AND status = 'PENDING'
+                    """, (status, approver_id, conversation_id))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to log approval decision: {e}")
+
+    def _generate_request_id(self) -> str:
+        import uuid
+        return f"apprv-{uuid.uuid4().hex[:8]}"
 
     def format_approval_prompt(self, request: ApprovalRequest) -> str:
         lines = [

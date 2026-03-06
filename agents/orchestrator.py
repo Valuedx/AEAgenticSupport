@@ -404,6 +404,7 @@ class Orchestrator:
                                 state.is_agent_working = False
                                 return self.approval_gate.format_approval_prompt(
                                     self.approval_gate.create_approval_request(
+                                        state.conversation_id,
                                         tool_name, tool_def.tier,
                                         tool_args, summary,
                                     )
@@ -625,6 +626,7 @@ class Orchestrator:
             )
 
         if intent == ApprovalIntent.CANCEL:
+            self.approval_gate.log_decision(state.conversation_id, "CANCELLED")
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
             state.pending_action_summary = ""
@@ -632,6 +634,7 @@ class Orchestrator:
             return "Understood. I cancelled the pending action. What should I do next?"
 
         if intent in (ApprovalIntent.REJECT, ApprovalIntent.NEW_REQUEST):
+            self.approval_gate.log_decision(state.conversation_id, "REJECTED")
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
             state.pending_action_summary = ""
@@ -664,6 +667,7 @@ class Orchestrator:
                 f"Authorized reviewers: {', '.join(allowed)}"
             )
 
+        self.approval_gate.log_decision(state.conversation_id, "APPROVED", state.user_id or "user")
         state.phase = ConversationPhase.EXECUTING
         result = tool_registry.execute(action["tool"], **action["args"])
         state.log_tool_call(

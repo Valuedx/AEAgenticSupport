@@ -796,6 +796,110 @@ def api_history_handoff(conversation_id: str):
         return jsonify({"error": str(exc)}), 500
 
 
+# ── Approval & HITL endpoints ──────────────────────────
+
+@app.route("/api/approvals/pending", methods=["GET"])
+def api_approvals_pending():
+    """List all pending approval requests."""
+    try:
+        from config.db import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, conversation_id, request_id, tool_name, tool_params, tier, summary, created_at
+                    FROM approval_audit_log
+                    WHERE status = 'PENDING'
+                    ORDER BY created_at DESC
+                """)
+                results = []
+                for row in cur.fetchall():
+                    results.append({
+                        "id": row[0],
+                        "conversation_id": row[1],
+                        "request_id": row[2],
+                        "tool_name": row[3],
+                        "tool_params": row[4],
+                        "tier": row[5],
+                        "summary": row[6],
+                        "created_at": row[7].isoformat(),
+                    })
+                return jsonify({"pending": results})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/approvals/decision", methods=["POST"])
+def api_approvals_decision():
+    """Submit a decision (approve/reject) via API."""
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        cid = payload.get("conversation_id")
+        decision = payload.get("decision", "").lower() # approve, reject, cancel
+        approver_id = payload.get("approver_id", "admin-api")
+        
+        if not cid or decision not in ("approve", "reject", "cancel"):
+            return jsonify({"error": "Missing conversation_id or invalid decision"}), 400
+            
+        from state.conversation_state import ConversationState
+        state = ConversationState.load(cid)
+        if not state:
+            return jsonify({"error": "Conversation state not found"}), 404
+            
+        if state.phase != "awaiting_approval":
+            return jsonify({"error": f"Conversation is in phase '{state.phase}', not 'awaiting_approval'"}), 400
+
+        # Delegate to the gateway to process the decision as a virtual user message
+        from gateway.message_gateway import gateway
+        response = gateway.process_message(cid, decision, user_id=approver_id)
+        
+        return jsonify({
+            "success": True,
+            "decision": decision,
+            "agent_response": response
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/approvals/audit", methods=["GET"])
+def api_approvals_audit():
+    """Fetch approval audit logs."""
+    try:
+        limit = int(request.args.get("limit", 50))
+        cid = request.args.get("conversation_id")
+        
+        from config.db import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                query = """
+                    SELECT conversation_id, tool_name, status, tier, summary, approver_id, created_at, decided_at
+                    FROM approval_audit_log
+                """
+                params = []
+                if cid:
+                    query += " WHERE conversation_id = %s"
+                    params.append(cid)
+                query += " ORDER BY created_at DESC LIMIT %s"
+                params.append(limit)
+                
+                cur.execute(query, tuple(params))
+                results = []
+                for row in cur.fetchall():
+                    results.append({
+                        "conversation_id": row[0],
+                        "tool_name": row[1],
+                        "status": row[2],
+                        "tier": row[3],
+                        "summary": row[4],
+                        "approver_id": row[5],
+                        "created_at": row[6].isoformat(),
+                        "decided_at": row[7].isoformat() if row[7] else None,
+                    })
+                return jsonify({"audit": results})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
