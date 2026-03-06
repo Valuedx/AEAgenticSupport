@@ -98,7 +98,6 @@ CREATE INDEX IF NOT EXISTS idx_issue_registry_conv
     ON issue_registry(conversation_id);
 
 -- Conversation state persistence (used by state/conversation_state.py)
--- active_issue_id is also written by state/issue_tracker.py
 CREATE TABLE IF NOT EXISTS conversation_state (
     conversation_id  VARCHAR(256) PRIMARY KEY,
     user_id          VARCHAR(256),
@@ -106,11 +105,44 @@ CREATE TABLE IF NOT EXISTS conversation_state (
     phase            VARCHAR(32) DEFAULT 'idle',
     state_data       JSONB DEFAULT '{}'::jsonb,
     active_issue_id  VARCHAR(64),
+    summary          TEXT,                  -- Feature 2.3.6
+    is_human_handoff BOOLEAN DEFAULT FALSE, -- Feature 2.3.4
     updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_conv_state_updated
     ON conversation_state(updated_at);
+
+-- FEATURE 2.3.1: Global message store for cross-session history search
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id             SERIAL PRIMARY KEY,
+    conversation_id VARCHAR(256) NOT NULL,
+    role           VARCHAR(32) NOT NULL,
+    content        TEXT NOT NULL,
+    metadata       JSONB DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_conv
+    ON chat_messages(conversation_id);
+
+-- FEATURE 2.3.5: User feedback tracking
+CREATE TABLE IF NOT EXISTS user_feedback (
+    id             SERIAL PRIMARY KEY,
+    conversation_id VARCHAR(256) NOT NULL UNIQUE,
+    user_id        VARCHAR(256),
+    rating         INTEGER CHECK (rating >= 1 AND rating <= 5),
+    comments       TEXT,
+    metadata       JSONB DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_feedback_conv
+    ON user_feedback(conversation_id);
+
+-- Migrations for existing deployments
+ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS is_human_handoff BOOLEAN DEFAULT FALSE;
 
 -- Tool execution audit log (Postgres-backed, survives restarts)
 -- Mirrors agent_catalog.json interactions but with full params + result

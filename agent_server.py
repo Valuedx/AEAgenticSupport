@@ -704,6 +704,98 @@ def api_webhook_log():
         return jsonify({"error": str(exc)}), 500
 
 
+# ── History & Session Management endpoints ──────────────────────────
+
+@app.route("/api/history/search", methods=["GET"])
+def api_history_search():
+    try:
+        query = request.args.get("q", "")
+        limit = int(request.args.get("limit", 10))
+        from state.conversation_state import ConversationState
+        results = ConversationState.search_history(query, limit)
+        return jsonify({"results": results})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/history/export/<conversation_id>", methods=["GET"])
+def api_history_export(conversation_id: str):
+    check = _admin_check()
+    if check: return check
+    try:
+        fmt = request.args.get("format", "json")
+        from state.conversation_state import ConversationState
+        state = ConversationState.load(conversation_id)
+        if not state:
+            return jsonify({"error": "Not found"}), 404
+        
+        content = state.export_history(fmt)
+        return jsonify({
+            "conversation_id": conversation_id,
+            "format": fmt,
+            "content": content
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/history/summary/<conversation_id>", methods=["POST"])
+def api_history_summary(conversation_id: str):
+    try:
+        from state.conversation_state import ConversationState
+        state = ConversationState.load(conversation_id)
+        if not state:
+            return jsonify({"error": "Not found"}), 404
+        
+        summary = state.generate_summary(force=True)
+        return jsonify({"conversation_id": conversation_id, "summary": summary})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/history/feedback", methods=["POST"])
+def api_history_feedback():
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        cid = payload.get("conversation_id")
+        rating = payload.get("rating")
+        comments = payload.get("comments", "")
+        
+        if not cid or rating is None:
+            return jsonify({"error": "Missing conversation_id or rating"}), 400
+            
+        from state.conversation_state import ConversationState
+        state = ConversationState.load(cid)
+        if not state:
+            return jsonify({"error": "Not found"}), 404
+            
+        state.save_feedback(int(rating), comments)
+        return jsonify({"success": True})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/history/handoff/<conversation_id>", methods=["POST"])
+def api_history_handoff(conversation_id: str):
+    try:
+        from state.conversation_state import ConversationState
+        state = ConversationState.load(conversation_id)
+        if not state:
+            return jsonify({"error": "Not found"}), 404
+        
+        state.is_human_handoff = True
+        state.save()
+        
+        # In a real system, this would trigger a notification to a human agent queue
+        # For now, we just mark it in the state.
+        return jsonify({
+            "success": True, 
+            "message": "Conversation marked for human handoff."
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
@@ -711,6 +803,11 @@ if __name__ == "__main__":
     try:
         from agents.scheduler import get_scheduler, setup_default_tasks
         setup_default_tasks()
+        
+        # Register session cleanup task
+        from state.session_manager import register_cleanup_task
+        register_cleanup_task()
+        
         if CONFIG.get("ENABLE_PROACTIVE_MONITORING", False):
             get_scheduler().start()
     except Exception as exc:

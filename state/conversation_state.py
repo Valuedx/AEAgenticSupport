@@ -60,6 +60,11 @@ class ConversationState:
         self.param_collection: dict = {}
         self.rca_data: Optional[dict] = None
 
+        # Feature 2.3: Metadata
+        self.summary: str = ""
+        self.is_human_handoff: bool = False
+        self.tags: list[str] = []
+
         # Concurrency
         self.is_agent_working: bool = False
         self.interrupt_requested: bool = False
@@ -68,12 +73,29 @@ class ConversationState:
 
     # ── Messages ──
 
-    def add_message(self, role: str, content: str):
-        self.messages.append({
+    def add_message(self, role: str, content: str, metadata: dict = None):
+        """Add a message to the state and persist to the global chat_messages table."""
+        timestamp = datetime.now().isoformat()
+        msg = {
             "role": role,
             "content": content,
-            "timestamp": datetime.now().isoformat(),
-        })
+            "timestamp": timestamp,
+            "metadata": metadata or {},
+        }
+        self.messages.append(msg)
+        
+        # Immediate persistence to global history table
+        if self.conversation_id:
+            try:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO chat_messages (conversation_id, role, content, metadata)
+                            VALUES (%s, %s, %s, %s)
+                        """, (self.conversation_id, role, content, Json(metadata or {})))
+                    conn.commit()
+            except Exception as e:
+                logger.warning(f"Failed to persist message to global history: {e}")
 
     # ── Findings ──
 
@@ -145,14 +167,16 @@ class ConversationState:
                     cur.execute("""
                         INSERT INTO conversation_state
                             (conversation_id, user_id, user_role,
-                             phase, state_data, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, NOW())
+                             phase, state_data, summary, is_human_handoff, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
                         ON CONFLICT (conversation_id)
                         DO UPDATE SET
                             user_id = EXCLUDED.user_id,
                             user_role = EXCLUDED.user_role,
                             phase = EXCLUDED.phase,
                             state_data = EXCLUDED.state_data,
+                            summary = EXCLUDED.summary,
+                            is_human_handoff = EXCLUDED.is_human_handoff,
                             updated_at = NOW()
                     """, (
                         self.conversation_id,
@@ -160,6 +184,8 @@ class ConversationState:
                         self.user_role,
                         self.phase.value,
                         Json(state_data),
+                        self.summary,
+                        self.is_human_handoff,
                     ))
                 conn.commit()
         except Exception as e:
@@ -174,7 +200,7 @@ class ConversationState:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT user_id, user_role, phase, state_data "
+                        "SELECT user_id, user_role, phase, state_data, summary, is_human_handoff "
                         "FROM conversation_state WHERE conversation_id = %s",
                         (conversation_id,),
                     )
@@ -184,6 +210,8 @@ class ConversationState:
                         state.user_role = row[1] or "technical"
                         state.phase = ConversationPhase(row[2] or "idle")
                         data = row[3] or {}
+                        state.summary = row[4] or ""
+                        state.is_human_handoff = bool(row[5])
                         state.messages = data.get("messages", [])
                         state.tool_call_log = data.get("tool_call_log", [])
                         state.affected_workflows = data.get(
@@ -210,4 +238,95 @@ class ConversationState:
             "finding_count": len(self.findings),
             "affected_workflows": self.affected_workflows,
             "is_agent_working": self.is_agent_working,
+            "summary": self.summary,
+            "is_human_handoff": self.is_human_handoff,
         }
+
+    # ── History & Search ───────────────────────────────────────────
+
+    @staticmethod
+    def search_history(query: str, limit: int = 10) -> list[dict]:
+        """Search across all conversation messages."""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT m.conversation_id, m.role, m.content, m.created_at, s.summary
+                        FROM chat_messages m
+                        LEFT JOIN conversation_state s ON m.conversation_id = s.conversation_id
+                        WHERE m.content ILIKE %s
+                        ORDER BY m.created_at DESC
+                        LIMIT %s
+                    """, (f"%{query}%", limit))
+                    results = []
+                    for row in cur.fetchall():
+                        results.append({
+                            "conversation_id": row[0],
+                            "role": row[1],
+                            "content": row[2],
+                            "timestamp": row[3].isoformat(),
+                            "summary": row[4] or "",
+                        })
+                    return results
+        except Exception as e:
+            logger.warning(f"Search failed: {e}")
+            return []
+
+    def export_history(self, format: str = "json") -> str:
+        """Export full conversation history as string."""
+        if format == "json":
+            return json.dumps({
+                "conversation_id": self.conversation_id,
+                "summary": self.summary,
+                "messages": self.messages,
+                "findings": [asdict(f) for f in self.findings],
+            }, indent=2)
+        elif format == "markdown":
+            lines = [f"# Conversation Export: {self.conversation_id}\n"]
+            if self.summary:
+                lines.append(f"**Summary:** {self.summary}\n")
+            lines.append("## Chat History\n")
+            for m in self.messages:
+                lines.append(f"**{m['role'].upper()}** ({m.get('timestamp','')}): {m['content']}\n")
+            lines.append("\n## Findings\n")
+            for f in self.findings:
+                lines.append(f"- **{f.category}** [{f.severity}]: {f.summary}")
+            return "\n".join(lines)
+        return ""
+
+    # ── Summary & Feedback ───────────────────────────────────────────
+
+    def generate_summary(self, force: bool = False):
+        """Generate/Update conversation summary using LLM."""
+        if self.summary and not force:
+            return self.summary
+        
+        if len(self.messages) < 2:
+            return ""
+
+        try:
+            from config.llm_client import llm_client
+            history = "\n".join([f"{m['role']}: {m['content']}" for m in self.messages[-20:]])
+            prompt = f"Summarize this support conversation in ONE brief sentence (max 20 words):\n\n{history}"
+            summary = llm_client.chat(prompt, system="You provide concise summaries of support interactions.")
+            self.summary = summary.strip()
+            self.save()
+            return self.summary
+        except Exception as e:
+            logger.warning(f"Summary generation failed: {e}")
+            return self.summary
+
+    def save_feedback(self, rating: int, comments: str = ""):
+        """Save user feedback for this conversation."""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO user_feedback (conversation_id, user_id, rating, comments)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (conversation_id)
+                        DO UPDATE SET rating = EXCLUDED.rating, comments = EXCLUDED.comments
+                    """, (self.conversation_id, self.user_id, rating, comments))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to save feedback: {e}")
