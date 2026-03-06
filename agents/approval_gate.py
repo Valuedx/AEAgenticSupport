@@ -142,7 +142,7 @@ class ApprovalGate:
         for k, v in request.tool_params.items():
             lines.append(f"  {k}: {v}")
         lines.append("")
-        lines.append("Reply **approve** to proceed or **reject** to cancel.")
+        lines.append("Reply **approve** (or **yes**) to proceed or **reject** (or **no**) to cancel.")
         return "\n".join(lines)
 
     def parse_approval_response(self, user_message: str) -> Optional[bool]:

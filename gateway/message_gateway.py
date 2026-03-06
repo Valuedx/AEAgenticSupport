@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from config.llm_client import llm_client
 from gateway.progress import ProgressCallback
 from state.conversation_state import ConversationState, ConversationPhase
+from state.user_memory import get_user_memory
 from agents.orchestrator import Orchestrator
 
 logger = logging.getLogger("ops_agent.gateway")
@@ -49,6 +50,12 @@ class MessageGateway:
                     state.user_id = user_id
                 if user_role:
                     state.user_role = user_role
+                if not state.last_agent_name and state.user_id:
+                    try:
+                        memory = get_user_memory()
+                        state.last_agent_name = memory.get_last_agent_name(state.user_id)
+                    except Exception as exc:
+                        logger.warning("User memory read failed: %s", exc)
                 self._sessions[conversation_id] = state
                 self._locks[conversation_id] = threading.Lock()
             return self._sessions[conversation_id]

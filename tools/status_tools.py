@@ -5,6 +5,7 @@ Status & health monitoring tools.
 import logging
 from datetime import datetime, timedelta, timezone
 
+from config.settings import CONFIG
 from tools.base import ToolDefinition, get_ae_client
 from tools.registry import tool_registry
 
@@ -167,7 +168,7 @@ def get_agent_status(agent_name: str = "") -> dict:
         agents[0] if agents else {},
     )
 
-    return {
+    result = {
         "success": True,
         "agents": agents,
         "total": len(agents),
@@ -178,14 +179,23 @@ def get_agent_status(agent_name: str = "") -> dict:
         },
     }
 
+    state = str(selected.get("agentState", "UNKNOWN")).upper()
+    if state not in ("CONNECTED", "RUNNING", "ACTIVE"):
+        if str(CONFIG.get("AGENT_STARTUP_PATH", "")).strip():
+            result["recommendation"] = "Agent is not running. You can run restart_ae_agent to start it."
+            result["restart_tool"] = "restart_ae_agent"
+        else:
+            result["recommendation"] = "Agent is not running. Contact your administrator to start it."
+    return result
 
-def t4_check_agent_status_tool(agent_name: str = "") -> dict:
+
+def t4_check_agent_status_tool(agent_name: str = "", timeout_sec: int | None = None) -> dict:
     """T4 Status Check Agent — mirrors code_ref.py t4_get_agent_details().
 
     Uses POST /monitoring/agents endpoint and selects the best available agent.
     """
     client = get_ae_client()
-    agents = client.check_agent_status()
+    agents = client.check_agent_status(timeout_sec=timeout_sec)
 
     if not agents:
         return {
@@ -208,7 +218,7 @@ def t4_check_agent_status_tool(agent_name: str = "") -> dict:
     state = selected.get("agentState", "UNKNOWN").upper()
     is_healthy = state in ("CONNECTED", "RUNNING", "ACTIVE")
 
-    return {
+    result = {
         "success": True,
         "agent_name": selected.get("agentName", "Unknown"),
         "agent_id": selected.get("agentId") or selected.get("id"),
@@ -218,9 +228,16 @@ def t4_check_agent_status_tool(agent_name: str = "") -> dict:
         "message": (
             f"Agent '{selected.get('agentName')}' is {state} and healthy."
             if is_healthy
-            else f"Agent '{selected.get('agentName')}' is {state} — may need attention."
+            else f"Agent '{selected.get('agentName')}' is {state} - may need attention."
         ),
     }
+    if not is_healthy:
+        if str(CONFIG.get("AGENT_STARTUP_PATH", "")).strip():
+            result["recommendation"] = "Agent is not running. You can run restart_ae_agent to start it."
+            result["restart_tool"] = "restart_ae_agent"
+        else:
+            result["recommendation"] = "Agent is not running. Contact your administrator to start it."
+    return result
 
 
 def t4_execute_and_poll(
@@ -406,6 +423,10 @@ tool_registry.register(
             "agent_name": {
                 "type": "string",
                 "description": "Agent name to check (empty = check first/best agent)",
+            },
+            "timeout_sec": {
+                "type": "integer",
+                "description": "Optional timeout in seconds for the status check",
             },
         },
         required_params=[],

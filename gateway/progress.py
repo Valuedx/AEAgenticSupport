@@ -74,9 +74,17 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
         "Checking agent availability...",
         "Checking AE agent status...",
     ),
+    "t4_check_agent_status": (
+        "Checking agent availability...",
+        "Checking AE agent status...",
+    ),
     "check_agent_resources": (
         "Checking system resources...",
         "Checking agent CPU/memory...",
+    ),
+    "restart_ae_agent": (
+        "Restarting the agent...",
+        "Restarting AE agent...",
     ),
     "restart_execution": (
         "Restarting the process...",

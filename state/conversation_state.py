@@ -59,6 +59,7 @@ class ConversationState:
         self.pending_action_summary: str = ""
         self.param_collection: dict = {}
         self.rca_data: Optional[dict] = None
+        self.last_agent_name: str = ""
 
         # Concurrency
         self.is_agent_working: bool = False
@@ -139,6 +140,7 @@ class ConversationState:
                 "pending_action": self.pending_action,
                 "pending_action_summary": self.pending_action_summary,
                 "param_collection": self.param_collection,
+                "last_agent_name": self.last_agent_name,
             }
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -194,6 +196,7 @@ class ConversationState:
                             "pending_action_summary", ""
                         )
                         state.param_collection = data.get("param_collection", {}) or {}
+                        state.last_agent_name = data.get("last_agent_name", "") or ""
                         for f_data in data.get("findings", []):
                             state.findings.append(Finding(**f_data))
         except Exception as e:

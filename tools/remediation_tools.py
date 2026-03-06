@@ -5,12 +5,209 @@ Higher-risk actions require approval via the ApprovalGate.
 
 import logging
 import json
+import subprocess
+import time
+from pathlib import Path
+import os
 
 from config.settings import CONFIG
 from tools.base import ToolDefinition, get_ae_client
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.tools.remediation")
+
+
+def _resolve_agent_startup_cmd() -> tuple[list[str], str]:
+    """Resolve the best startup command and working directory."""
+    raw_path = str(CONFIG.get("AGENT_STARTUP_PATH", "")).strip()
+    if not raw_path:
+        return ([], "")
+    path = Path(raw_path)
+    cwd = str(path) if path.is_dir() else str(path.parent)
+
+    # If a file is provided, run it directly.
+    if path.is_file():
+        return (["cmd", "/c", "start", "", str(path)], cwd)
+
+    # Directory provided: prefer startup scripts, then exe.
+    candidates = [
+        path / "startup.bat",
+        path / "startup-debug.bat",
+        path / "service.bat",
+        path / "remoteStartup.bat",
+        path / "aeagent.exe",
+        path / "aeagent-service.exe",
+        path / "aeagent-servicew.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return (["cmd", "/c", "start", "", str(candidate)], str(path))
+
+    return ([], cwd)
+
+
+def _resolve_agent_log_dir() -> Path | None:
+    raw_path = str(CONFIG.get("AGENT_STARTUP_PATH", "")).strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    base = path.parent if path.is_file() else path
+    if base.name.lower() == "bin":
+        candidate = base.parent / "logs"
+    else:
+        candidate = base / "logs"
+    if candidate.exists() and candidate.is_dir():
+        return candidate
+    return None
+
+
+def _tail_lines(path: Path, max_lines: int = 20, max_bytes: int = 32768) -> list[str]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+        text = data.decode("utf-8", errors="replace")
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        return lines[-max_lines:]
+    except Exception:
+        return []
+
+
+def _collect_agent_log_tail(max_lines: int = 20) -> dict:
+    log_dir = _resolve_agent_log_dir()
+    if not log_dir:
+        return {}
+    logs = {}
+    for name in ("aeagent.log", "health.log", "catalina.log"):
+        path = log_dir / name
+        if path.exists():
+            tail = _tail_lines(path, max_lines=max_lines)
+            if tail:
+                logs[name] = tail
+    return logs
+
+
+def restart_ae_agent(agent_name: str = "", poll_interval_sec: int = 2, max_poll_attempts: int = 15) -> dict:
+    """Start the AE agent process using the configured startup path and poll until running."""
+    cmd, cwd = _resolve_agent_startup_cmd()
+    if not cmd:
+        return {"success": False, "error": "AGENT_STARTUP_PATH is not configured."}
+
+    stdout = ""
+    stderr = ""
+    timed_out = False
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd or None,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        stdout = (result.stdout or "")[-500:]
+        stderr = (result.stderr or "")[-500:]
+        if result.returncode != 0:
+            logger.warning(
+                "restart_ae_agent failed (exit=%s). stdout=%s stderr=%s",
+                result.returncode,
+                stdout,
+                stderr,
+            )
+            return {
+                "success": False,
+                "error": f"Agent restart failed with exit code {result.returncode}",
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout = (exc.stdout or "")[-500:]
+        stderr = (exc.stderr or "")[-500:]
+        logger.warning(
+            "restart_ae_agent start command timed out. stdout=%s stderr=%s",
+            stdout,
+            stderr,
+        )
+    except Exception as exc:
+        logger.warning("restart_ae_agent failed to start: %s", exc, exc_info=True)
+        return {"success": False, "error": f"Failed to start agent: {exc}"}
+
+    client = get_ae_client()
+    try:
+        client_timeout = int(getattr(client, "timeout", 30) or 30)
+    except Exception:
+        client_timeout = 30
+    poll_timeout = min(5, client_timeout)
+    max_total_seconds = 60
+    max_attempts_by_timeout = max(1, int(max_total_seconds / max(1, poll_timeout)))
+    max_poll_attempts = min(max_poll_attempts, max_attempts_by_timeout)
+    healthy = None
+    last_state = "UNKNOWN"
+    agents = []
+    poll_count = 0
+    if max_poll_attempts <= 0:
+        return {
+            "success": True,
+            "agent_name": agent_name or "",
+            "message": "Restart command dispatched. Checking status next.",
+        }
+
+    for _ in range(max_poll_attempts):
+        time.sleep(max(1, int(poll_interval_sec)))
+        poll_count += 1
+        logger.info("restart_ae_agent poll #%d: checking agent status", poll_count)
+        agents = client.check_agent_status(timeout_sec=poll_timeout)
+        logger.info("restart_ae_agent poll #%d: %d agent(s) returned", poll_count, len(agents))
+        if agent_name:
+            agents = [a for a in agents if a.get("agentName", "") == agent_name]
+            if agents:
+                logger.info(
+                    "restart_ae_agent poll #%d: agent=%s state=%s",
+                    poll_count,
+                    agents[0].get("agentName", "Unknown"),
+                    agents[0].get("agentState", "UNKNOWN"),
+                )
+        healthy = next(
+            (a for a in agents if str(a.get("agentState", "")).upper() in {"CONNECTED", "RUNNING", "ACTIVE"}),
+            None,
+        )
+        if healthy:
+            break
+        if agents:
+            last_state = str(agents[0].get("agentState", "UNKNOWN"))
+
+    if healthy:
+        return {
+            "success": True,
+            "agent_name": healthy.get("agentName", agent_name or "Unknown"),
+            "agent_state": healthy.get("agentState", "UNKNOWN"),
+            "message": "Agent restarted and is running.",
+            "poll_attempts": poll_count,
+            "poll_interval_sec": poll_interval_sec,
+        }
+
+    message = "Agent restart was triggered, but the agent is still not running."
+    if timed_out:
+        message = "Agent start command timed out and the agent is still not running."
+    payload = {
+        "success": False,
+        "agent_name": agent_name or "",
+        "agent_state": last_state,
+        "message": message,
+        "poll_attempts": poll_count,
+        "poll_interval_sec": poll_interval_sec,
+    }
+    log_tail = _collect_agent_log_tail()
+    if log_tail:
+        payload["log_tail"] = log_tail
+    if stdout:
+        payload["stdout"] = stdout
+    if stderr:
+        payload["stderr"] = stderr
+    return payload
 
 
 def restart_execution(workflow_name: str, execution_id: str,
@@ -173,7 +370,8 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
         if status_upper in {"NO_AGENT"} or not healthy_agent:
             pending_msg = (
                 "The request is still pending and no active automation agent is available right now. "
-                "Please contact your administrator to start or reconnect the agent."
+                + ("You can restart the agent with restart_ae_agent. " if str(CONFIG.get("AGENT_STARTUP_PATH", "")).strip() else "")
+                + "Please contact your administrator if the agent does not start."
             )
         else:
             pending_msg = (
@@ -367,4 +565,33 @@ tool_registry.register(
         required_params=["workflow_name"],
     ),
     disable_workflow,
+)
+
+
+tool_registry.register(
+    ToolDefinition(
+        name="restart_ae_agent",
+        description=(
+            "Start the AutomationEdge agent process using the local startup path "
+            "and wait until it reports RUNNING/CONNECTED."
+        ),
+        category="remediation",
+        tier="medium_risk",
+        parameters={
+            "agent_name": {
+                "type": "string",
+                "description": "Optional agent name to verify (empty for any)"
+            },
+            "poll_interval_sec": {
+                "type": "integer",
+                "description": "Seconds between status checks (default 2)"
+            },
+            "max_poll_attempts": {
+                "type": "integer",
+                "description": "Max poll attempts before giving up (default 15)"
+            },
+        },
+        required_params=[],
+    ),
+    restart_ae_agent,
 )

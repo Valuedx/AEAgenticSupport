@@ -118,6 +118,10 @@ CONFIG = {
     "AGENT_CATALOG_PATH": os.environ.get(
         "AGENT_CATALOG_PATH", "state/agent_catalog.json"
     ),
+    "USER_MEMORY_PATH": os.environ.get(
+        "USER_MEMORY_PATH", "state/user_memory.json"
+    ),
+    "AGENT_STARTUP_PATH": os.environ.get("AGENT_STARTUP_PATH", ""),
     "AGENT_ADMIN_TOKEN": os.environ.get("AGENT_ADMIN_TOKEN", ""),
     "AGENT_INTERACTION_LOG_LIMIT": int(
         os.environ.get("AGENT_INTERACTION_LOG_LIMIT", "500")

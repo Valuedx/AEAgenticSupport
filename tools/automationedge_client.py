@@ -184,9 +184,11 @@ class AutomationEdgeClient:
         headers: Optional[dict] = None,
         use_rest_prefix: bool = False,
         retry_on_401: bool = True,
+        timeout: Optional[float] = None,
     ) -> Any:
         request_path = self._rest_path(path) if use_rest_prefix else self._normalize_path(path)
         request_headers = self._build_auth_headers(headers)
+        effective_timeout = timeout if timeout is not None else self.timeout
         response = self._client.request(
             method.upper(),
             request_path,
@@ -194,6 +196,7 @@ class AutomationEdgeClient:
             json=payload,
             data=data,
             headers=request_headers,
+            timeout=effective_timeout,
         )
 
         if (
@@ -211,6 +214,7 @@ class AutomationEdgeClient:
                 json=payload,
                 data=data,
                 headers=retry_headers,
+                timeout=effective_timeout,
             )
 
         response.raise_for_status()
@@ -622,7 +626,7 @@ class AutomationEdgeClient:
             "raw": raw,
         }
 
-    def check_agent_status(self, org_code: str = "") -> list[dict]:
+    def check_agent_status(self, org_code: str = "", timeout_sec: Optional[int] = None) -> list[dict]:
         """Check T4 agent health via monitoring endpoint.
 
         Ref: code_ref.py t4_check_agent_status() / t4_get_agent_monitoring()
@@ -640,6 +644,7 @@ class AutomationEdgeClient:
                 path,
                 params={"type": "AGENT", "offset": 0, "size": 100},
                 use_rest_prefix=True,
+                timeout=timeout_sec,
             )
             agents: list[dict] = []
             if isinstance(result, dict):

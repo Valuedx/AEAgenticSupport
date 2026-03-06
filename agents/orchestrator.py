@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
 from google.genai import types
 
@@ -19,6 +20,7 @@ from config.settings import CONFIG
 from gateway.progress import ProgressCallback, create_noop_progress
 from rag.engine import get_rag_engine
 from state.conversation_state import ConversationState, ConversationPhase
+from state.user_memory import get_user_memory
 from state.issue_tracker import (
     IssueTracker,
     MessageClassification,
@@ -249,12 +251,16 @@ class Orchestrator:
             return "You're welcome. Share any issue when ready and I'll help."
 
         if route == "SMALLTALK":
-            return "Hi. I can help with AutomationEdge and IT ops issues. Tell me what you need."
+            return (
+                "Hi. I can help with AutomationEdge and IT ops issues. "
+                "Tell me what you need, and I will guide you step by step."
+            )
 
         try:
-            return llm_client.chat(
+            response = llm_client.chat(
                 (
-                    "Respond naturally and briefly to the user's general message.\n"
+                    "Respond naturally and briefly to the user's general message in 2-3 short sentences.\n"
+                    "Aim for at least 25 words so the reply is not too short.\n"
                     "Do not mention tools, workflows, SOPs, or incidents.\n"
                     "End with one short line that you can also help with AutomationEdge issues.\n"
                     f"Route: {route}\n"
@@ -264,11 +270,187 @@ class Orchestrator:
                 temperature=0.5,
                 max_tokens=120,
             ).strip()
+            if len(response) < 40:
+                return (
+                    "Got it. If you want to continue, tell me a little more so I can respond properly. "
+                    "I can also help with AutomationEdge issues anytime."
+                )
+            return response
         except Exception:
             return (
                 "Got it. If you need anything else, tell me.\n"
                 "I can also help with AutomationEdge issues anytime."
             )
+
+    def _classify_agent_action(
+        self,
+        user_message: str,
+        tracker: IssueTracker | None = None,
+    ) -> str:
+        """Return STATUS, RESTART, or NONE for agent-related requests."""
+        text = str(user_message or "").strip()
+        if not text:
+            return "NONE"
+        tool_hits = []
+        try:
+            rag = get_rag_engine()
+            query_vec = rag.embed_query(text)
+            tool_hits = rag.search_tools(text, top_k=5, query_embedding=query_vec)
+        except Exception:
+            tool_hits = []
+
+        tool_summary = []
+        for hit in tool_hits or []:
+            if not isinstance(hit, dict):
+                continue
+            md = hit.get("metadata", {}) or {}
+            tool_summary.append(
+                {
+                    "name": md.get("tool_name", hit.get("id", "")),
+                    "description": md.get("description", ""),
+                    "category": md.get("category", ""),
+                    "similarity": float(hit.get("similarity", 0.0) or 0.0),
+                }
+            )
+
+        try:
+            verdict = llm_client.chat(
+                (
+                    "Classify this request about AutomationEdge agents.\n"
+                    "Return exactly one token: STATUS, RESTART, or NONE.\n"
+                    "STATUS = user wants to check agent health/state.\n"
+                    "RESTART = user explicitly asks to start/restart an agent.\n"
+                    "NONE = not about agents.\n"
+                    f"Tool hits: {tool_summary}\n"
+                    f'User message: "{text}"'
+                ),
+                system="Return one token only. Use RESTART only if the user clearly asked for restart/start.",
+                temperature=0.0,
+                max_tokens=8,
+            ).strip().upper()
+            if verdict in {"STATUS", "RESTART", "NONE"}:
+                return verdict
+        except Exception:
+            pass
+
+        # Fallback: use tool relevance hints without hardcoded keyword lists.
+        if tool_summary:
+            top = max(tool_summary, key=lambda t: t.get("similarity", 0.0))
+            name = str(top.get("name") or "").lower()
+            desc = str(top.get("description") or "").lower()
+            if "restart" in name or "restart" in desc:
+                return "RESTART"
+            if "agent" in name or "agent" in desc:
+                return "STATUS"
+        return "NONE"
+
+    def _handle_agent_status_request(
+        self,
+        *,
+        user_message: str,
+        state: ConversationState,
+        tracker: IssueTracker,
+        restart_intent: bool = False,
+    ) -> str:
+        agent_name = ""
+        extracted = self._extract_params_from_user_message(user_message, ["agent_name"])
+        if isinstance(extracted, dict):
+            agent_name = str(extracted.get("agent_name") or "").strip()
+        if not agent_name and state.last_agent_name:
+            agent_name = state.last_agent_name
+        if not agent_name and state.user_id:
+            try:
+                memory = get_user_memory()
+                remembered = memory.get_last_agent_name(state.user_id)
+                if remembered:
+                    agent_name = remembered
+                    if not state.last_agent_name:
+                        state.last_agent_name = remembered
+            except Exception as exc:
+                logger.warning("User memory read failed: %s", exc)
+
+        if restart_intent and not agent_name:
+            return "Which agent would you like to restart? Please provide the agent name."
+
+        tool_name = "t4_check_agent_status"
+        if not tool_registry.get_tool(tool_name):
+            tool_name = "get_agent_status"
+        tool_args = {"agent_name": agent_name} if agent_name else {}
+        result = tool_registry.execute(tool_name, **tool_args)
+        state.log_tool_call(tool_name, tool_args, result.data, result.success)
+
+        if not result.success:
+            return f"I couldn't check the agent status. {result.error}"
+
+        data = result.data or {}
+        name = (
+            data.get("agent_name")
+            or (data.get("selected_agent") or {}).get("name")
+            or "Unknown"
+        )
+        status = (
+            data.get("agent_state")
+            or (data.get("selected_agent") or {}).get("state")
+            or "UNKNOWN"
+        )
+        if name and name != "Unknown":
+            state.last_agent_name = name
+            if state.user_id:
+                try:
+                    get_user_memory().set_last_agent_name(state.user_id, name)
+                except Exception as exc:
+                    logger.warning("User memory write failed: %s", exc)
+        msg = f"The agent `{name}` is **{status}**."
+        recommendation = data.get("recommendation")
+        if recommendation:
+            msg += f" {recommendation}"
+
+        is_healthy = data.get("is_healthy")
+        state_value = str(status).upper()
+        unhealthy = (is_healthy is False) or (
+            state_value and state_value not in {"CONNECTED", "RUNNING", "ACTIVE"}
+        )
+
+        restart_available = (
+            bool(tool_registry.get_tool("restart_ae_agent"))
+            and str(CONFIG.get("AGENT_STARTUP_PATH", "")).strip() != ""
+        )
+
+        # If agent is unhealthy, ask for confirmation to restart.
+        if unhealthy and restart_available:
+            restart_args = {"agent_name": name} if name else {}
+            restart_args.setdefault("poll_interval_sec", 1)
+            restart_args.setdefault("max_poll_attempts", 0)
+            tool_def = tool_registry.get_tool("restart_ae_agent")
+            state.pending_action = {
+                "tool": "restart_ae_agent",
+                "args": restart_args,
+                "tier": tool_def.tier if tool_def else "medium_risk",
+                "authorized_users": [],
+            }
+            state.pending_action_summary = f"restart_ae_agent on {name or 'agent'}"
+            state.phase = ConversationPhase.AWAITING_APPROVAL
+            msg += " Do you want me to restart it now? (yes/no)"
+            return msg
+
+        # If user explicitly asked to restart but agent is healthy, confirm.
+        if restart_intent and restart_available:
+            restart_args = {"agent_name": name} if name else {}
+            restart_args.setdefault("poll_interval_sec", 1)
+            restart_args.setdefault("max_poll_attempts", 0)
+            tool_def = tool_registry.get_tool("restart_ae_agent")
+            state.pending_action = {
+                "tool": "restart_ae_agent",
+                "args": restart_args,
+                "tier": tool_def.tier if tool_def else "medium_risk",
+                "authorized_users": [],
+            }
+            state.pending_action_summary = f"restart_ae_agent on {name or 'agent'}"
+            state.phase = ConversationPhase.AWAITING_APPROVAL
+            msg += " The agent is already running. Do you still want to restart it? (yes/no)"
+            return msg
+
+        return msg
 
     # =====================================================================
     # Core investigation / remediation loop
@@ -339,6 +521,20 @@ class Orchestrator:
                 state.phase = ConversationPhase.IDLE
                 return preflight
 
+            agent_intent = self._classify_agent_action(user_message, tracker)
+            if agent_intent in {"STATUS", "RESTART"}:
+                response = self._handle_agent_status_request(
+                    user_message=user_message,
+                    state=state,
+                    tracker=tracker,
+                    restart_intent=(agent_intent == "RESTART"),
+                )
+                state.add_message("assistant", response)
+                state.is_agent_working = False
+                if state.phase != ConversationPhase.AWAITING_APPROVAL:
+                    state.phase = ConversationPhase.IDLE
+                return response
+
             for iteration in range(max_iterations):
                 if state.interrupt_requested:
                     state.interrupt_requested = False
@@ -374,6 +570,15 @@ class Orchestrator:
                         tool_def = tool_registry.get_tool(tool_name)
 
                         if tool_def:
+                            if (
+                                tool_name == "restart_ae_agent"
+                                and not tool_args.get("agent_name")
+                                and state.last_agent_name
+                            ):
+                                tool_args["agent_name"] = state.last_agent_name
+                            if tool_name == "restart_ae_agent":
+                                tool_args.setdefault("poll_interval_sec", 1)
+                                tool_args.setdefault("max_poll_attempts", 0)
                             # Check for missing required parameters first. 
                             # If params are missing, we don't ask for approval yet.
                             # We let the tool run (dynamic tools return a friendly prompt)
@@ -446,6 +651,28 @@ class Orchestrator:
                             result.error if not result.success else "",
                         )
 
+                        if (
+                            tool_name in {"t4_check_agent_status", "get_agent_status"}
+                            and result.success
+                            and isinstance(result.data, dict)
+                        ):
+                            remembered = (
+                                result.data.get("agent_name")
+                                or (result.data.get("selected_agent") or {}).get("name")
+                                or ""
+                            )
+                            if remembered:
+                                state.last_agent_name = remembered
+                                if state.user_id:
+                                    try:
+                                        get_user_memory().set_last_agent_name(
+                                            state.user_id, remembered
+                                        )
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "User memory write failed: %s", exc
+                                        )
+
                         if tool_name == "discover_tools":
                             found = (result.data or {}).get("tools", [])
                             discovered_names.extend(
@@ -495,6 +722,7 @@ class Orchestrator:
                             state.is_agent_working = False
                             # We stop here and ask the user
                             return question
+
 
                         response_parts.append(
                             types.Part(
@@ -697,6 +925,55 @@ class Orchestrator:
             return question
 
         active_issue = tracker.get_active_issue()
+        action_tool = str(action.get("tool") or "")
+
+        if action_tool == "restart_ae_agent":
+            agent_name = (
+                (action.get("args") or {}).get("agent_name")
+                or (result.data or {}).get("agent_name")
+                or state.last_agent_name
+            )
+            status_tool = (
+                "t4_check_agent_status"
+                if tool_registry.get_tool("t4_check_agent_status")
+                else "get_agent_status"
+            )
+            latest_status = None
+            for _ in range(5):
+                time.sleep(2)
+                if status_tool == "t4_check_agent_status":
+                    status_args = {"agent_name": agent_name, "timeout_sec": 3}
+                else:
+                    status_args = {"agent_name": agent_name}
+                status_args = {k: v for k, v in status_args.items() if v}
+                status_result = tool_registry.execute(status_tool, **status_args)
+                state.log_tool_call(
+                    status_tool, status_args, status_result.data, status_result.success
+                )
+                if status_result.success and isinstance(status_result.data, dict):
+                    latest_status = status_result.data
+                    state_value = (
+                        latest_status.get("agent_state")
+                        or (latest_status.get("selected_agent") or {}).get("state")
+                        or "UNKNOWN"
+                    )
+                    if str(state_value).upper() in {"CONNECTED", "RUNNING", "ACTIVE"}:
+                        latest_status["message"] = "Agent restarted and is running."
+                        return self._format_completion_message(
+                            "restart_ae_agent", latest_status
+                        )
+
+            if latest_status and isinstance(latest_status, dict):
+                state_value = (
+                    latest_status.get("agent_state")
+                    or (latest_status.get("selected_agent") or {}).get("state")
+                    or "UNKNOWN"
+                )
+                if str(state_value):
+                    result.error = (
+                        result.error
+                        or f"Latest status after restart: {state_value}."
+                    )
         if result.success:
             state.param_collection = {}
             if active_issue:
@@ -711,6 +988,7 @@ class Orchestrator:
             action_tool=str(action.get("tool") or ""),
             action_args=action.get("args") or {},
             error_text=result.error,
+            result_data=result.data if isinstance(result.data, dict) else None,
         )
 
     @staticmethod
@@ -730,6 +1008,24 @@ class Orchestrator:
         workflow = data.get("workflow_name")
         if workflow:
             details.append(f"• **Workflow**: `{workflow}`")
+
+        agent_name = data.get("agent_name")
+        if agent_name:
+            details.append(f"â€¢ **Agent**: `{agent_name}`")
+
+        agent_state = data.get("agent_state")
+        if agent_state:
+            details.append(f"â€¢ **Agent State**: {agent_state}")
+
+        poll_attempts = data.get("poll_attempts")
+        if poll_attempts:
+            interval = data.get("poll_interval_sec")
+            if interval:
+                details.append(
+                    f"â€¢ **Status Checks**: {poll_attempts} (every {interval}s)"
+                )
+            else:
+                details.append(f"â€¢ **Status Checks**: {poll_attempts}")
 
         response = f"**Done!** {msg}\n"
         if details:
@@ -1061,6 +1357,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
                 action_tool=tool_name,
                 action_args=action_args,
                 error_text=result.error,
+                result_data=result.data if isinstance(result.data, dict) else None,
             )
 
         # Otherwise move to approval flow.
@@ -1329,7 +1626,14 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
 
         return hints[:3]
 
-    def _build_action_failure_response(self, *, action_tool: str, action_args: dict, error_text: str) -> str:
+    def _build_action_failure_response(
+        self,
+        *,
+        action_tool: str,
+        action_args: dict,
+        error_text: str,
+        result_data: dict | None = None,
+    ) -> str:
         """Natural fallback message with SOP-guided steps."""
         workflow_name = str(
             (action_args or {}).get("workflow_name")
@@ -1337,6 +1641,36 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             or ""
         ).strip()
         wf_label = self._humanize_workflow_name(workflow_name) if workflow_name else "this request"
+
+        if action_tool == "restart_ae_agent" and "AGENT_STARTUP_PATH" in (error_text or ""):
+            return (
+                "I couldn't restart the agent because `AGENT_STARTUP_PATH` is not configured.\n"
+                "Set it in `.env` to the agent bin directory (for example: `D:\\PS\\T4\\ae-agent\\bin`), "
+                "restart the server, then ask me to restart the agent again."
+            )
+        if action_tool == "restart_ae_agent":
+            stdout = (result_data or {}).get("stdout") if isinstance(result_data, dict) else None
+            stderr = (result_data or {}).get("stderr") if isinstance(result_data, dict) else None
+            message = (result_data or {}).get("message") if isinstance(result_data, dict) else None
+            log_tail = (result_data or {}).get("log_tail") if isinstance(result_data, dict) else None
+            details = []
+            if stdout:
+                details.append(f"STDOUT: {stdout}")
+            if stderr:
+                details.append(f"STDERR: {stderr}")
+            if isinstance(log_tail, dict):
+                for name, lines in log_tail.items():
+                    if not lines:
+                        continue
+                    joined = "\n".join(lines[-20:])
+                    details.append(f"{name} (last lines):\n{joined}")
+            if details:
+                return (
+                    "I couldn't restart the agent. Here are the logs:\n"
+                    + "\n".join(details)
+                )
+            if message:
+                return f"I couldn't restart the agent. {message}"
 
         if action_tool == "create_incident_ticket":
             title = str((action_args or {}).get("title") or "Support Incident").strip()
