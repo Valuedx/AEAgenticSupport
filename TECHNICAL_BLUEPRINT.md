@@ -1,11 +1,10 @@
-> **Documentation Update (2026-03-06)**  
-> Patch release notes:
-> - **Multi-Agent Orchestration (Feature 2.1)**: Refactored existing monolithic orchestrator into a Multi-Agent Supervisor system. Added `DiagnosticAgent` and `RemediationAgent` specialists with A2A delegation protocol.
-> - **Hybrid Search (Feature 2.2)**: Upgraded RAG engine to support hybrid search using `pgvector` (semantic) + `tsvector` (keyword) + Reciprocal Rank Fusion (RRF). Added `DocumentProcessor` for PDF/Markdown/JSON with table extraction.
-> - **Multi-Language Support**: Added dynamic LLM-based language detection and localized system instruction propagation.
-> - **Enterprise Security (Feature 2.6)**: Implemented RBAC-based approval gates and automatic PII masking in JSON logs.
-> - **Proactive Monitoring**: Added background `Scheduler` and `/api/webhooks` endpoint for event-driven autonomous response.
-> - Validation status: `test_a2a_delegation.py` and `test_rag_hybrid.py` passed.
+> - **Multi-Agent 2.0 (Patch 2026-03-06)**:
+>   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
+>   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.
+>   - **Agent Memory**: Added `SharedContext` memory buckets. Specialists now maintain short-term state (e.g., specific log patterns) across multi-turn delegation chains.
+>   - **Context-Aware RAG**: RAG queries now automatically ingest active issue metadata (error signatures, workflow names) to prioritize relevant SOPs and KB articles.
+>   - **Rich Notifications**: Added `Adaptive Cards` support for MS Teams, enabling interactive high-fidelity approval and escalation alerts.
+> - Validation status: `test_enhancements.py` and `test_multi_agent.py` passed.
 >
 > **Documentation Update (2026-03-04)**  
 >
@@ -81,6 +80,7 @@ Request path examples:
   - `issue_tracker.py`: Multi-issue registry with recurrence and cascade detection (PostgreSQL-backed).
 - **`templates/`**
   - `rca_templates.py`: Prompt building helpers and RCA structures.
+  - `adaptive_cards.py`: **[NEW]** JSON schema generators for MS Teams rich notifications.
 - **`custom/` (AI Studio Extension layer)**
   - `custom_hooks.py`: Async Cognibot hooks (`api_messages_hook`) with locks, dedupe, and routing.
   - `models.py` + `migrations/`: Django models for cases, approvals, processed messages, links.

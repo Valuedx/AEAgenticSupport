@@ -58,14 +58,22 @@ class RCAAgent:
                 f"\n  Resolution: {meta.get('resolution', '')}\n"
             )
 
+        # ── Actionable Next Steps (Feature 4.1) ──
+        prevention_steps = []
+        for hit in sop_hits[:2]:
+            content = str(hit.get("content") or "")
+            for line in content.splitlines():
+                if any(k in line.lower() for k in ("prevent", "future", "permanent", "recommend")):
+                    prevention_steps.append(line.strip(" -*"))
+
         if state.user_role == "business":
             rca = self._generate_business_rca(
-                findings_text, past_text, affected_wfs, incident_summary
+                findings_text, past_text, affected_wfs, incident_summary, prevention_steps
             )
         else:
             rca = self._generate_technical_rca(
                 findings_text, past_text, affected_wfs,
-                incident_summary, state.tool_call_log,
+                incident_summary, state.tool_call_log, prevention_steps
             )
 
         state.rca_data = {
@@ -77,7 +85,8 @@ class RCAAgent:
         return rca
 
     def _generate_business_rca(self, findings_text, past_text,
-                               affected_wfs, summary):
+                               affected_wfs, summary, prevention_steps=None):
+        prevention_text = "\n".join(prevention_steps[:3]) if prevention_steps else "Follow standard operating procedures."
         prompt = f"""Generate a Root Cause Analysis for a BUSINESS AUDIENCE.
 Write in plain English. No jargon. Focus on:
 1. What happened (business terms)
@@ -93,6 +102,9 @@ Findings:
 Similar Past Incidents:
 {past_text}
 
+SOP Recommendations:
+{prevention_text}
+
 Format as a clean report with sections. Keep it under 500 words."""
 
         return llm_client.chat(
@@ -104,8 +116,9 @@ Format as a clean report with sections. Keep it under 500 words."""
         )
 
     def _generate_technical_rca(self, findings_text, past_text,
-                                affected_wfs, summary, tool_logs):
+                                affected_wfs, summary, tool_logs, prevention_steps=None):
         tool_log_text = json.dumps(tool_logs[-15:], indent=2, default=str)
+        prevention_text = "\n".join([f"- {s}" for s in (prevention_steps or [])[:5]])
 
         prompt = f"""Generate a detailed technical Root Cause Analysis.
 Include:
@@ -125,6 +138,9 @@ Tool Call Log:
 {tool_log_text}
 Similar Past Incidents:
 {past_text}
+
+SOP Prevention Guidance:
+{prevention_text}
 
 Be specific with workflow names, execution IDs, timestamps, and error details."""
 

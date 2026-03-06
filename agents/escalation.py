@@ -59,14 +59,22 @@ class EscalationAgent:
         channel: str = "teams",
         recipients: Optional[list[str]] = None,
         ticket_priority: str = "P3",
+        findings: list[dict] | None = None,
     ) -> dict:
         results = {}
 
         try:
+            full_description = issue_summary
+            if findings:
+                full_description += "\n\n**Investigation Findings:**\n"
+                for f in findings[:10]:
+                    summary = f.get("summary") or f.get("details") or str(f)
+                    full_description += f"- {summary}\n"
+
             ticket_result = tool_registry.execute(
                 "create_incident_ticket",
                 title=f"[Escalation-{tier}] {issue_summary[:100]}",
-                description=issue_summary,
+                description=full_description,
                 priority=ticket_priority,
                 assignee_group=tier,
             )

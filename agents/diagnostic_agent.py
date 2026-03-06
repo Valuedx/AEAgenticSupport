@@ -15,6 +15,7 @@ from agents.base_agent import (
     DelegationRequest,
 )
 from agents.agent_context import SharedContext
+from agents.orchestrator import Orchestrator
 from config.llm_client import llm_client
 from tools.registry import tool_registry
 
@@ -30,6 +31,9 @@ class DiagnosticAgent(BaseAgent):
     - Checking service dependencies
     - Verifying file availability
     """
+
+    def __init__(self):
+        self._orchestrator = Orchestrator()
 
     @property
     def info(self) -> AgentInfo:
@@ -67,25 +71,20 @@ class DiagnosticAgent(BaseAgent):
         state = kwargs.get("state")
         on_progress = kwargs.get("on_progress")
         
-        system_prompt = (
-            "You are the Diagnostic Specialist. Your ONLY goal is to find the root cause "
-            "of the reported issue. You have access to technical diagnostic tools.\n\n"
-            "Rules:\n"
-            "1. Focus on logs, status, and configuration.\n"
-            "2. Once you have a clear finding (or have ruled out local causes), "
-            "summarize your findings and hand back to the supervisor."
+        if not state:
+            return AgentResult(response="No state provided", success=False)
+
+        # Execute using restricted categories
+        response = self._orchestrator.handle_message(
+            user_message=user_message,
+            state=state,
+            on_progress=on_progress,
+            allowed_categories=["status", "logs", "dependency", "file"]
         )
 
-        # In a real implementation, we'd use a small ReAct loop here too, 
-        # but for this demo, we'll use tool_registry directly if needed or 
-        # just act as a specialized prompt wrapper for now.
-        # Ideally, we'd move the Orchestrator's internal loop logic into a shareable mixin.
-        
-        # For now, let's keep it simple: inform the user what we are doing
         return AgentResult(
-            response=(
-                "I'm now taking over the technical investigation. "
-                "I'll start by reviewing the execution logs for the affected workflows."
-            ),
-            findings=[{"agent": "diagnostic", "status": "started_investigation"}]
+            response=response,
+            success=True,
+            tool_calls=[tc["tool"] for tc in state.tool_call_log[-5:]],
+            findings=[{"category": f.category, "summary": f.summary} for f in state.findings[-3:]]
         )

@@ -51,7 +51,8 @@ class Orchestrator:
 
     def handle_message(self, user_message: str,
                        state: ConversationState,
-                       on_progress: ProgressCallback | None = None) -> str:
+                       on_progress: ProgressCallback | None = None,
+                       allowed_categories: list[str] | None = None) -> str:
         if not user_message.strip():
             return "It looks like your message was empty. How can I help?"
 
@@ -173,10 +174,10 @@ class Orchestrator:
                     response = (
                         f"Resuming investigation of [{target_issue.issue_id}] "
                         f"{target_issue.title}.\n\n"
-                        + self._process_message(user_message, state, tracker, progress)
+                        + self._process_message(user_message, state, tracker, progress, allowed_categories)
                     )
                 else:
-                    response = self._process_message(user_message, state, tracker, progress)
+                    response = self._process_message(user_message, state, tracker, progress, allowed_categories)
 
             elif classification == MessageClassification.STATUS_CHECK:
                 summary = tracker.get_all_issues_summary()
@@ -287,7 +288,8 @@ class Orchestrator:
     def _process_message(self, user_message: str,
                          state: ConversationState,
                          tracker: IssueTracker,
-                         progress: ProgressCallback | None = None) -> str:
+                         progress: ProgressCallback | None = None,
+                         allowed_categories: list[str] | None = None) -> str:
         progress = progress or create_noop_progress()
         state.is_agent_working = True
         state.phase = ConversationPhase.INVESTIGATING
@@ -302,17 +304,30 @@ class Orchestrator:
                 state.save()
 
         try:
+            active_issue = tracker.get_active_issue()
             system_prompt = self._build_system_prompt(state, tracker)
             rag = get_rag_engine()
 
-            query_vec = rag.embed_query(user_message)
-            tool_hits = rag.search_tools(user_message, top_k=12,
+            # ── Context-Aware RAG Enrichment (Feature 1.1) ──
+            enriched_query = user_message
+            if active_issue:
+                context_parts = []
+                if active_issue.workflows_involved:
+                    context_parts.append(f"Workflows: {', '.join(active_issue.workflows_involved)}")
+                if active_issue.error_signatures:
+                    context_parts.append(f"Errors: {', '.join(active_issue.error_signatures)}")
+                if context_parts:
+                    enriched_query = f"{user_message} (Context: {' '.join(context_parts)})"
+                    logger.info(f"RAG enriched query: {enriched_query}")
+
+            query_vec = rag.embed_query(enriched_query)
+            tool_hits = rag.search_tools(enriched_query, top_k=12,
                                          query_embedding=query_vec)
-            kb_hits = rag.search_kb(user_message, top_k=3,
+            kb_hits = rag.search_kb(enriched_query, top_k=3,
                                     query_embedding=query_vec)
-            sop_hits = rag.search_sops(user_message, top_k=3,
+            sop_hits = rag.search_sops(enriched_query, top_k=3,
                                        query_embedding=query_vec)
-            incident_hits = rag.search_past_incidents(user_message, top_k=3,
+            incident_hits = rag.search_past_incidents(enriched_query, top_k=3,
                                                        query_embedding=query_vec)
 
             context_block = self._format_rag_context(
@@ -324,8 +339,12 @@ class Orchestrator:
                 for h in tool_hits
             ]
             max_rag = CONFIG.get("MAX_RAG_TOOLS", 12)
+            
+            # ── Category-based Tool Isolation (Feature 1.2) ──
             vertex_tools = tool_registry.get_vertex_tools_filtered(
-                rag_tool_names, max_rag_tools=max_rag,
+                rag_tool_names, 
+                max_rag_tools=max_rag,
+                allowed_categories=allowed_categories
             )
             active_tool_names = self._extract_active_tool_names(vertex_tools)
 

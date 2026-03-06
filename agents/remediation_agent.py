@@ -6,14 +6,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from agents.agent_context import SharedContext
+from agents.orchestrator import Orchestrator
 from agents.base_agent import (
     AgentCapability,
     AgentInfo,
     AgentResult,
     AgentStatus,
     BaseAgent,
+    DelegationRequest,
 )
-from agents.agent_context import SharedContext
 from config.llm_client import llm_client
 from tools.registry import tool_registry
 
@@ -30,6 +32,9 @@ class RemediationAgent(BaseAgent):
     - Notifying stakeholders
     - Generating Root Cause Analysis (RCA)
     """
+
+    def __init__(self):
+        self._orchestrator = Orchestrator()
 
     @property
     def info(self) -> AgentInfo:
@@ -62,10 +67,38 @@ class RemediationAgent(BaseAgent):
         **kwargs,
     ) -> AgentResult:
         """Fixing loop using remediation tools."""
+        state = kwargs.get("state")
+        on_progress = kwargs.get("on_progress")
+
+        if not state:
+            return AgentResult(response="No state provided", success=False)
+
+        # Execute using restricted categories
+        response = self._orchestrator.handle_message(
+            user_message=user_message,
+            state=state,
+            on_progress=on_progress,
+            allowed_categories=["remediation", "notification", "config"]
+        )
+
+        # ── Verification Loop (Feature 6.1) ──
+        # If we successfully executed a remediation tool, delegate back for verification.
+        last_calls = state.tool_call_log[-3:]
+        remediation_success = any(tc["success"] for tc in last_calls)
+        
+        delegation = None
+        if remediation_success:
+            logger.info("Remediation successful, delegating to diagnostic for verification")
+            delegation = DelegationRequest(
+                target_agent_id="diagnostic_agent",
+                reason="Verification: Confirm fix success (check logs/status)",
+                context={"verification_target": state.affected_workflows}
+            )
+
         return AgentResult(
-            response=(
-                "I've identified the necessary corrective actions. "
-                "I'll now attempt to restart the failed workflow and notify the team."
-            ),
-            findings=[{"agent": "remediation", "status": "started_resolution"}]
+            response=response,
+            success=True,
+            tool_calls=[tc["tool"] for tc in state.tool_call_log[-5:]],
+            findings=[{"category": f.category, "summary": f.summary} for f in state.findings[-3:]],
+            delegation=delegation
         )

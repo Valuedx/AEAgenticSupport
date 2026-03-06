@@ -345,24 +345,42 @@ class ToolRegistry:
         self,
         rag_tool_names: list[str],
         max_rag_tools: int = 12,
+        allowed_categories: list[str] | None = None,
     ) -> list:
         self._ensure_meta_tools()
 
-        if len(self._tools) <= MAX_TOOLS_FOR_FULL_CATALOG:
-            return self.get_vertex_tools()
-
+        # Group tools to be selected
         selected: dict[str, ToolDefinition] = {}
-        for tool_def in self._tools.values():
-            if tool_def.always_available:
+
+        # 1. Add 'always_available' tools (or ALL tools if catalog is small), 
+        # but ALWAYS apply the category filter if provided.
+        if len(self._tools) <= MAX_TOOLS_FOR_FULL_CATALOG:
+            for tool_def in self._tools.values():
+                if allowed_categories and tool_def.category not in allowed_categories:
+                    continue
                 selected[tool_def.name] = tool_def
+        else:
+            for tool_def in self._tools.values():
+                if tool_def.always_available:
+                    if allowed_categories and tool_def.category not in allowed_categories:
+                        continue
+                    selected[tool_def.name] = tool_def
 
-        for name in rag_tool_names[:max_rag_tools]:
-            clean = name.removeprefix("tool-")
-            if clean in self._tools and clean not in selected:
-                selected[clean] = self._tools[clean]
+            # 2. Add tools from RAG results
+            for name in rag_tool_names[:max_rag_tools]:
+                clean = name.removeprefix("tool-")
+                if clean in self._tools and clean not in selected:
+                    tool_def = self._tools[clean]
+                    # Apply category filter if specified
+                    if allowed_categories and tool_def.category not in allowed_categories:
+                        continue
+                    selected[clean] = tool_def
 
+        # 3. Always include meta-tools unless explicitly filtered out (usually 'meta' category)
         if "discover_tools" in self._tools:
-            selected["discover_tools"] = self._tools["discover_tools"]
+            dt = self._tools["discover_tools"]
+            if not allowed_categories or dt.category in allowed_categories:
+                selected["discover_tools"] = dt
 
         declarations = [t.to_llm_schema() for t in selected.values()]
         logger.info(

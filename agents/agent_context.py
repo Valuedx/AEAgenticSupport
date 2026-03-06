@@ -62,6 +62,7 @@ class SharedContext:
         self._routing: dict[str, Any] = {}
         self._custom: dict[str, Any] = {}
         self._agent_results: dict[str, dict] = {}
+        self._memories: dict[str, dict[str, Any]] = {}
 
     # ── Findings ─────────────────────────────────────────────────────
 
@@ -159,6 +160,25 @@ class SharedContext:
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             return self._custom.get(key, default)
+
+    # ── Agent Memory ──────────────────────────────────────────────────
+
+    def set_memory(self, agent_id: str, key: str, value: Any) -> None:
+        """Store a piece of persistent memory for a specific agent."""
+        with self._lock:
+            if agent_id not in self._memories:
+                self._memories[agent_id] = {}
+            self._memories[agent_id][key] = value
+
+    def get_memory(self, agent_id: str, key: str, default: Any = None) -> Any:
+        """Retrieve a piece of persistent memory for a specific agent."""
+        with self._lock:
+            return self._memories.get(agent_id, {}).get(key, default)
+
+    def get_all_memories(self, agent_id: str) -> dict[str, Any]:
+        """Return all memories for a given agent."""
+        with self._lock:
+            return dict(self._memories.get(agent_id, {}))
 
     # ── Serialisation ────────────────────────────────────────────────
 

@@ -1,11 +1,10 @@
-> **Documentation Update (2026-03-06)**  
-> Patch release notes:
-> - **Multi-Agent Orchestration (Feature 2.1)**: Refactored existing monolithic orchestrator into a Multi-Agent Supervisor system. Added `DiagnosticAgent` and `RemediationAgent` specialists with A2A delegation protocol.
-> - **Hybrid Search (Feature 2.2)**: Upgraded RAG engine to support hybrid search using `pgvector` (semantic) + `tsvector` (keyword) + Reciprocal Rank Fusion (RRF). Added `DocumentProcessor` for PDF/Markdown/JSON with table extraction.
-> - **Multi-Language Support**: Added dynamic LLM-based language detection and localized system instruction propagation.
-> - **Enterprise Security (Feature 2.6)**: Implemented RBAC-based approval gates and automatic PII masking in JSON logs.
-> - **Proactive Monitoring**: Added background `Scheduler` and `/api/webhooks` endpoint for event-driven autonomous response.
-> - Validation status: `test_a2a_delegation.py` and `test_rag_hybrid.py` passed.
+> - **Multi-Agent 2.0 (Patch 2026-03-06)**:
+>   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
+>   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.
+>   - **Agent Memory**: Added `SharedContext` memory buckets. Specialists now maintain short-term state (e.g., specific log patterns) across multi-turn delegation chains.
+>   - **Context-Aware RAG**: RAG queries now automatically ingest active issue metadata (error signatures, workflow names) to prioritize relevant SOPs and KB articles.
+>   - **Rich Notifications**: Added `Adaptive Cards` support for MS Teams, enabling interactive high-fidelity approval and escalation alerts.
+> - Validation status: `test_enhancements.py` and `test_multi_agent.py` passed.
 >
 > **Documentation Update (2026-03-04)**  
 >
@@ -149,9 +148,10 @@ Responsibilities:
    - `AgentRouter` scores the user message against all registered agents (`Supervisor`, `Diagnostic`, `Remediation`).
    - If `Supervisor` is selected, it can proactively hand off to specialists:
      - **File:** `agents/orchestrator_agent.py` (Supervisor)
-     - Technical Investigate → `diagnostic_agent.py`
-     - Fix/Restart → `remediation_agent.py`
-   - Messages can contain a delegation chain (e.g., Supervisor → Diagnostic).
+     - Technical Investigate → `diagnostic_agent.py` (restricted to `status`, `logs`, `dependency`, `file` tools).
+      - Fix/Restart → `remediation_agent.py` (restricted to `remediation`, `notification`, `config` tools).
+    - Specialists use **Agent Memory** in `SharedContext` to persist state between turns without cluttering the global history.
+    - Messages can contain a delegation chain (e.g., Supervisor → Diagnostic).
 
 ---
 
@@ -245,7 +245,10 @@ The orchestrator (Step 5) always operates within the context of the **current is
     - Semantic search (pgvector) matches conceptual intent.
     - Keyword search (tsvector) matches specific workflow names or IDs.
     - RRF (Reciprocal Rank Fusion) merges results for high accuracy.
-  - Include `discover_tools` meta‑tool to let the LLM search mid‑conversation.
+    - **RAG Context Enrichment (Feature 1.1)**:
+      - Merges user input with `active_issue` metadata (Workflows + Error Signatures) before calling the search engine.
+      - Pushes relevant SOPs and incidents to the top of the context block.
+    - Include `discover_tools` meta‑tool to let the LLM search mid‑conversation.
 
 ### 5.4 Integrating findings with IssueTracker
 
@@ -341,7 +344,10 @@ Once remediation is allowed (auto‑run or approved):
      - `IssueTracker.resolve_issue(issue_id, resolution_summary)`
    - On recurrence:
      - `IssueTracker.reopen_issue(issue_id)` and increment recurrence count.
-     - If above `RECURRENCE_ESCALATION_THRESHOLD` → escalation agent engaged.
+     - **Automatic Verification Loop**:
+      - After executing a fix, `RemediationAgent` records a finding and **mandatory delegates back** to `DiagnosticAgent`.
+      - `DiagnosticAgent` performs a target health check (logs/status) to confirm the fix before the session is resolved.
+    - If above `RECURRENCE_ESCALATION_THRESHOLD` → escalation agent engaged.
 
 4. **Escalation:**
    - **File:** `agents/escalation.py`
