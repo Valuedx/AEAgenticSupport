@@ -900,6 +900,17 @@ def api_approvals_audit():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/metrics", methods=["GET"])
+def api_metrics():
+    """Get real-time performance metrics."""
+    try:
+        cid = request.args.get("conversation_id")
+        from config.metrics import metrics_collector
+        return jsonify(metrics_collector.get_summary(cid))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 

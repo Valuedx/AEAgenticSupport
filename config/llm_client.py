@@ -12,6 +12,7 @@ except ImportError:
     raise
 
 from config.settings import CONFIG
+from config.metrics import metrics_collector, TokenUsage
 
 logger = logging.getLogger("ops_agent.llm")
 
@@ -59,6 +60,9 @@ class VertexAIClient:
             config=config
         )
         
+        # Track tokens
+        self._record_usage(resp)
+
         # Extract text from the new response structure
         return self._extract_text(resp)
 
@@ -86,7 +90,31 @@ class VertexAIClient:
             contents=messages,
             config=config
         )
+        
+        # Track tokens
+        self._record_usage(response)
+        
         return response
+
+    def _record_usage(self, resp):
+        """Extract and record token usage if available."""
+        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+            u = resp.usage_metadata
+            usage = TokenUsage(
+                prompt_tokens=u.prompt_token_count or 0,
+                candidate_tokens=u.candidates_token_count or 0,
+                total_tokens=u.total_token_count or 0
+            )
+            # In a multi-agent system, we usually have a 'current_turn' context.
+            # For now, we update the latest turn if it's active.
+            with metrics_collector._lock:
+                if metrics_collector.active_turns:
+                    # Arbitrarily pick the latest turn for now, or we'd need turn_id context here.
+                    tid = list(metrics_collector.active_turns.keys())[-1]
+                    metric = metrics_collector.active_turns[tid]
+                    metric.token_usage.prompt_tokens += usage.prompt_tokens
+                    metric.token_usage.candidate_tokens += usage.candidate_tokens
+                    metric.token_usage.total_tokens += usage.total_tokens
 
     def _extract_text(self, resp) -> str:
         """Helper to extract text from Candidate parts."""

@@ -15,6 +15,7 @@ from google.genai import types
 from agents.approval_gate import ApprovalGate, ApprovalIntent
 from agents.escalation import EscalationAgent
 from config.llm_client import llm_client
+from config.metrics import metrics_collector
 from config.settings import CONFIG
 from gateway.progress import ProgressCallback, create_noop_progress
 from rag.engine import get_rag_engine
@@ -55,98 +56,111 @@ class Orchestrator:
             return "It looks like your message was empty. How can I help?"
 
         progress = on_progress or create_noop_progress()
-        state.add_message("user", user_message)
-        tracker = self._get_issue_tracker(state.conversation_id)
+        
+        # Start tracking turn metrics
+        import uuid
+        turn_id = f"turn-{uuid.uuid4().hex[:8]}"
+        metrics_collector.start_turn(state.conversation_id, turn_id)
+        
+        try:
+            state.add_message("user", user_message)
+            tracker = self._get_issue_tracker(state.conversation_id)
 
-        # ── Approval flow ──
-        if state.phase == ConversationPhase.AWAITING_APPROVAL:
-            active = tracker.get_active_issue()
-            if active:
-                active.touch()
-                tracker._persist_issue(active)
-            response = self._handle_approval_response(
-                user_message, state, tracker
-            )
-            state.save()
-            return response
-
-        # Conversational router (LLM-based): ACK/SMALLTALK/GENERAL/OPS.
-        conv_route = self._classify_conversational_route(user_message, tracker)
-        if conv_route in {"ACK", "SMALLTALK", "GENERAL"}:
-            response = self._build_conversational_response(
-                user_message=user_message,
-                route=conv_route,
-                tracker=tracker,
-            )
-            state.phase = ConversationPhase.IDLE
-            state.is_agent_working = False
-            state.add_message("assistant", response)
-            state.save()
-            return response
-
-        # ── Classify message ──
-        classification, issue_id = tracker.classify_message(
-            user_message, state.messages
-        )
-
-        # ── Route based on classification ──
-        if classification == MessageClassification.NEW_ISSUE:
-            tracker.create_issue(
-                title=user_message[:80],
-                description=user_message,
-            )
-            state.phase = ConversationPhase.IDLE
-            response = self._process_message(user_message, state, tracker, progress)
-
-        elif classification == MessageClassification.CONTINUE_EXISTING:
-            tracker.switch_to_issue(issue_id or tracker.active_issue_id)
-            response = self._process_message(user_message, state, tracker, progress)
-
-        elif classification == MessageClassification.RELATED_NEW:
-            parent_id = issue_id or tracker.active_issue_id
-            issue = tracker.create_issue(
-                title=user_message[:80],
-                description=user_message,
-            )
-            if parent_id:
-                tracker.link_issues(parent_id, issue.issue_id)
-            response = (
-                "This looks related to the issue I'm already investigating "
-                "but appears to be a separate problem. I'll track it as a "
-                "linked issue.\n\n"
-                + self._process_message(user_message, state, tracker, progress)
-            )
-
-        elif classification == MessageClassification.RECURRENCE:
-            old_issue = tracker.reopen_issue(issue_id)
-
-            if tracker.should_escalate_recurrence(old_issue.issue_id):
-                old_issue.status = IssueStatus.ESCALATED
-                tracker._persist_issue(old_issue)
-                state.phase = ConversationPhase.ESCALATED
-                response = (
-                    f"This issue has now recurred {old_issue.recurrence_count} "
-                    f"times. Previous resolution "
-                    f"({old_issue.resolution[:150]}) is not holding. "
-                    f"I'm escalating to the operations team for a permanent fix."
+            # ── Approval flow ──
+            if state.phase == ConversationPhase.AWAITING_APPROVAL:
+                active = tracker.get_active_issue()
+                if active:
+                    active.touch()
+                    tracker._persist_issue(active)
+                response = self._handle_approval_response(
+                    user_message, state, tracker
                 )
                 state.save()
                 return response
 
-            state.phase = ConversationPhase.IDLE
-            recurrence_note = (
-                f"This appears to be a recurrence of a previous issue "
-                f"(occurrence #{old_issue.recurrence_count}). "
-            )
-            if old_issue.resolution:
-                recurrence_note += (
-                    f"Last time the resolution was: "
-                    f"{old_issue.resolution[:200]}. "
-                    f"Let me check if the same root cause applies.\n\n"
+            # Conversational router (LLM-based): ACK/SMALLTALK/GENERAL/OPS.
+            conv_route = self._classify_conversational_route(user_message, tracker)
+            if conv_route in {"ACK", "SMALLTALK", "GENERAL"}:
+                response = self._build_conversational_response(
+                    user_message=user_message,
+                    route=conv_route,
+                    tracker=tracker,
                 )
-            response = recurrence_note + self._process_message(
-                user_message, state, tracker, progress
+                state.phase = ConversationPhase.IDLE
+                state.is_agent_working = False
+                state.add_message("assistant", response)
+                state.save()
+                return response
+
+            # ── Classify message ──
+            classification, issue_id = tracker.classify_message(
+                user_message, state.messages
             )
+
+            # ── Route based on classification ──
+            if classification == MessageClassification.NEW_ISSUE:
+                tracker.create_issue(
+                    title=user_message[:80],
+                    description=user_message,
+                )
+                state.phase = ConversationPhase.IDLE
+                response = self._process_message(user_message, state, tracker, progress)
+
+            elif classification == MessageClassification.CONTINUE_EXISTING:
+                tracker.switch_to_issue(issue_id or tracker.active_issue_id)
+                response = self._process_message(user_message, state, tracker, progress)
+
+            elif classification == MessageClassification.RELATED_NEW:
+                parent_id = issue_id or tracker.active_issue_id
+                issue = tracker.create_issue(
+                    title=user_message[:80],
+                    description=user_message,
+                )
+                if parent_id:
+                    tracker.link_issues(parent_id, issue.issue_id)
+                response = (
+                    "This looks related to the issue I'm already investigating "
+                    "but appears to be a separate problem. I'll track it as a "
+                    "linked issue.\n\n"
+                    + self._process_message(user_message, state, tracker, progress)
+                )
+
+            elif classification == MessageClassification.RECURRENCE:
+                old_issue = tracker.reopen_issue(issue_id)
+
+                if tracker.should_escalate_recurrence(old_issue.issue_id):
+                    old_issue.status = IssueStatus.ESCALATED
+                    tracker._persist_issue(old_issue)
+                    state.phase = ConversationPhase.ESCALATED
+                    response = (
+                        f"This issue has now recurred {old_issue.recurrence_count} "
+                        f"times. Previous resolution "
+                        f"({old_issue.resolution[:150]}) is not holding. "
+                        f"I'm escalating to the operations team for a permanent fix."
+                    )
+                    state.save()
+                    return response
+
+                state.phase = ConversationPhase.IDLE
+                recurrence_note = (
+                    f"This appears to be a recurrence of a previous issue "
+                    f"(occurrence #{old_issue.recurrence_count}). "
+                )
+                if old_issue.resolution:
+                    recurrence_note += (
+                        f"Last time the resolution was: "
+                        f"{old_issue.resolution[:200]}. "
+                        f"Let me check if the same root cause applies.\n\n"
+                    )
+                response = recurrence_note + self._process_message(
+                    user_message, state, tracker, progress
+                )
+            else:
+                response = "I'm not sure how to handle this request. Can you clarify?"
+                
+            return response
+        finally:
+            metrics_collector.end_turn(turn_id)
 
         elif classification == MessageClassification.FOLLOWUP:
             target_issue = (
@@ -438,7 +452,21 @@ class Orchestrator:
                             continue
 
                         progress.on_tool_start(tool_name, tool_args)
+                        
+                        import time
+                        tool_start = time.time()
+                        
                         result = tool_registry.execute(tool_name, **tool_args)
+                        
+                        tool_lat = (time.time() - tool_start) * 1000
+                        
+                        # Find the active turn_id for this conversation
+                        with metrics_collector._lock:
+                            tid = next((tid for tid, m in metrics_collector.active_turns.items() 
+                                       if m.conversation_id == state.conversation_id), None)
+                        if tid:
+                            metrics_collector.record_tool_call(tid, tool_name, tool_lat, result.success, result.error)
+
                         state.log_tool_call(
                             tool_name, tool_args, result.data, result.success
                         )
