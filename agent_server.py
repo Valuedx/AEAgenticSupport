@@ -551,9 +551,173 @@ def api_multi_agents_route():
         return jsonify({"error": str(exc)}), 500
 
 
+# ── Scheduler & Webhook endpoints ──────────────────────────────────────
+
+@app.route("/api/scheduler", methods=["GET"])
+def api_scheduler_status():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+        sched = get_scheduler()
+        return jsonify(sched.to_dict())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/start", methods=["POST"])
+def api_scheduler_start():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+        sched = get_scheduler()
+        sched.start()
+        return jsonify({"running": True, "tasks": sched.list_tasks()})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/stop", methods=["POST"])
+def api_scheduler_stop():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+        sched = get_scheduler()
+        sched.stop()
+        return jsonify({"running": False})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/tasks", methods=["GET", "POST"])
+def api_scheduler_tasks():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler, ScheduledTask, ScheduleType
+        sched = get_scheduler()
+
+        if request.method == "GET":
+            return jsonify({"tasks": sched.list_tasks()})
+
+        payload = request.get_json(force=True, silent=True) or {}
+        task = ScheduledTask(
+            name=payload.get("name", "Custom Task"),
+            description=payload.get("description", ""),
+            schedule_type=ScheduleType(payload.get("schedule_type", "interval")),
+            interval_seconds=int(payload.get("interval_seconds", 300)),
+            handler_name=payload.get("handler_name", ""),
+            handler_args=payload.get("handler_args", {}),
+            enabled=payload.get("enabled", True),
+        )
+        sched.add_task(task)
+        return jsonify(task.to_dict()), 201
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/tasks/<task_id>", methods=["DELETE"])
+def api_scheduler_task_delete(task_id: str):
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+        removed = get_scheduler().remove_task(task_id)
+        return jsonify({"removed": removed})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/tasks/<task_id>/enable", methods=["POST"])
+def api_scheduler_task_enable(task_id: str):
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+        ok = get_scheduler().enable_task(task_id)
+        return jsonify({"enabled": ok})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/tasks/<task_id>/disable", methods=["POST"])
+def api_scheduler_task_disable(task_id: str):
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+        ok = get_scheduler().disable_task(task_id)
+        return jsonify({"disabled": ok})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scheduler/log", methods=["GET"])
+def api_scheduler_log():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+        limit = int(request.args.get("limit", 50))
+        return jsonify({"log": get_scheduler().get_execution_log(limit)})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/webhooks/event", methods=["POST"])
+def api_webhook_event():
+    """Receive inbound webhook events from AutomationEdge."""
+    try:
+        from agents.scheduler import get_webhook_handler
+        event = request.get_json(force=True, silent=True) or {}
+        handler = get_webhook_handler()
+        result = handler.handle_event(event)
+        return jsonify({
+            "success": result.success,
+            "message": result.message,
+            "alerts": result.alerts,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/webhooks/log", methods=["GET"])
+def api_webhook_log():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_webhook_handler
+        limit = int(request.args.get("limit", 50))
+        return jsonify({"log": get_webhook_handler().get_event_log(limit)})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+
+    # Initialize scheduler with default tasks
+    try:
+        from agents.scheduler import get_scheduler, setup_default_tasks
+        setup_default_tasks()
+        if CONFIG.get("ENABLE_PROACTIVE_MONITORING", False):
+            get_scheduler().start()
+    except Exception as exc:
+        log.warning("Scheduler init failed (non-fatal): %s", exc)
+
     port = int(os.environ.get("AGENT_SERVER_PORT", 5050))
     print(f"Agent server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
 
