@@ -69,6 +69,9 @@ class MessageGateway:
                 if not registry.get("remediation_agent"):
                     from agents.remediation_agent import RemediationAgent
                     registry.register(RemediationAgent())
+                if not registry.get("rca_agent"):
+                    from agents.rca_agent import RCAAgent
+                    registry.register(RCAAgent())
 
                 self._agent_router = get_agent_router()
                 logger.info(

@@ -3,7 +3,7 @@
 >   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.
 >   - **Agent Memory**: Added `SharedContext` memory buckets. Specialists now maintain short-term state (e.g., specific log patterns) across multi-turn delegation chains.
 >   - **Context-Aware RAG**: RAG queries now automatically ingest active issue metadata (error signatures, workflow names) to prioritize relevant SOPs and KB articles.
->   - **Rich Notifications**: Added `Adaptive Cards` support for MS Teams, enabling interactive high-fidelity approval and escalation alerts.
+>   - **Rich Notifications**: Adaptive Card templates are prepared in `templates/`, but `custom/helpers/teams.py` currently uses Markdown-based fallbacks for broader client compatibility during approvals and escalations.
 > - Validation status: `test_enhancements.py` and `test_multi_agent.py` passed.
 >
 > **Documentation Update (2026-03-04)**  
@@ -145,11 +145,12 @@ Responsibilities:
    - If **no agent currently working** → call:
   3. **Agent Selection & Delegation (A2A):**
    - Normalizes message and calls `AgentRouter.route()`.
-   - `AgentRouter` scores the user message against all registered agents (`Supervisor`, `Diagnostic`, `Remediation`).
+   - `AgentRouter` scores the user message against all registered agents (`Supervisor`, `Diagnostic`, `Remediation`, `RCA`).
    - If `Supervisor` is selected, it can proactively hand off to specialists:
      - **File:** `agents/orchestrator_agent.py` (Supervisor)
      - Technical Investigate → `diagnostic_agent.py` (restricted to `status`, `logs`, `dependency`, `file` tools).
       - Fix/Restart → `remediation_agent.py` (restricted to `remediation`, `notification`, `config` tools).
+      - RCA Generation → `rca_agent.py` (specialist for generating Root Cause Analysis reports via `generate_rca_report` tool).
     - Specialists use **Agent Memory** in `SharedContext` to persist state between turns without cluttering the global history.
     - Messages can contain a delegation chain (e.g., Supervisor → Diagnostic).
 
@@ -362,13 +363,14 @@ Once remediation is allowed (auto‑run or approved):
 
 Responsibilities:
 
-1. Generate RCA:
+1. Generate RCA (via `generate_rca_report` tool):
    - Business RCA (plain English, no jargon) when `user_role == "business"`.
    - Technical RCA (timeline, IDs, error details) when `user_role == "technical"`.
    - Uses:
      - Current issue findings (`IssueTracker` + `ConversationState`).
      - Tool call logs.
      - Related past incidents via `rag.engine.get_rag_engine().search_past_incidents`.
+     - SOP guidance via `rag.engine.get_rag_engine().search_sops`.
 
 2. Index back into RAG:
    - `RCAAgent._index_as_past_incident` calls:

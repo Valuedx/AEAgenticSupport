@@ -1,13 +1,17 @@
-"""
-Root Cause Analysis Agent.
-Generates structured RCA reports for business and technical audiences.
-"""
 from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
+from agents.base_agent import (
+    BaseAgent,
+    AgentInfo,
+    AgentResult,
+    AgentCapability,
+    AgentStatus,
+)
 from config.llm_client import llm_client
 from rag.engine import get_rag_engine
 from state.conversation_state import ConversationState
@@ -15,7 +19,76 @@ from state.conversation_state import ConversationState
 logger = logging.getLogger("ops_agent.rca")
 
 
-class RCAAgent:
+class RCAAgent(BaseAgent):
+    """
+    Root Cause Analysis Agent.
+    Generates structured RCA reports for business and technical audiences.
+    """
+
+    @property
+    def info(self) -> AgentInfo:
+        return AgentInfo(
+            agent_id="rca_agent",
+            name="RCA Specialist",
+            description=(
+                "Specialist in generating Root Cause Analysis (RCA) reports. "
+                "Synthesizes investigation findings, tool logs, and past incidents "
+                "into structured reports for business and technical stakeholders."
+            ),
+            capabilities=[AgentCapability.KNOWLEDGE.value],
+            domains=["rpa", "workflow", "ops"],
+            status=AgentStatus.ACTIVE,
+            priority=60,
+        )
+
+    def can_handle(self, user_message: str, context: dict | None = None) -> float:
+        msg = user_message.lower()
+        if any(w in msg for w in ("rca", "root cause", "analysis report", "what happened")):
+            return 0.9
+        return 0.2
+
+    def handle(
+        self,
+        user_message: str,
+        context: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> AgentResult:
+        state: ConversationState | None = kwargs.get("state")
+        tracker = kwargs.get("tracker")
+        issue_id = kwargs.get("issue_id", "")
+
+        if not state:
+            return AgentResult(response="No conversation state provided.", success=False)
+
+        # Ensure static tool modules are imported so registrations are available.
+        import tools  # noqa: F401
+        from tools.registry import tool_registry
+
+        tool_result = tool_registry.execute(
+            "generate_rca_report",
+            conversation_id=state.conversation_id,
+            incident_summary=user_message,
+            state=state,
+            tracker=tracker,
+            issue_id=issue_id,
+        )
+        payload = tool_result.data if isinstance(tool_result.data, dict) else {}
+        report = (
+            str(payload.get("report") or payload.get("error") or "").strip()
+            or tool_result.error
+            or "Unable to generate an RCA report right now."
+        )
+        generated_at = (
+            payload.get("generated_at")
+            if isinstance(payload, dict)
+            else None
+        ) or (state.rca_data or {}).get("generated_at")
+
+        return AgentResult(
+            response=report,
+            success=tool_result.success,
+            metadata={"rca_generated_at": generated_at},
+        )
 
     def generate_rca(self, state: ConversationState,
                      incident_summary: str = "",
@@ -32,17 +105,25 @@ class RCAAgent:
             affected_wfs = state.affected_workflows
 
         if not findings:
-            return "I need to investigate first before generating an RCA."
+            return "I need to investigate the issue first before I can generate a credible RCA report. Would you like me to start an investigation?"
 
         search_query = incident_summary or " ".join(affected_wfs)
         rag = get_rag_engine()
         past_incidents = rag.search_past_incidents(search_query, top_k=3)
+        sop_hits = rag.search_sops(search_query, top_k=3)
 
         def _extract(f):
             if isinstance(f, dict):
                 return f
-            return {"category": f.category, "summary": f.summary,
-                    "severity": f.severity, "details": f.details}
+            try:
+                return {
+                    "category": getattr(f, "category", "general"),
+                    "summary": getattr(f, "summary", str(f)),
+                    "severity": getattr(f, "severity", "medium"),
+                    "details": getattr(f, "details", "")
+                }
+            except Exception:
+                return {"summary": str(f)}
 
         findings_text = json.dumps(
             [_extract(f) for f in findings],
