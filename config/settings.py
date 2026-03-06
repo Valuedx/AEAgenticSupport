@@ -122,4 +122,19 @@ CONFIG = {
     "AGENT_INTERACTION_LOG_LIMIT": int(
         os.environ.get("AGENT_INTERACTION_LOG_LIMIT", "500")
     ),
+
+    # RBAC & Security (Feature 2.6)
+    "RBAC_ENABLED": os.environ.get("RBAC_ENABLED", "true").lower() == "true",
+    "ROLE_RANK": {
+        "admin": 100,
+        "dev": 50,
+        "support": 10,
+        "readonly": 0
+    },
+    "TIER_RANK": {
+        "high_risk": 50,
+        "medium_risk": 20,
+        "low_risk": 10,
+        "read_only": 0
+    }
 }

@@ -12,21 +12,43 @@ from config.settings import CONFIG
 import json
 from datetime import datetime
 
+import re
+
 class JsonFormatter(logging.Formatter):
-    """Structured JSON formatter for external log aggregators."""
+    """Structured JSON formatter with PII masking."""
+    
+    PII_PATTERNS = {
+        "email": r"[\w\.-]+@[\w\.-]+\.\w+",
+        "ip": r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b",
+        "secret": r"(?i)(password|passwd|secret|token|key|api_key|apikey)[\s=:]+[\"']?([^\s\"']+)[\"']?"
+    }
+
+    def _mask_pii(self, text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        
+        # Mask emails
+        text = re.sub(self.PII_PATTERNS["email"], "[EMAIL_REDACTED]", text)
+        # Mask IPs
+        text = re.sub(self.PII_PATTERNS["ip"], "[IP_REDACTED]", text)
+        # Mask secrets (keep key, mask value)
+        text = re.sub(self.PII_PATTERNS["secret"], r"\1: [REDACTED]", text)
+        
+        return text
+
     def format(self, record):
         log_entry = {
             "timestamp": datetime.fromtimestamp(record.created).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": self._mask_pii(record.getMessage()),
             "module": record.module,
             "func": record.funcName,
         }
         if hasattr(record, "conversation_id"):
             log_entry["conversation_id"] = record.conversation_id
         if record.exc_info:
-            log_entry["exception"] = self.formatException(record.exc_info)
+            log_entry["exception"] = self._mask_pii(self.formatException(record.exc_info))
         return json.dumps(log_entry)
 
 def setup_logging():

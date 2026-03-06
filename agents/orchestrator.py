@@ -155,46 +155,42 @@ class Orchestrator:
                 response = recurrence_note + self._process_message(
                     user_message, state, tracker, progress
                 )
-            else:
-                response = "I'm not sure how to handle this request. Can you clarify?"
-                
-            return response
-        finally:
-            metrics_collector.end_turn(turn_id)
 
-        elif classification == MessageClassification.FOLLOWUP:
-            target_issue = (
-                tracker.issues.get(issue_id) if issue_id else None
-            ) or tracker.get_active_issue()
+            elif classification == MessageClassification.FOLLOWUP:
+                target_issue = (
+                    tracker.issues.get(issue_id) if issue_id else None
+                ) or tracker.get_active_issue()
 
-            if target_issue and target_issue.status == IssueStatus.RESOLVED:
+                if target_issue and target_issue.status == IssueStatus.RESOLVED:
+                    response = (
+                        f"Regarding [{target_issue.issue_id}] "
+                        f"{target_issue.title}: it was resolved. "
+                        f"{target_issue.resolution}\n\n"
+                        f"Would you like me to verify the current status?"
+                    )
+                elif target_issue and target_issue.status == IssueStatus.STALE:
+                    tracker.resume_stale_issue(target_issue.issue_id)
+                    response = (
+                        f"Resuming investigation of [{target_issue.issue_id}] "
+                        f"{target_issue.title}.\n\n"
+                        + self._process_message(user_message, state, tracker, progress)
+                    )
+                else:
+                    response = self._process_message(user_message, state, tracker, progress)
+
+            elif classification == MessageClassification.STATUS_CHECK:
+                summary = tracker.get_all_issues_summary()
                 response = (
-                    f"Regarding [{target_issue.issue_id}] "
-                    f"{target_issue.title}: it was resolved. "
-                    f"{target_issue.resolution}\n\n"
-                    f"Would you like me to verify the current status?"
-                )
-            elif target_issue and target_issue.status == IssueStatus.STALE:
-                tracker.resume_stale_issue(target_issue.issue_id)
-                response = (
-                    f"Resuming investigation of [{target_issue.issue_id}] "
-                    f"{target_issue.title}.\n\n"
+                    f"Here's the current session status:\n\n{summary}\n\n"
                     + self._process_message(user_message, state, tracker, progress)
                 )
             else:
                 response = self._process_message(user_message, state, tracker, progress)
 
-        elif classification == MessageClassification.STATUS_CHECK:
-            summary = tracker.get_all_issues_summary()
-            response = (
-                f"Here's the current session status:\n\n{summary}\n\n"
-                + self._process_message(user_message, state, tracker, progress)
-            )
-        else:
-            response = self._process_message(user_message, state, tracker, progress)
-
-        state.save()
-        return response
+            state.save()
+            return response
+        finally:
+            metrics_collector.end_turn(turn_id)
 
     def _classify_conversational_route(
         self,
@@ -695,6 +691,10 @@ class Orchestrator:
                 f"Authorized reviewers: {', '.join(allowed)}"
             )
 
+        rbac_ok, rbac_err = self._check_rbac(state, action.get("tier", "high_risk"))
+        if not rbac_ok:
+            return rbac_err
+
         self.approval_gate.log_decision(state.conversation_id, "APPROVED", state.user_id or "user")
         state.phase = ConversationPhase.EXECUTING
         result = tool_registry.execute(action["tool"], **action["args"])
@@ -744,6 +744,33 @@ class Orchestrator:
             action_args=action.get("args") or {},
             error_text=result.error,
         )
+
+    def _check_rbac(self, state: ConversationState, tier: str) -> tuple[bool, str]:
+        """Verify the user's role allows actions of the given risk tier."""
+        if not CONFIG.get("RBAC_ENABLED", False):
+            return True, ""
+            
+        role = (state.user_role or "readonly").lower()
+        role_rank = CONFIG["ROLE_RANK"].get(role, 0)
+        tier_rank = CONFIG["TIER_RANK"].get(tier.lower(), 100) # Default to max rank for unknown
+        
+        if role_rank >= tier_rank:
+            return True, ""
+            
+        min_role = self._get_min_role_for_tier(tier)
+        return False, (
+            f"Your role '{role}' is insufficient for {tier} actions. "
+            f"Minimum role required: {min_role}"
+        )
+
+    def _get_min_role_for_tier(self, tier: str) -> str:
+        tier_rank = CONFIG["TIER_RANK"].get(tier.lower(), 100)
+        # Sort roles by rank to find the smallest rank that satisfies the tier
+        roles = sorted(CONFIG["ROLE_RANK"].items(), key=lambda x: x[1])
+        for role, rank in roles:
+            if rank >= tier_rank:
+                return role
+        return "admin"
 
     @staticmethod
     def _format_completion_message(tool_name: str, data: dict) -> str:
