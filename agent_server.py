@@ -554,6 +554,7 @@ def api_multi_agents_route():
 # ── Scheduler & Webhook endpoints ──────────────────────────────────────
 
 @app.route("/api/scheduler", methods=["GET"])
+@app.route("/api/scheduler/status", methods=["GET"])
 def api_scheduler_status():
     check = _admin_check()
     if check:
@@ -662,7 +663,8 @@ def api_scheduler_task_disable(task_id: str):
 
 
 @app.route("/api/scheduler/log", methods=["GET"])
-def api_scheduler_log():
+@app.route("/api/scheduler/logs", methods=["GET"])
+def api_scheduler_logs():
     check = _admin_check()
     if check:
         return check
@@ -718,18 +720,6 @@ def api_webhooks():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
-
-@app.route("/api/scheduler/status", methods=["GET"])
-def api_scheduler_status():
-    try:
-        from agents.scheduler import get_scheduler
-        return jsonify(get_scheduler().to_dict())
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-
-
-@app.route("/api/scheduler/logs", methods=["GET"])
-def api_scheduler_logs():
 
 @app.route("/api/history/search", methods=["GET"])
 def api_history_search():

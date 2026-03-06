@@ -299,18 +299,22 @@ class AutomationEdgeClient:
         all_workflows: list[dict] = []
         current_offset = offset
 
-        # Try Catalogue first (T4 specific richness)
+        # Try configured workflow endpoint first, honoring configured method.
+        endpoint = self._rest_path(self.workflows_endpoint)
         while True:
             try:
-                endpoint = self._rest_path(self.workflows_endpoint)
-                payload = self._authorized_request(
-                    "GET",
+                payload = self._request_workflow_page(
                     endpoint,
-                    params={"offset": current_offset, "size": page_size},
+                    offset=current_offset,
+                    page_size=page_size,
+                    source_label="workflow endpoint",
                 )
             except httpx.HTTPStatusError as exc:
                 if current_offset == 0:
-                    logger.warning("T4 Catalogue GET failed (%s). Trying Runtime fallback.", exc.response.status_code)
+                    logger.warning(
+                        "Primary workflow endpoint failed (%s). Trying runtime fallback.",
+                        exc.response.status_code,
+                    )
                     return self._list_workflows_runtime(offset, page_size, all_pages)
                 raise
 
@@ -318,33 +322,67 @@ class AutomationEdgeClient:
             if not batch:
                 break
             all_workflows.extend(batch)
-            logger.info("Workflows fetched (Catalogue) offset=%d -> %d records", current_offset, len(batch))
+            logger.info(
+                "Workflows fetched (primary) offset=%d -> %d records",
+                current_offset,
+                len(batch),
+            )
             if not all_pages or len(batch) < page_size:
                 break
             current_offset += page_size
 
         return all_workflows
 
+    def _workflow_request_methods(self) -> list[str]:
+        preferred = str(self.workflows_method or "GET").strip().upper()
+        if preferred not in {"GET", "POST"}:
+            preferred = "GET"
+        secondary = "POST" if preferred == "GET" else "GET"
+        return [preferred, secondary]
+
+    def _request_workflow_page(
+        self,
+        endpoint: str,
+        *,
+        offset: int,
+        page_size: int,
+        source_label: str,
+    ) -> Any:
+        params = {"offset": offset, "size": page_size}
+        last_exc: Optional[httpx.HTTPStatusError] = None
+        methods = self._workflow_request_methods()
+        for idx, method in enumerate(methods):
+            try:
+                return self._authorized_request(method, endpoint, params=params)
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if idx < len(methods) - 1:
+                    logger.warning(
+                        "%s %s failed (%s). Trying %s.",
+                        source_label,
+                        method,
+                        exc.response.status_code,
+                        methods[idx + 1],
+                    )
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        return {}
+
     def _list_workflows_runtime(self, offset: int, page_size: int, all_pages: bool) -> list[dict]:
         """Fallback to /workflows/runtime if Catalogue is unavailable."""
         all_workflows: list[dict] = []
         current_offset = offset
+        endpoint = self._rest_path(self.workflows_runtime_endpoint)
         while True:
-            try:
-                endpoint = self._rest_path(self.workflows_runtime_endpoint)
-                payload = self._authorized_request(
-                    "GET",
-                    endpoint,
-                    params={"offset": current_offset, "size": page_size},
-                )
-            except httpx.HTTPStatusError as exc:
-                logger.warning("Workflow Runtime GET failed (%s). Trying POST.", exc.response.status_code)
-                payload = self._authorized_request(
-                    "POST",
-                    endpoint,
-                    params={"offset": current_offset, "size": page_size},
-                )
-            
+            payload = self._request_workflow_page(
+                endpoint,
+                offset=current_offset,
+                page_size=page_size,
+                source_label="workflow runtime",
+            )
+             
             batch = self._extract_workflow_list(payload)
             if not batch:
                 break

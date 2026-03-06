@@ -11,6 +11,17 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
+import pytest
+
+
+RUN_E2E = os.environ.get("RUN_E2E", "").strip().lower() in {"1", "true", "yes"}
+if not RUN_E2E:
+    pytest.skip(
+        "E2E tests require running local services. Set RUN_E2E=1 to enable.",
+        allow_module_level=True,
+    )
+
+pytestmark = pytest.mark.e2e
 
 
 AGENT_URL = "http://localhost:5050"
