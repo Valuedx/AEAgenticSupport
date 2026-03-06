@@ -3,7 +3,7 @@ Message Gateway handles:
 1. Receiving messages from chat interfaces (web, Teams)
 2. Classifying new messages that arrive while agents are working
 3. Managing the message queue per conversation
-4. Routing to the orchestrator
+4. Routing to the agent router (multi-agent) or fallback orchestrator
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from typing import Callable, Optional
 from config.llm_client import llm_client
 from gateway.progress import ProgressCallback
 from state.conversation_state import ConversationState, ConversationPhase
-from agents.orchestrator import Orchestrator
 
 logger = logging.getLogger("ops_agent.gateway")
 
@@ -29,13 +28,52 @@ class MessageIntent(Enum):
 
 
 class MessageGateway:
-    """Thread-safe message gateway for handling concurrent messages."""
+    """Thread-safe message gateway with multi-agent routing support."""
 
     def __init__(self):
-        self.orchestrator = Orchestrator()
+        # Lazy import to avoid circular dependency at import time
+        self._orchestrator = None
+        self._agent_router = None
         self._sessions: dict[str, ConversationState] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._session_guard = threading.Lock()
+
+    @property
+    def orchestrator(self):
+        """Lazy-load the orchestrator for backward compatibility."""
+        if self._orchestrator is None:
+            from agents.orchestrator import Orchestrator
+            self._orchestrator = Orchestrator()
+        return self._orchestrator
+
+    @property
+    def agent_router(self):
+        """Lazy-load the multi-agent router."""
+        if self._agent_router is None:
+            try:
+                from agents.agent_router import get_agent_router
+                from agents.agent_registry import get_agent_registry
+                from agents.orchestrator_agent import OrchestratorAgent
+
+                registry = get_agent_registry()
+
+                # Register the default orchestrator agent if not present
+                if not registry.get("ops_orchestrator"):
+                    orch_agent = OrchestratorAgent()
+                    registry.register(orch_agent)
+
+                self._agent_router = get_agent_router()
+                logger.info(
+                    "Multi-agent router initialized with %d agent(s)",
+                    len(registry.list_agents()),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Multi-agent router init failed, using legacy orchestrator: %s",
+                    exc,
+                )
+                self._agent_router = None
+        return self._agent_router
 
     def get_or_create_session(
         self, conversation_id: str,
@@ -62,11 +100,12 @@ class MessageGateway:
         Main entry point called by the chat interface.
         Thread-safe — handles concurrent messages gracefully.
 
+        Uses the multi-agent router when available, falls back to
+        the legacy single orchestrator otherwise.
+
         Args:
             on_progress: optional callback ``fn(status_text)`` invoked
                 with user-friendly progress messages during long operations.
-                For webchat this pushes SSE events; for Teams it sends
-                proactive messages.
         """
         if not user_message or not user_message.strip():
             return "It looks like your message was empty. How can I help?"
@@ -84,14 +123,14 @@ class MessageGateway:
         # ── Fast path: agents NOT currently working ──
         if state.phase == ConversationPhase.AWAITING_APPROVAL:
             with lock:
-                return self.orchestrator.handle_message(
-                    user_message, state, on_progress=progress
+                return self._dispatch(
+                    user_message, state, progress, conversation_id
                 )
 
         if not state.is_agent_working:
             with lock:
-                return self.orchestrator.handle_message(
-                    user_message, state, on_progress=progress
+                return self._dispatch(
+                    user_message, state, progress, conversation_id
                 )
 
         # ── Agents ARE currently working — classify this new message ──
@@ -112,8 +151,8 @@ class MessageGateway:
 
         elif intent == MessageIntent.APPROVAL:
             with lock:
-                return self.orchestrator.handle_message(
-                    user_message, state, on_progress=progress
+                return self._dispatch(
+                    user_message, state, progress, conversation_id
                 )
 
         elif intent == MessageIntent.NEW_REQUEST:
@@ -123,6 +162,39 @@ class MessageGateway:
         else:
             state.queue_user_message(user_message, hint="additive")
             return "Noted - I'll include this in my current investigation."
+
+    def _dispatch(
+        self,
+        user_message: str,
+        state: ConversationState,
+        progress: ProgressCallback,
+        conversation_id: str,
+    ) -> str:
+        """
+        Dispatch to the multi-agent router or fallback to legacy orchestrator.
+        """
+        router = self.agent_router
+
+        if router:
+            try:
+                result = router.route(
+                    user_message=user_message,
+                    conversation_id=conversation_id,
+                    user_id=state.user_id,
+                    state=state,
+                    on_progress=progress,
+                )
+                return result.response
+            except Exception as exc:
+                logger.error(
+                    "Multi-agent routing failed, falling back: %s",
+                    exc, exc_info=True,
+                )
+
+        # Fallback: direct orchestrator call (original behaviour)
+        return self.orchestrator.handle_message(
+            user_message, state, on_progress=progress
+        )
 
     def _classify_message_intent(
         self, message: str, state: ConversationState,

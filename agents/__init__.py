@@ -14,6 +14,13 @@ __all__ = [
     "RCAAgent",
     "ApprovalGate",
     "EscalationAgent",
+    "BaseAgent",
+    "AgentInfo",
+    "AgentResult",
+    "AgentRouter",
+    "AgentRegistry",
+    "SharedContext",
+    "OrchestratorAgent",
 ]
 
 _EXPORTS = {
@@ -21,6 +28,13 @@ _EXPORTS = {
     "RCAAgent": ("agents.rca_agent", "RCAAgent"),
     "ApprovalGate": ("agents.approval_gate", "ApprovalGate"),
     "EscalationAgent": ("agents.escalation", "EscalationAgent"),
+    "BaseAgent": ("agents.base_agent", "BaseAgent"),
+    "AgentInfo": ("agents.base_agent", "AgentInfo"),
+    "AgentResult": ("agents.base_agent", "AgentResult"),
+    "AgentRouter": ("agents.agent_router", "AgentRouter"),
+    "AgentRegistry": ("agents.agent_registry", "AgentRegistry"),
+    "SharedContext": ("agents.agent_context", "SharedContext"),
+    "OrchestratorAgent": ("agents.orchestrator_agent", "OrchestratorAgent"),
 }
 
 

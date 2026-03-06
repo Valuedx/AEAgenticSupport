@@ -473,6 +473,84 @@ def api_sops_upsert():
         return jsonify({"error": str(exc)}), 500
 
 
+# ── Multi-agent endpoints ──────────────────────────────────────────────
+
+@app.route("/api/multi-agents", methods=["GET"])
+def api_multi_agents():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.agent_registry import get_agent_registry
+        registry = get_agent_registry()
+        agents = registry.list_agent_info(active_only=False)
+        stats = registry.get_invocation_stats()
+        return jsonify({
+            "count": len(agents),
+            "agents": agents,
+            "stats": stats,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/multi-agents/<agent_id>/stats", methods=["GET"])
+def api_multi_agent_stats(agent_id: str):
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.agent_registry import get_agent_registry
+        registry = get_agent_registry()
+        agent = registry.get(agent_id)
+        if not agent:
+            return jsonify({"error": "agent not found"}), 404
+        stats = registry.get_invocation_stats(agent_id)
+        return jsonify({
+            "agent": agent.info.to_dict(),
+            "stats": stats,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/multi-agents/route", methods=["POST"])
+def api_multi_agents_route():
+    """Test the multi-agent routing logic without executing."""
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.agent_registry import get_agent_registry
+        from agents.agent_router import _score_agent
+
+        payload = request.get_json(force=True, silent=True) or {}
+        message = str(payload.get("message", "")).strip()
+        if not message:
+            return jsonify({"error": "message is required"}), 400
+
+        registry = get_agent_registry()
+        agents = registry.list_agents(active_only=True)
+        scored = [
+            {
+                "agent_id": a.info.agent_id,
+                "name": a.info.name,
+                "score": round(_score_agent(a, message, None), 3),
+                "capabilities": a.info.capabilities,
+                "domains": a.info.domains,
+            }
+            for a in agents
+        ]
+        scored.sort(key=lambda x: -x["score"])
+        return jsonify({
+            "message": message[:200],
+            "scored_agents": scored,
+            "selected": scored[0]["agent_id"] if scored else None,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     port = int(os.environ.get("AGENT_SERVER_PORT", 5050))
