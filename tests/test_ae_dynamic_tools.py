@@ -68,6 +68,7 @@ class TestDynamicAETools(unittest.TestCase):
     def setUp(self):
         self._backup = dict(CONFIG)
         CONFIG["AE_ENABLE_DYNAMIC_TOOLS"] = True
+        CONFIG["AE_DYNAMIC_DIRECT_TOOL_NAMES"] = []
 
     def tearDown(self):
         CONFIG.clear()
@@ -99,11 +100,28 @@ class TestDynamicAETools(unittest.TestCase):
         self.assertEqual(tool.avoid_when, "You only need to inspect a file or fetch status.")
         self.assertEqual(tool.input_examples[0]["targetPath"], "/tmp/out.txt")
         self.assertNotIn("write_file_tool", registry._handlers)
+        self.assertEqual(registry._catalog_entries["write_file_tool"].hydration_mode, "execute_via_generic_runner")
+        self.assertEqual(
+            registry.build_turn_toolset(["write_file_tool"], include_meta=False).list_tool_names(),
+            [],
+        )
 
         result = registry.execute("write_file_tool", targetPath="/tmp/out.txt")
         self.assertTrue(result.success)
         self.assertEqual(result.data.get("requestId"), "REQ-200")
         self.assertIn("write_file_tool", registry._handlers)
+
+    def test_dynamic_tool_allowlist_exposes_direct_tool(self):
+        registry = ToolRegistry()
+        CONFIG["AE_DYNAMIC_DIRECT_TOOL_NAMES"] = ["write_file_tool"]
+
+        with patch("tools.registry.get_automationedge_client", return_value=_FakeAEClient()):
+            summary = registry.reload_automationedge_tools()
+
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(registry._catalog_entries["write_file_tool"].hydration_mode, "lazy")
+        turn_tool_names = registry.build_turn_toolset(["write_file_tool"], include_meta=False).list_tool_names()
+        self.assertEqual(turn_tool_names, ["write_file_tool"])
 
 
 if __name__ == "__main__":

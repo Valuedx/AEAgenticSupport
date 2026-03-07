@@ -296,6 +296,21 @@ tool_registry.register(
             },
         },
         required_params=["workflow_name", "parameters"],
+        always_available=True,
+        use_when=(
+            "You know the target workflow and need to execute it using the "
+            "workflow name plus collected runtime parameters."
+        ),
+        avoid_when=(
+            "A safer read-only diagnostic tool can answer the question without "
+            "starting automation."
+        ),
+        input_examples=[
+            {
+                "workflow_name": "Claims_Processing_Daily",
+                "parameters": {"businessDate": "2026-03-07", "region": "west"},
+            }
+        ],
     ),
     trigger_workflow,
 )

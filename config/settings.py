@@ -67,6 +67,11 @@ CONFIG = {
     "AE_ENABLE_DYNAMIC_TOOLS": os.environ.get(
         "AE_ENABLE_DYNAMIC_TOOLS", "true"
     ).lower() in ("1", "true", "yes"),
+    "AE_DYNAMIC_DIRECT_TOOL_NAMES": [
+        name.strip()
+        for name in os.environ.get("AE_DYNAMIC_DIRECT_TOOL_NAMES", "").split(",")
+        if name.strip()
+    ],
     "AE_MCP_TOOLS_ENABLED": os.environ.get(
         "AE_MCP_TOOLS_ENABLED", "false"
     ).lower() in ("1", "true", "yes"),

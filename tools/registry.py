@@ -141,6 +141,10 @@ class ToolRegistry:
             hydrate,
         )
 
+    @staticmethod
+    def _is_llm_callable_entry(entry: ToolCatalogEntry) -> bool:
+        return entry.hydration_mode != "execute_via_generic_runner"
+
     def _hydrate_tool(self, name: str) -> Optional[ToolDefinition]:
         if name in self._tools:
             return self._tools[name]
@@ -309,6 +313,8 @@ class ToolRegistry:
             entry = self._catalog_entries.get(clean)
             if not entry:
                 return
+            if not self._is_llm_callable_entry(entry):
+                return
             tool_def = entry.definition
             if allowed_categories and tool_def.category not in allowed_categories:
                 return
@@ -389,6 +395,7 @@ class ToolRegistry:
             "use_when": tool_def.use_when,
             "avoid_when": tool_def.avoid_when,
             "input_examples": tool_def.input_examples[:2],
+            "hydration_mode": md.get("hydration_mode", "eager"),
         }
         if score is not None:
             card["score"] = round(score, 3)
@@ -402,11 +409,26 @@ class ToolRegistry:
         score: float | None = None,
         registered: bool = True,
     ) -> dict:
-        return cls._tool_card(
+        card = cls._tool_card(
             entry.to_tool_definition(),
             score=score,
-            registered=registered,
+            registered=registered and cls._is_llm_callable_entry(entry),
         )
+        card["hydration_mode"] = entry.hydration_mode
+        card["llm_callable"] = cls._is_llm_callable_entry(entry)
+        if not card["llm_callable"]:
+            use_tool = str(
+                entry.metadata.get("use_tool")
+                or entry.definition.metadata.get("use_tool")
+                or "trigger_workflow"
+            )
+            card["registered"] = False
+            card["use_tool"] = use_tool
+            card["hint"] = (
+                f"Tool is cataloged but not exposed as a direct LLM function. "
+                f"Use {use_tool} with workflow_name and parameters."
+            )
+        return card
 
     def get_tool_inventory(
         self,
@@ -435,6 +457,8 @@ class ToolRegistry:
                     "useWhen": card["use_when"],
                     "avoidWhen": card["avoid_when"],
                     "inputExamples": card["input_examples"],
+                    "hydrationMode": card["hydration_mode"],
+                    "llmCallable": card.get("llm_callable", True),
                     "linkedAgents": linked_agents,
                 }
             )
@@ -489,6 +513,11 @@ class ToolRegistry:
             workflows,
             details_by_workflow=details_by_workflow,
         )
+        direct_dynamic = {
+            str(name).strip().lower()
+            for name in CONFIG.get("AE_DYNAMIC_DIRECT_TOOL_NAMES", [])
+            if str(name).strip()
+        }
 
         registered = 0
         skipped = 0
@@ -506,12 +535,19 @@ class ToolRegistry:
                 continue
 
             definition = mapping.to_tool_definition()
+            is_direct = (
+                mapping.tool_name.lower() in direct_dynamic
+                or mapping.workflow_name.lower() in direct_dynamic
+            )
             self.register_catalog_entry(
                 ToolCatalogEntry.from_definition(
                     definition,
                     source_ref=mapping.workflow_name,
-                    hydration_mode="lazy",
+                    hydration_mode="lazy" if is_direct else "execute_via_generic_runner",
                     latency_class="medium",
+                    metadata={
+                        "use_tool": "trigger_workflow",
+                    },
                 ),
                 handler_factory=lambda _mapping=mapping, _client=client: self._make_dynamic_tool_handler(
                     _mapping,

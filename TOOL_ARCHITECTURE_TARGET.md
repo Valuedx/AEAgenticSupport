@@ -7,7 +7,7 @@ Implemented in the current codebase:
 
 - Searchable tool metadata is now stored separately from runtime handler hydration.
 - Long-tail MCP tools are cataloged and lazily hydrated on demand.
-- Dynamic AE workflow-backed tools are cataloged and lazily hydrated on demand.
+- Dynamic AE workflow-backed tools are cataloged and now default to generic-runner exposure through `trigger_workflow`; an allowlist can keep selected workflows as direct tools.
 - The orchestrator now uses a turn-local hydrated tool set for the main LLM investigation loop.
 - The existing `ToolRegistry` API remains in place as a compatibility facade.
 

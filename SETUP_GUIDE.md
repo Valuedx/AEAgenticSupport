@@ -1362,9 +1362,14 @@ To expose the 106 `ae.*` tools (P0 + P1 support; e.g. `ae.request.get_summary`, 
    AE_MCP_TOOLS_ENABLED=true
    ```
 
-3. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will catalog the 106 MCP tools. A small support-focused subset is hydrated eagerly; the rest appear in the tool catalog and are available via RAG/`discover_tools` with lazy runtime hydration for the current turn.
+3. **Optional**: keep selected dynamic AE workflow tools directly callable instead of routing them through the generic workflow runner:
+   ```env
+   AE_DYNAMIC_DIRECT_TOOL_NAMES=write_file_tool,claims_recovery_tool
+   ```
 
-4. **Optional**: Ensure the agent catalog links the new tools to the orchestrator. The default behavior (`ensure_default_agent_links`) merges newly registered tool names into the orchestrator’s `linkedTools`; no extra config is required.
+4. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will catalog the 106 MCP tools. A small support-focused subset is hydrated eagerly; the rest appear in the tool catalog and are available via RAG/`discover_tools` with lazy runtime hydration for the current turn. Dynamic AE workflow tools default to generic-runner exposure through `trigger_workflow` unless they are listed in `AE_DYNAMIC_DIRECT_TOOL_NAMES`.
+
+5. **Optional**: Ensure the agent catalog links the new tools to the orchestrator. The default behavior (`ensure_default_agent_links`) merges newly registered tool names into the orchestrator’s `linkedTools`; no extra config is required.
 
 If `AE_MCP_TOOLS_ENABLED` is `false` (default), the main app does not load or depend on `mcp_server`.
 

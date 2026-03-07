@@ -62,9 +62,16 @@ class ToolCatalogEntry:
         metadata["source"] = self.source
         metadata["source_ref"] = self.source_ref
         metadata["hydration_mode"] = self.hydration_mode
+        metadata["llm_callable"] = self.hydration_mode != "execute_via_generic_runner"
         metadata["latency_class"] = self.latency_class
         metadata["mutating"] = self.mutating
         metadata["allowed_agents"] = list(self.allowed_agents)
+        if self.hydration_mode == "execute_via_generic_runner":
+            metadata["use_tool"] = str(
+                self.metadata.get("use_tool")
+                or self.definition.metadata.get("use_tool")
+                or "trigger_workflow"
+            )
         if self.metadata:
             metadata["catalog"] = dict(self.metadata)
         return doc

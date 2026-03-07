@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch, mock_open
 from agents.agent_context import SharedContext
 from tools.registry import ToolRegistry
 from tools.base import ToolDefinition
+from tools.catalog import ToolCatalogEntry
 from agents.orchestrator import Orchestrator
 from agents.diagnostic_agent import DiagnosticAgent
 from agents.remediation_agent import RemediationAgent
@@ -104,6 +105,47 @@ class TestAgentEnhancements:
         assert tool_card["use_when"] == "You need historical or SOP context before acting."
         assert tool_card["avoid_when"] == "You already have a request ID and need live status."
         assert tool_card["input_examples"][0]["query"] == "dns resolution failure overnight batch"
+
+    @patch("rag.engine.get_rag_engine")
+    def test_discover_tools_guides_generic_runner_workflow(self, mock_get_rag, mock_conn):
+        reg = ToolRegistry()
+        reg.register_catalog_entry(
+            ToolCatalogEntry.from_definition(
+                ToolDefinition(
+                    name="write_file_tool",
+                    description="Write a file via AE workflow.",
+                    category="automationedge",
+                    tier="medium_risk",
+                    parameters={"targetPath": {"type": "string", "description": "Path"}},
+                    required_params=["targetPath"],
+                    metadata={"source": "automationedge", "workflow_name": "FileWriterWorkflow"},
+                ),
+                source_ref="FileWriterWorkflow",
+                hydration_mode="execute_via_generic_runner",
+                metadata={"use_tool": "trigger_workflow"},
+            ),
+            handler_factory=lambda: (lambda **_: {"success": True}),
+            hydrate=False,
+        )
+
+        mock_rag = MagicMock()
+        mock_rag.search_tools.return_value = [
+            {
+                "id": "tool-write_file_tool",
+                "metadata": {"tool_name": "write_file_tool"},
+                "rrf_score": 0.88,
+            }
+        ]
+        mock_get_rag.return_value = mock_rag
+
+        reg._ensure_meta_tools()
+        result = reg.execute("discover_tools", query="write a file", top_k=3)
+
+        assert result.success
+        tool_card = result.data["tools"][0]
+        assert tool_card["registered"] is False
+        assert tool_card["llm_callable"] is False
+        assert tool_card["use_tool"] == "trigger_workflow"
 
     # ── 3. Orchestrator Context-Aware RAG (Integration check) ──
     @patch("state.issue_tracker.IssueTracker._load_from_db", return_value=None)
