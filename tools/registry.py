@@ -412,11 +412,13 @@ class ToolRegistry:
                     },
                 )
 
+        feedback_stats = self._get_tool_feedback(list(candidates))
         ranked = self._ranker.rank(
             query,
             [candidate["entry"] for candidate in candidates.values()],
             retrieval_scores=retrieval_scores,
             retrieval_ranks=retrieval_ranks,
+            feedback_stats=feedback_stats,
         )
 
         cards: list[dict] = []
@@ -430,6 +432,18 @@ class ToolRegistry:
                 )
             )
         return cards
+
+    @staticmethod
+    def _get_tool_feedback(tool_names: list[str]) -> dict[str, dict]:
+        if not tool_names:
+            return {}
+        try:
+            from state.agent_catalog import get_agent_catalog
+
+            limit = min(int(CONFIG.get("AGENT_INTERACTION_LOG_LIMIT", 500) or 500), 200)
+            return get_agent_catalog().summarize_tool_feedback(tool_names, limit=limit)
+        except Exception:
+            return {}
 
     def build_turn_toolset(
         self,

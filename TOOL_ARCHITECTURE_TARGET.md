@@ -10,6 +10,7 @@ Implemented in the current codebase:
 - Dynamic AE workflow-backed tools are cataloged and now default to generic-runner exposure through `trigger_workflow`; an allowlist can keep selected workflows as direct tools.
 - The orchestrator now uses a turn-local hydrated tool set for the main LLM investigation loop.
 - Tool discovery and turn-local hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, and direct-callability signals.
+- The ranking step now also folds in observed success/failure history from the existing tool interaction log, so reliable tools can outrank marginally stronger raw retrieval hits.
 - The existing `ToolRegistry` API remains in place as a compatibility facade.
 
 ## 1. Why This Refactor Exists

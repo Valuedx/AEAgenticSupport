@@ -5,6 +5,7 @@ Covers: Agent Memory, Tool Isolation, Verification Loop.
 from __future__ import annotations
 
 import pytest
+import threading
 from unittest.mock import MagicMock, patch, mock_open
 
 from agents.agent_context import SharedContext
@@ -149,6 +150,40 @@ class TestAgentEnhancements:
         assert tool_card["latency_class"] == "medium"
         assert tool_card["mutating"] is True
 
+    def test_agent_catalog_summarizes_tool_feedback(self, mock_conn):
+        from state.agent_catalog import AgentCatalog
+
+        catalog = AgentCatalog.__new__(AgentCatalog)
+        catalog._lock = threading.Lock()
+        catalog._load = lambda: {
+            "interactions": [
+                {
+                    "timestamp": "2026-03-07T10:00:00+00:00",
+                    "toolName": "alpha_tool",
+                    "success": True,
+                },
+                {
+                    "timestamp": "2026-03-07T10:01:00+00:00",
+                    "toolName": "alpha_tool",
+                    "success": False,
+                },
+                {
+                    "timestamp": "2026-03-07T10:02:00+00:00",
+                    "toolName": "beta_tool",
+                    "success": True,
+                },
+            ]
+        }
+
+        summary = catalog.summarize_tool_feedback(["alpha_tool", "beta_tool"], limit=10)
+
+        assert summary["alpha_tool"]["total_count"] == 2
+        assert summary["alpha_tool"]["success_count"] == 1
+        assert summary["alpha_tool"]["failure_count"] == 1
+        assert summary["alpha_tool"]["success_rate"] == 0.5
+        assert summary["beta_tool"]["total_count"] == 1
+        assert summary["beta_tool"]["last_success_at"] == "2026-03-07T10:02:00+00:00"
+
     @patch("rag.engine.get_rag_engine")
     def test_discover_tools_reranks_toward_safer_direct_tool(self, mock_get_rag, mock_conn):
         reg = ToolRegistry()
@@ -195,6 +230,69 @@ class TestAgentEnhancements:
 
         assert result.success
         assert result.data["tools"][0]["name"] == "diagnose_failed_request"
+        assert result.data["tools"][0]["score"] > result.data["tools"][1]["score"]
+
+    @patch("state.agent_catalog.get_agent_catalog")
+    @patch("rag.engine.get_rag_engine")
+    def test_discover_tools_uses_feedback_history_in_ranking(self, mock_get_rag, mock_get_catalog, mock_conn):
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(
+                name="investigate_request_alpha",
+                description="Investigate a request.",
+                category="status",
+                tier="read_only",
+                metadata={"source": "mcp", "tags": ["investigate", "request"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+        reg.register(
+            ToolDefinition(
+                name="investigate_request_beta",
+                description="Investigate a request.",
+                category="status",
+                tier="read_only",
+                metadata={"source": "mcp", "tags": ["investigate", "request"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+
+        mock_rag = MagicMock()
+        mock_rag.search_tools.return_value = [
+            {
+                "id": "tool-investigate_request_beta",
+                "metadata": {"tool_name": "investigate_request_beta"},
+                "rrf_score": 0.84,
+            },
+            {
+                "id": "tool-investigate_request_alpha",
+                "metadata": {"tool_name": "investigate_request_alpha"},
+                "rrf_score": 0.79,
+            },
+        ]
+        mock_get_rag.return_value = mock_rag
+        mock_get_catalog.return_value.summarize_tool_feedback.return_value = {
+            "investigate_request_alpha": {
+                "success_count": 18,
+                "failure_count": 1,
+                "total_count": 19,
+                "success_rate": 0.947,
+            },
+            "investigate_request_beta": {
+                "success_count": 1,
+                "failure_count": 6,
+                "total_count": 7,
+                "success_rate": 0.143,
+            },
+        }
+
+        reg._ensure_meta_tools()
+        result = reg.execute("discover_tools", query="request investigation", top_k=2)
+
+        assert result.success
+        assert result.data["tools"][0]["name"] == "investigate_request_alpha"
         assert result.data["tools"][0]["score"] > result.data["tools"][1]["score"]
 
     def test_turn_toolset_filtered_uses_ranked_candidates(self, mock_conn):

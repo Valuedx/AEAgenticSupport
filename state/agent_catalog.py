@@ -291,6 +291,79 @@ class AgentCatalog:
             rows = sorted(rows, key=lambda r: r.get("timestamp", ""), reverse=True)
             return rows[: max(limit, 1)]
 
+    def summarize_tool_feedback(
+        self,
+        tool_names: list[str] | None = None,
+        *,
+        limit: int | None = None,
+    ) -> dict[str, dict]:
+        with self._lock:
+            store = self._load()
+            rows = list(store.get("interactions", []))
+
+        if limit and limit > 0:
+            rows = rows[-limit:]
+
+        allowed = None
+        if tool_names:
+            allowed = {
+                str(tool_name).strip()
+                for tool_name in tool_names
+                if str(tool_name).strip()
+            }
+
+        summary: dict[str, dict] = {}
+        if allowed:
+            for tool_name in allowed:
+                summary[tool_name] = {
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "total_count": 0,
+                    "success_rate": 0.0,
+                    "last_success_at": "",
+                    "last_failure_at": "",
+                }
+
+        for row in rows:
+            tool_name = str(row.get("toolName", "")).strip()
+            if not tool_name:
+                continue
+            if allowed is not None and tool_name not in allowed:
+                continue
+
+            stats = summary.setdefault(
+                tool_name,
+                {
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "total_count": 0,
+                    "success_rate": 0.0,
+                    "last_success_at": "",
+                    "last_failure_at": "",
+                },
+            )
+            success = bool(row.get("success"))
+            stats["total_count"] += 1
+            if success:
+                stats["success_count"] += 1
+                stats["last_success_at"] = str(
+                    row.get("timestamp") or stats["last_success_at"]
+                )
+            else:
+                stats["failure_count"] += 1
+                stats["last_failure_at"] = str(
+                    row.get("timestamp") or stats["last_failure_at"]
+                )
+
+        for stats in summary.values():
+            total = int(stats.get("total_count", 0) or 0)
+            stats["success_rate"] = round(
+                (int(stats.get("success_count", 0) or 0) / total) if total else 0.0,
+                3,
+            )
+
+        return summary
+
     @staticmethod
     def _trim_params(payload: dict[str, Any], max_len: int = 400) -> dict:
         compact: dict[str, Any] = {}

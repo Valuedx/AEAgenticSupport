@@ -69,6 +69,7 @@ class ToolRanker:
         *,
         retrieval_scores: dict[str, float] | None = None,
         retrieval_ranks: dict[str, int] | None = None,
+        feedback_stats: dict[str, dict] | None = None,
     ) -> list[RankedToolCandidate]:
         if not entries:
             return []
@@ -98,6 +99,11 @@ class ToolRanker:
                         hit_count=hit_count,
                         max_raw=max_raw,
                         action_intent=action_intent,
+                        feedback=(
+                            feedback_stats.get(entry.name, {})
+                            if feedback_stats
+                            else {}
+                        ),
                     ),
                     retrieval_score=score_map.get(entry.name, 0.0),
                 )
@@ -136,6 +142,7 @@ class ToolRanker:
         hit_count: int,
         max_raw: float,
         action_intent: bool,
+        feedback: dict,
     ) -> float:
         retrieval_component = self._retrieval_component(
             retrieval_score,
@@ -145,6 +152,7 @@ class ToolRanker:
         )
         exact_component = self._exact_match_component(query_text, entry)
         overlap_component = self._overlap_component(query_terms, entry)
+        feedback_component = self._feedback_component(feedback)
         source_component = _SOURCE_BOOST.get(entry.source, 0.01)
         callable_component = 0.04 if entry.hydration_mode != "execute_via_generic_runner" else -0.03
         risk_component = _RISK_ADJUST.get(entry.definition.tier, 0.0)
@@ -161,6 +169,7 @@ class ToolRanker:
             retrieval_component
             + exact_component
             + overlap_component
+            + feedback_component
             + source_component
             + callable_component
             + risk_component
@@ -210,3 +219,12 @@ class ToolRanker:
         match_terms.update(self._tokenize(" ".join(entry.definition.required_params)))
         overlap = len(query_terms & match_terms)
         return min(0.16, 0.04 * overlap)
+
+    def _feedback_component(self, feedback: dict) -> float:
+        total = int(feedback.get("total_count", 0) or 0)
+        if total <= 0:
+            return 0.0
+        success_count = int(feedback.get("success_count", 0) or 0)
+        smoothed_rate = (success_count + 1) / (total + 2)
+        confidence = min(total / 8.0, 1.0)
+        return (smoothed_rate - 0.5) * 0.24 * confidence
