@@ -50,9 +50,9 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
         }
     
     # ── "Ask Again" pattern ──
-    # Identify specific required parameters from the local catalog
+    # Identify specific required parameters from the local catalog (one query for id + params)
     client = get_ae_client()
-    schema = client.get_cached_workflow_parameters(workflow_name)
+    _, schema = client.get_cached_workflow_info(workflow_name)
     required = []
     for p in schema:
         name = p.get("name")
@@ -85,7 +85,9 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
 
     # Use the updated T4-compatible execute_workflow method
     try:
-        workflow_id = client.get_cached_workflow_id(workflow_name)
+        workflow_id, _ = client.get_cached_workflow_info(workflow_name)
+        if not workflow_id:
+            workflow_id = workflow_name
         raw = client.execute_workflow(
             workflow_name=workflow_name,
             workflow_id=workflow_id,
@@ -162,24 +164,26 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
                 "raw": poll_raw or raw,
             }
 
-        # Pending / queued / new / timeout / no_agent path.
-        # If still pending, check agent health and provide natural guidance.
-        agent_data = client.check_agent_status()
-        healthy_agent = next(
-            (a for a in agent_data if str(a.get("agentState", "")).upper() in {"CONNECTED", "RUNNING", "ACTIVE"}),
-            None,
-        )
-
-        if status_upper in {"NO_AGENT"} or not healthy_agent:
-            pending_msg = (
-                "The request is still pending and no active automation agent is available right now. "
-                "Please contact your administrator to start or reconnect the agent."
-            )
+        # Pending / queued / new / timeout / no_agent / in_progress path.
+        healthy_agent = None
+        if final_status == "in_progress" and poll.get("in_progress_hint"):
+            pending_msg = poll.get("in_progress_hint")
         else:
-            pending_msg = (
-                "Your request has been accepted and is currently queued (pending execution). "
-                "The agent is online; execution should start shortly."
+            agent_data = client.check_agent_status()
+            healthy_agent = next(
+                (a for a in agent_data if str(a.get("agentState", "")).upper() in {"CONNECTED", "RUNNING", "ACTIVE"}),
+                None,
             )
+            if status_upper in {"NO_AGENT"} or not healthy_agent:
+                pending_msg = (
+                    "The request is still pending and no active automation agent is available right now. "
+                    "Please contact your administrator to start or reconnect the agent."
+                )
+            else:
+                pending_msg = (
+                    "Your request has been accepted and is currently queued (pending execution). "
+                    "The agent is online; execution should start shortly."
+                )
 
         return {
             "success": True,

@@ -21,11 +21,14 @@ class TestConversationManagement:
         state = ConversationState()
         state.conversation_id = "test-123"
         state.add_message("user", "hello world")
-        
-        # Verify db insert was called
+        state.save()  # Message writes are deferred until save()
+
         conn = mock_db_state.return_value.__enter__.return_value
         cur = conn.cursor.return_value.__enter__.return_value
         assert cur.execute.called
+        # At least one call should be chat_messages insert (or state upsert)
+        call_strs = [str(c) for c in cur.execute.call_args_list]
+        assert any("chat_messages" in s or "conversation_state" in s for s in call_strs)
 
     def test_export_markdown(self):
         state = ConversationState()

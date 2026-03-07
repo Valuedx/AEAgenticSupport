@@ -1,3 +1,5 @@
+> - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out, configurable embedding dimension, batched DB queries, shared MCP executor, AE path caching, coalesced state writes, capped execution polling. Details in §5.5 below.
+>
 > - **Documentation Update (2026-03-07)**: MCP server and main-app integration now expose **106 tools** (71 P0 + 35 support-priority P1), including dependency preflight and support handoff tools. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
@@ -252,6 +254,7 @@ The orchestrator (Step 5) always operates within the context of the **current is
       - Merges user input with `active_issue` metadata (Workflows + Error Signatures) before calling the search engine.
       - Pushes relevant SOPs and incidents to the top of the context block.
     - Include `discover_tools` meta‑tool to let the LLM search mid‑conversation.
+  - **Performance:** After one `embed_query()` call, the four RAG collection searches (tools, kb, sops, incidents) run in parallel via `ThreadPoolExecutor(4)`.
 
 ### 5.4 Integrating findings with IssueTracker
 
@@ -266,6 +269,33 @@ This creates durable, per‑issue context that supports:
 - Recurrence detection.
 - Cascade understanding.
 - RCA quality.
+
+---
+
+### 5.5 Performance Optimizations
+
+Several hot‑path optimizations reduce per‑request latency:
+
+1. **Parallel RAG fan‑out** (`agents/orchestrator.py`):
+   After a single `rag.embed_query()`, the four searches (`search_tools`, `search_kb`, `search_sops`, `search_past_incidents`) run concurrently in a `ThreadPoolExecutor(4)`.
+
+2. **Configurable embedding dimension** (`rag/engine.py`, `config/settings.py`):
+   Set `EMBEDDING_DIMENSION=768` to skip the live Vertex AI probe at startup. If unset, the original dimension‑probe logic is retained as a fallback.
+
+3. **Batched workflow catalog queries** (`tools/automationedge_client.py`):
+   `resolve_cached_workflow_name` now uses a single `IN(...)` query for all name variants. `get_cached_workflow_info` returns both `workflow_id` and `parameters` in one DB call.
+
+4. **Shared MCP executor** (`tools/mcp_tools.py`):
+   A shared `ThreadPoolExecutor(4)` is used for `_run_async` instead of creating a new executor per tool call.
+
+5. **AE REST path caching** (`mcp_server/ae_client.py`):
+   `AEClient._try_paths` caches the successful `(path_index, use_rest)` per `(method, paths)` key. Cache entries are evicted on 4xx/5xx failures and the full fallback list is retried.
+
+6. **Coalesced state writes** (`state/conversation_state.py`):
+   `add_message` defers DB inserts; all pending rows are flushed in a batch `INSERT` during `save()` at turn boundaries.
+
+7. **Capped execution polling** (`tools/automationedge_client.py`):
+   Default `max_attempts` reduced to 15 (~45 s). If the execution hasn't reached a terminal state, polling returns `status="in_progress"` with an `in_progress_hint` message instead of blocking for 100+ iterations.
 
 ---
 

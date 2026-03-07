@@ -1,3 +1,5 @@
+> - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out (4 concurrent searches), configurable embedding dimension, batched workflow catalog queries, shared MCP executor, coalesced state writes, AE path caching, capped execution polling. See §4.2 and `SETUP_GUIDE.md` §10.
+>
 > - **Documentation Update (2026-03-07)**: MCP server and bridge now register **106 tools** (P0 + P1 support). See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
@@ -21,8 +23,8 @@
 >
 ## AutomationEdge Agentic Support — Technical Blueprint
 
-**Version:** 1.0  
-**Last updated:** 2026-03-04
+**Version:** 1.1  
+**Last updated:** 2026-03-07
 
 ---
 
@@ -157,6 +159,7 @@ For each routed message:
      - Always include “always_available” tools (status, core logs, general tools).
      - RAG-filtered typed tools via `rag.engine.PgVectorRAGEngine.search_tools`.
      - Include `discover_tools` meta-tool for on-demand search.
+   - **Performance:** After a single `embed_query()`, the four RAG collection searches (tools, kb, sops, past_incidents) run in **parallel** via `ThreadPoolExecutor(4)` to minimize retrieval latency.
 4. Execute tool calls:
    - Dispatch through `tools/registry`.
    - Log every call in audit logger and in `ConversationState.tool_call_log`.
@@ -216,6 +219,22 @@ For each routed message:
 - Thin-proxy Cognibot mode:
   - `custom_cognibot/` hooks forward Cognibot traffic to `/chat`.
   - Used for local testing of full Cognibot → agent pipeline.
+
+---
+
+## 5.3 Performance Optimizations
+
+The following optimizations reduce request latency and DB/API round-trips:
+
+| Area | Optimization | Effect |
+|------|-------------|--------|
+| **RAG retrieval** | Four collection searches (tools, kb, sops, incidents) run in parallel after a single `embed_query()` | Retrieval latency = max(4 searches) instead of sum |
+| **Embedding cold-start** | `EMBEDDING_DIMENSION` config key avoids a live embedding call at startup to discover vector size | Faster cold start; probe still used when config is unset |
+| **Workflow catalog** | `resolve_cached_workflow_name` uses a single `IN(...)` query; `get_cached_workflow_info` returns id + params in one query | 1 DB round-trip instead of N per name resolution |
+| **MCP tool calls** | Shared `ThreadPoolExecutor(4)` for `_run_async` instead of creating a new executor per call | Eliminates per-call executor overhead |
+| **AE client fallback** | `_try_paths` caches the winning `(path_index, use_rest)` per `(method, paths)` key; evicts on failure | First-call unchanged; subsequent calls skip failed paths |
+| **State persistence** | `add_message` defers DB inserts; flushed in batch during `save()` at turn boundaries | Fewer Postgres round-trips per request |
+| **Execution polling** | Default `max_attempts` capped at 15 (~45 s); returns `in_progress` with hint instead of blocking 100+ iterations | Prevents worker threads from being held by long-running executions |
 
 ---
 

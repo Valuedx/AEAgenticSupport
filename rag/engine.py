@@ -57,8 +57,12 @@ class VertexEmbedder:
     @property
     def dimension(self) -> int:
         if self._dim is None:
-            sample = self.embed("dimension probe")
-            self._dim = len(sample)
+            configured = CONFIG.get("EMBEDDING_DIMENSION")
+            if configured is not None and configured > 0:
+                self._dim = configured
+            else:
+                sample = self.embed("dimension probe")
+                self._dim = len(sample)
         return self._dim
 
     def embed(self, text: str) -> list[float]:

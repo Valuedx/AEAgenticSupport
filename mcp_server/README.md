@@ -252,7 +252,7 @@ mcp_server/
 ├── __main__.py          # CLI entry point
 ├── server.py            # FastMCP server with all 106 tool registrations (P0 + P1)
 ├── config.py            # Environment-based configuration
-├── ae_client.py         # Standalone AE REST client with auth + fallback
+├── ae_client.py         # Standalone AE REST client with auth + fallback + path caching
 ├── requirements.txt     # Python dependencies
 └── tools/
     ├── __init__.py

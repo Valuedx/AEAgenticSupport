@@ -6,6 +6,7 @@ issue lifecycle (new, continue, recurrence, escalation).
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import re
@@ -321,14 +322,24 @@ class Orchestrator:
                     logger.info(f"RAG enriched query: {enriched_query}")
 
             query_vec = rag.embed_query(enriched_query)
-            tool_hits = rag.search_tools(enriched_query, top_k=12,
-                                         query_embedding=query_vec)
-            kb_hits = rag.search_kb(enriched_query, top_k=3,
-                                    query_embedding=query_vec)
-            sop_hits = rag.search_sops(enriched_query, top_k=3,
-                                       query_embedding=query_vec)
-            incident_hits = rag.search_past_incidents(enriched_query, top_k=3,
-                                                       query_embedding=query_vec)
+            # Run four RAG searches in parallel to reduce tail latency (same inputs/outputs)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                f_tools = ex.submit(
+                    rag.search_tools, enriched_query, 12, query_vec
+                )
+                f_kb = ex.submit(
+                    rag.search_kb, enriched_query, 3, query_vec
+                )
+                f_sops = ex.submit(
+                    rag.search_sops, enriched_query, 3, query_vec
+                )
+                f_incidents = ex.submit(
+                    rag.search_past_incidents, enriched_query, 3, query_vec
+                )
+                tool_hits = f_tools.result()
+                kb_hits = f_kb.result()
+                sop_hits = f_sops.result()
+                incident_hits = f_incidents.result()
 
             context_block = self._format_rag_context(
                 tool_hits[:5], kb_hits, sop_hits, incident_hits

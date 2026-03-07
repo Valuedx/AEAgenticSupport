@@ -416,18 +416,22 @@ class AutomationEdgeClient:
                 seen.add(key)
                 ordered.append(v)
 
+        if not ordered:
+            return ""
         try:
             from config.db import get_conn
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    # Single query for all variants; pick first match in preferred order
+                    placeholders = ",".join(["lower(%s)"] * len(ordered))
+                    cur.execute(
+                        f"SELECT workflow_name FROM workflow_catalog WHERE lower(workflow_name) IN ({placeholders})",
+                        tuple(ordered),
+                    )
+                    rows = {str(r[0]).lower(): str(r[0]) for r in cur.fetchall() if r and r[0]}
                     for candidate in ordered:
-                        cur.execute(
-                            "SELECT workflow_name FROM workflow_catalog WHERE lower(workflow_name) = lower(%s) LIMIT 1",
-                            (candidate,),
-                        )
-                        row = cur.fetchone()
-                        if row and row[0]:
-                            return str(row[0])
+                        if candidate.lower() in rows:
+                            return rows[candidate.lower()]
             return ""
         except Exception as exc:
             logger.debug("T4: cached workflow name resolution failed for %s: %s", workflow_name, exc)
@@ -614,19 +618,21 @@ class AutomationEdgeClient:
         self,
         execution_id: str,
         poll_interval_sec: int = 3,
-        max_attempts: int = 100,
+        max_attempts: int = 15,
         terminal_statuses: tuple = ("Complete", "Failure", "Error"),
     ) -> dict:
         """Poll execution status until terminal or max_attempts reached.
 
-        Ref: code_ref.py t4_poll_status()
-        Returns dict with 'status', 'execution_id', 'raw'.
+        Default max_attempts=15 limits blocking (~45s at 3s interval). Returns dict with
+        'status', 'execution_id', 'raw'; if capped without terminal status, status is
+        'in_progress' and 'in_progress_hint' suggests checking status for execution_id.
         """
         import time
 
         no_agent_threshold = 10
         no_agent_counter = 0
         raw = None
+        status = "timeout"
 
         for attempt in range(max_attempts):
             try:
@@ -641,7 +647,6 @@ class AutomationEdgeClient:
             status = raw.get("status", "pending") if isinstance(raw, dict) else "pending"
             logger.info("Poll #%d execution_id=%s status=%s", attempt + 1, execution_id, status)
 
-            # Detect "no agent" condition (status stays New without an agent)
             if status == "New" and not (raw or {}).get("agentName"):
                 no_agent_counter += 1
                 if no_agent_counter >= no_agent_threshold:
@@ -654,11 +659,18 @@ class AutomationEdgeClient:
 
             time.sleep(poll_interval_sec)
 
-        return {
+        out = {
             "status": status if raw else "timeout",
             "execution_id": execution_id,
             "raw": raw,
         }
+        if status not in (*terminal_statuses, "no_agent", "timeout"):
+            out["status"] = "in_progress"
+            out["in_progress_hint"] = (
+                f"Execution still running after {max_attempts} checks. "
+                f"Use get_execution_status or check_workflow_status for request_id {execution_id} to see when it completes."
+            )
+        return out
 
     def check_agent_status(self, org_code: str = "") -> list[dict]:
         """Check T4 agent health via monitoring endpoint.
@@ -872,39 +884,33 @@ class AutomationEdgeClient:
         Returns a list of dicts: [{'name': '...', 'type': '...', 'required': bool, ...}]
         Returns empty list if not found or DB error.
         """
-        try:
-            from config.db import get_conn
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT parameters FROM workflow_catalog WHERE workflow_name = %s",
-                        (workflow_name,)
-                    )
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        return list(row[0])
-            return []
-        except Exception as exc:
-            logger.debug("T4: cached param lookup failed for %s: %s", workflow_name, exc)
-            return []
+        _, params = self.get_cached_workflow_info(workflow_name)
+        return params
 
     def get_cached_workflow_id(self, workflow_name: str) -> str:
         """Fetch workflow_id from local workflow_catalog for a workflow name."""
+        wf_id, _ = self.get_cached_workflow_info(workflow_name)
+        return wf_id
+
+    def get_cached_workflow_info(self, workflow_name: str) -> tuple[str, list[dict]]:
+        """Fetch workflow_id and parameters in one query. Returns (workflow_id, parameters)."""
         try:
             from config.db import get_conn
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT workflow_id FROM workflow_catalog WHERE workflow_name = %s",
+                        "SELECT workflow_id, parameters FROM workflow_catalog WHERE workflow_name = %s",
                         (workflow_name,),
                     )
                     row = cur.fetchone()
-                    if row and row[0]:
-                        return str(row[0])
-            return ""
+                    if row:
+                        wf_id = str(row[0]) if row[0] else ""
+                        params = list(row[1]) if row[1] else []
+                        return (wf_id, params)
+            return ("", [])
         except Exception as exc:
-            logger.debug("T4: cached workflow_id lookup failed for %s: %s", workflow_name, exc)
-            return ""
+            logger.debug("T4: cached workflow info lookup failed for %s: %s", workflow_name, exc)
+            return ("", [])
 
     def sync_and_index_workflows(
         self,

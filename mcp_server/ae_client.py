@@ -40,6 +40,9 @@ class AEClient:
         self._token: str = ""
         self._token_expiry: Optional[datetime] = None
         self._lock = threading.Lock()
+        # Cache (method, paths_tuple) -> (path_index, use_rest) to try winning path first
+        self._path_cache: dict[tuple[str, tuple[str, ...]], tuple[int, bool]] = {}
+        self._cache_lock = threading.Lock()
 
         self._http = httpx.Client(
             base_url=self.base_url,
@@ -151,13 +154,38 @@ class AEClient:
         params: Optional[dict] = None,
         json_body: Optional[Any] = None,
     ) -> Any:
+        paths_tuple = tuple(paths)
+        cache_key = (method, paths_tuple)
         last_exc: Optional[Exception] = None
-        for use_rest in (True, False):
-            for path in paths:
+
+        # Try cached winning path first (cache success only, so no stale failures)
+        with self._cache_lock:
+            cached = self._path_cache.get(cache_key)
+        if cached is not None:
+            path_idx, use_rest = cached
+            if 0 <= path_idx < len(paths):
                 try:
-                    return self._request(
+                    out = self._request(
+                        method, paths[path_idx], params=params, json_body=json_body, use_rest=use_rest
+                    )
+                    return out
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {400, 404, 405, 500}:
+                        last_exc = exc
+                        with self._cache_lock:
+                            self._path_cache.pop(cache_key, None)
+                    else:
+                        raise
+
+        for use_rest in (True, False):
+            for path_idx, path in enumerate(paths):
+                try:
+                    out = self._request(
                         method, path, params=params, json_body=json_body, use_rest=use_rest
                     )
+                    with self._cache_lock:
+                        self._path_cache[cache_key] = (path_idx, use_rest)
+                    return out
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in {400, 404, 405, 500}:
                         last_exc = exc

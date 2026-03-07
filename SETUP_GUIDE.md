@@ -292,6 +292,7 @@ POSTGRES_DSN=postgresql://ops_agent_user:your-password@db-host:5432/ops_agent
 
 # Embeddings (Vertex AI — uses the same GCP credentials as the LLM)
 EMBEDDING_MODEL=text-embedding-004
+# EMBEDDING_DIMENSION=768  # Optional: skip live probe at startup (speeds cold-start)
 
 # Tool Gateway
 TOOL_BASE_URL=https://your-ae-server:8443/api/v1
@@ -879,7 +880,7 @@ Every tool call should be logged:
 | Approval not working | Phase state not transitioning | Check `ConversationPhase` in orchestrator |
 | Business user sees technical details | `user_role` not set correctly | Verify persona detection in session creation |
 | Issue tracker state lost on restart | PostgreSQL persistence failed | Check `issue_registry` table exists, check logs |
-| Vertex AI embeddings slow on first call | Connection initialization overhead | First call initializes the Vertex AI connection; subsequent calls are faster |
+| Vertex AI embeddings slow on first call | Connection initialization overhead | Set `EMBEDDING_DIMENSION=768` to skip the live dimension probe; subsequent calls are faster regardless |
 | pgvector not available | Extension not installed in PostgreSQL | The RAG engine automatically falls back to numpy-based cosine similarity. Performance is adequate for local dev but pgvector is recommended for production |
 | Recurrence not detected | `workflows_involved` not populated | Ensure orchestrator calls `tracker.add_workflow_to_issue()` |
 | LLM classification slow | Model too large or network latency | Switch to `gemini-2.0-flash`, use closer GCP region |

@@ -7,6 +7,7 @@ from mcp_server are registered so the orchestrator and specialists can use them.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import json
 import logging
@@ -45,15 +46,23 @@ _SAFETY_TO_TIER = {
     "privileged": "high_risk",
 }
 
+# Shared executor for MCP async tool calls (avoids per-call executor creation)
+_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_mcp_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _executor
+    if _executor is None:
+        _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp_tool")
+    return _executor
+
 
 def _run_async(coro):
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
+            future = _get_mcp_executor().submit(asyncio.run, coro)
+            return future.result()
         return asyncio.run(coro)
     except RuntimeError:
         return asyncio.run(coro)

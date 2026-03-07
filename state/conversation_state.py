@@ -71,11 +71,13 @@ class ConversationState:
         self.interrupt_requested: bool = False
         self._message_queue: list[dict] = []
         self._queue_lock = threading.Lock()
+        # Deferred message writes: flushed in save() to reduce hot-path DB round-trips
+        self._pending_message_inserts: list[tuple[str, str, dict]] = []
 
     # ── Messages ──
 
     def add_message(self, role: str, content: str, metadata: dict = None):
-        """Add a message to the state and persist to the global chat_messages table."""
+        """Add a message to the state; persistence to chat_messages is deferred until save()."""
         timestamp = datetime.now().isoformat()
         msg = {
             "role": role,
@@ -84,19 +86,9 @@ class ConversationState:
             "metadata": metadata or {},
         }
         self.messages.append(msg)
-        
-        # Immediate persistence to global history table
         if self.conversation_id:
-            try:
-                with get_conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO chat_messages (conversation_id, role, content, metadata)
-                            VALUES (%s, %s, %s, %s)
-                        """, (self.conversation_id, role, content, Json(metadata or {})))
-                    conn.commit()
-            except Exception as e:
-                logger.warning(f"Failed to persist message to global history: {e}")
+            self._pending_message_inserts.append((role, content, metadata or {}))
+
 
     # ── Findings ──
 
@@ -150,22 +142,30 @@ class ConversationState:
     # ── Persistence ──
 
     def save(self):
-        """Persist conversation state to PostgreSQL."""
+        """Persist conversation state and any pending message inserts to PostgreSQL."""
         if not self.conversation_id:
             return
         try:
-            state_data = {
-                "messages": self.messages[-50:],
-                "findings": [asdict(f) for f in self.findings[-20:]],
-                "tool_call_log": self.tool_call_log[-30:],
-                "affected_workflows": self.affected_workflows,
-                "pending_action": self.pending_action,
-                "pending_action_summary": self.pending_action_summary,
-                "param_collection": self.param_collection,
-                "preferred_language": self.preferred_language,
-            }
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    # Flush deferred message inserts in one batch
+                    if self._pending_message_inserts:
+                        for role, content, metadata in self._pending_message_inserts:
+                            cur.execute("""
+                                INSERT INTO chat_messages (conversation_id, role, content, metadata)
+                                VALUES (%s, %s, %s, %s)
+                            """, (self.conversation_id, role, content, Json(metadata)))
+                        self._pending_message_inserts.clear()
+                    state_data = {
+                        "messages": self.messages[-50:],
+                        "findings": [asdict(f) for f in self.findings[-20:]],
+                        "tool_call_log": self.tool_call_log[-30:],
+                        "affected_workflows": self.affected_workflows,
+                        "pending_action": self.pending_action,
+                        "pending_action_summary": self.pending_action_summary,
+                        "param_collection": self.param_collection,
+                        "preferred_language": self.preferred_language,
+                    }
                     cur.execute("""
                         INSERT INTO conversation_state
                             (conversation_id, user_id, user_role,

@@ -85,8 +85,9 @@ CONFIG = {
     ),
     "DB_POOL_MAX_CONN": int(os.environ.get("DB_POOL_MAX_CONN", "10")),
 
-    # Embeddings
+    # Embeddings (set EMBEDDING_DIMENSION to avoid cold-start probe, e.g. 768 for text-embedding-004)
     "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", "text-embedding-004"),
+    "EMBEDDING_DIMENSION": int(os.environ["EMBEDDING_DIMENSION"]) if os.environ.get("EMBEDDING_DIMENSION") else None,
 
     # Tool gateway
     "TOOL_BASE_URL": os.environ.get("TOOL_BASE_URL", "http://localhost:9999"),

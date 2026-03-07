@@ -319,6 +319,10 @@ def t4_execute_and_poll(
         "no_agent": "No automation agent was available. Please check agent health.",
         "timeout": "Execution timed out waiting for a result.",
         "Error": f"'{workflow_name}' encountered an error.",
+        "in_progress": poll_result.get(
+            "in_progress_hint",
+            f"Execution still running. Use request_id {request_id} to check status.",
+        ),
     }
 
     return {
