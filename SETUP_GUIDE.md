@@ -127,7 +127,7 @@ AEAgenticSupport/
 ├── tools/
 │   ├── base.py                          #   AE API client, ToolDefinition
 │   ├── registry.py                      #   Tool registry
-│   ├── mcp_tools.py                     #   MCP P0+P1 tools bridge (when AE_MCP_TOOLS_ENABLED=true)
+│   ├── mcp_tools.py                     #   Shared-spec MCP bridge with curated metadata + lazy hydration
 │   ├── general_tools.py                 #   3 general escape-hatch tools (call_ae_api, query_database, search_knowledge_base)
 │   ├── status_tools.py                  #   5 status/health tools
 │   ├── log_tools.py                     #   2 log/history tools
@@ -136,7 +136,8 @@ AEAgenticSupport/
 │   ├── dependency_tools.py              #   4 dependency/config tools
 │   └── notification_tools.py            #   2 notification tools
 ├── mcp_server/                          # ← Independent MCP server (106 tools: P0 + P1 support)
-│   ├── server.py                        #   FastMCP server and tool registrations
+│   ├── server.py                        #   FastMCP server loading shared structured tool specs
+│   ├── tool_specs.py                    #   Shared MCP tool definitions + curated metadata
 │   ├── ae_client.py                     #   Standalone AE REST client
 │   ├── config.py                        #   MCP env config
 │   ├── requirements.txt                #   mcp[cli], httpx, python-dotenv
@@ -1305,8 +1306,8 @@ The project includes an **independent AutomationEdge MCP (Model Context Protocol
 
 | Component | Purpose |
 |-----------|--------|
-| **`mcp_server/`** | Standalone MCP server (106 tools: P0 + P1 support). Run via `python -m mcp_server` for Cursor, Claude Desktop, or any MCP client. |
-| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are cataloged in the main application. A curated support subset is eagerly hydrated; the rest are exposed through RAG/`discover_tools`, ranked against custom and workflow-backed tools using retrieval plus agent-scoped, recency-weighted execution-history signals, and hydrated on demand. |
+| **`mcp_server/`** | Standalone MCP server (106 tools: P0 + P1 support). Tool definitions now come from a shared spec registry with structured output, MCP annotations, and curated metadata. Run via `python -m mcp_server` for Cursor, Claude Desktop, or any MCP client. |
+| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are cataloged in the main application from the shared MCP spec registry. A curated support subset is eagerly hydrated; the rest are exposed through RAG/`discover_tools`, ranked against custom and workflow-backed tools using retrieval plus agent-scoped, recency-weighted execution-history signals, and hydrated on demand. |
 
 - **MCP server only**: Use with Cursor/Claude for support workflows without running the full AI Studio stack.
 - **Main app only**: Use the Flask/Teams agent with existing + dynamic tools (no MCP tools).

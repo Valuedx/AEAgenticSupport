@@ -44,9 +44,15 @@ class ToolDefinition:
 
     def _build_llm_description(self) -> str:
         parts = [self.description.strip()]
+        title = str(self.metadata.get("title", "") or "").strip()
+        if title and title.lower() != self.name.lower():
+            parts.insert(0, f"{title}.")
         workflow_name = str(self.metadata.get("workflow_name", "") or "").strip()
         if workflow_name:
             parts.append(f"Backed by workflow: {workflow_name}.")
+        safety = str(self.metadata.get("safety", "") or "").strip()
+        if safety:
+            parts.append(f"Safety: {safety}.")
         if self.use_when:
             parts.append(f"Use when: {self.use_when.strip()}")
         if self.avoid_when:
@@ -74,8 +80,10 @@ class ToolDefinition:
             "id": f"tool-{self.name}",
             "content": (
                 f"Tool: {self.name}\n"
+                f"Title: {self.metadata.get('title', '') or 'none'}\n"
                 f"Category: {self.category}\n"
                 f"Risk tier: {self.tier}\n"
+                f"Safety: {self.metadata.get('safety', '') or 'not specified'}\n"
                 f"Description: {self.description}\n"
                 f"Use when: {self.use_when or 'not specified'}\n"
                 f"Avoid when: {self.avoid_when or 'not specified'}\n"
@@ -86,6 +94,7 @@ class ToolDefinition:
             ),
             "metadata": {
                 "tool_name": self.name,
+                "title": self.metadata.get("title", ""),
                 "category": self.category,
                 "tier": self.tier,
                 "source": self.metadata.get("source", "static"),
@@ -93,9 +102,11 @@ class ToolDefinition:
                 "always_available": self.always_available,
                 "dynamic": bool(self.metadata.get("dynamic", False)),
                 "tags": self.metadata.get("tags", []),
+                "safety": self.metadata.get("safety", ""),
                 "use_when": self.use_when,
                 "avoid_when": self.avoid_when,
                 "input_examples": self.input_examples[:2],
+                "structured_output": bool(self.metadata.get("structured_output", False)),
             },
         }
 

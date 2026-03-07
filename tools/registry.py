@@ -608,10 +608,12 @@ class ToolRegistry:
         md = tool_def.metadata or {}
         card = {
             "name": tool_def.name,
+            "title": md.get("title", ""),
             "workflow_name": md.get("workflow_name", ""),
             "description": tool_def.description,
             "category": tool_def.category,
             "tier": tool_def.tier,
+            "safety": md.get("safety", ""),
             "source": md.get("source", "static"),
             "registered": registered,
             "dynamic": bool(md.get("dynamic", False)),
@@ -623,6 +625,7 @@ class ToolRegistry:
             "avoid_when": tool_def.avoid_when,
             "input_examples": tool_def.input_examples[:2],
             "hydration_mode": md.get("hydration_mode", "eager"),
+            "structured_output": bool(md.get("structured_output", False)),
         }
         if score is not None:
             card["score"] = round(score, 3)
@@ -673,10 +676,12 @@ class ToolRegistry:
             inventory.append(
                 {
                     "toolName": tool_name,
+                    "toolTitle": card.get("title", ""),
                     "workflowName": card.get("workflow_name", ""),
                     "description": card["description"],
                     "category": card["category"],
                     "tier": card["tier"],
+                    "safety": card.get("safety", ""),
                     "source": card["source"],
                     "dynamic": card["dynamic"],
                     "active": card["active"],
@@ -690,6 +695,9 @@ class ToolRegistry:
                     "latencyClass": card["latency_class"],
                     "mutating": card["mutating"],
                     "llmCallable": card.get("llm_callable", True),
+                    "structuredOutput": card.get("structured_output", False),
+                    "outputSchema": entry.definition.metadata.get("output_schema", {}),
+                    "annotations": entry.definition.metadata.get("annotations", {}),
                     "linkedAgents": linked_agents,
                 }
             )

@@ -4,6 +4,14 @@ Independent [Model Context Protocol](https://modelcontextprotocol.io/) server fo
 
 When these tools are bridged into the main app (`AE_MCP_TOOLS_ENABLED=true`), the app now catalogs the full MCP surface but eagerly hydrates only a curated support subset. The remaining MCP tools stay searchable through RAG and `discover_tools`, then rank alongside custom tools and AE workflow-backed tools using retrieval plus observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is preferred when it exists, before hydrating on demand for the active turn.
 
+Recent MCP SDK features are wired through the registry now:
+
+- Every tool publishes a human-friendly `title`.
+- Safety metadata is exposed through MCP `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`).
+- Tool `meta` includes source, category, safety, tier, mutating flag, tags, and structured-output hints.
+- Server registrations use `structured_output=True`, so clients receive `outputSchema` plus structured results instead of only raw JSON text.
+- The standalone MCP server and in-app bridge share the same tool spec registry, eliminating metadata drift.
+
 ## Quick Start
 
 ### 1. Install dependencies
@@ -252,9 +260,10 @@ All mutating tools accept `reason`, `requested_by`, `case_id`, and `dry_run` par
 mcp_server/
 ├── __init__.py          # Package marker
 ├── __main__.py          # CLI entry point
-├── server.py            # FastMCP server with all 106 tool registrations (P0 + P1)
+├── server.py            # FastMCP server wiring shared, structured MCP tool specs
 ├── config.py            # Environment-based configuration
 ├── ae_client.py         # Standalone AE REST client with auth + fallback + path caching
+├── tool_specs.py        # Shared MCP tool definitions, curated metadata, and schema helpers
 ├── requirements.txt     # Python dependencies
 └── tools/
     ├── __init__.py

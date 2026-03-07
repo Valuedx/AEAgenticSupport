@@ -290,8 +290,8 @@ Several hot‑path optimizations reduce per‑request latency:
 3. **Batched workflow catalog queries** (`tools/automationedge_client.py`):
    `resolve_cached_workflow_name` now uses a single `IN(...)` query for all name variants. `get_cached_workflow_info` returns both `workflow_id` and `parameters` in one DB call.
 
-4. **Shared MCP executor** (`tools/mcp_tools.py`):
-   A shared `ThreadPoolExecutor(4)` is used for `_run_async` instead of creating a new executor per tool call.
+4. **Shared MCP bridge + executor** (`tools/mcp_tools.py`, `mcp_server/tool_specs.py`):
+   A shared `ThreadPoolExecutor(4)` is used for `_run_async`, and both the MCP server and main app now consume the same curated MCP tool spec registry for titles, annotations, structured output, examples, and schema metadata.
 
 5. **AE REST path caching** (`mcp_server/ae_client.py`):
    `AEClient._try_paths` caches the successful `(path_index, use_rest)` per `(method, paths)` key. Cache entries are evicted on 4xx/5xx failures and the full fallback list is retried.

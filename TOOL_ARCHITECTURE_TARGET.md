@@ -18,7 +18,7 @@ Implemented in the current codebase:
 The repo already supports three different tool sources:
 
 - Custom/static tools in `tools/*.py`
-- MCP-backed tools bridged through `tools/mcp_tools.py`
+- MCP-backed tools bridged through `tools/mcp_tools.py`, sourced from `mcp_server/tool_specs.py`
 - AutomationEdge workflow-backed dynamic tools loaded via `tools/registry.py`
 
 This works at moderate scale, but it becomes unstable once the combined catalog reaches hundreds of tools:
@@ -401,13 +401,14 @@ Migration note:
 
 Current role:
 
-- Registers all bridged MCP handlers into the main registry.
+- Bridges the shared MCP spec catalog into the main registry and hydrates selected MCP handlers on demand.
 
 Target role:
 
+- Keep using the shared MCP spec registry as the source of truth.
 - Export MCP catalog metadata builder.
 - Export MCP handler hydrator for a selected tool name.
-- Stop bulk-registering all MCP handlers into the global runtime surface.
+- Continue avoiding duplicate hand-maintained dispatch metadata.
 
 
 ### 7.4 `tools/ae_dynamic_tools.py`
