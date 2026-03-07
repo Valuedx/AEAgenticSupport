@@ -274,6 +274,33 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(result.data.get("echo"), "sample")
         self.assertIn("lazy_tool", registry._handlers)
 
+    def test_turn_toolset_executes_lazy_tool_without_global_hydration(self):
+        from tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="lazy_turn_tool",
+                description="Lazy turn-local tool",
+                category="test",
+                tier="read_only",
+                parameters={"value": {"type": "string", "description": "Value"}},
+            ),
+            lambda **kwargs: {"success": True, "value": kwargs.get("value")},
+            hydrate=False,
+        )
+
+        toolset = registry.build_turn_toolset(["lazy_turn_tool"], include_meta=False)
+
+        self.assertNotIn("lazy_turn_tool", registry._handlers)
+        self.assertIn("lazy_turn_tool", toolset.list_tool_names())
+
+        result = toolset.execute("lazy_turn_tool", value="x")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data.get("value"), "x")
+        self.assertNotIn("lazy_turn_tool", registry._handlers)
+
     def test_execute_handles_embedded_failure_payload(self):
         from tools.registry import ToolRegistry
 

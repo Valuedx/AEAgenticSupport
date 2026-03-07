@@ -22,6 +22,69 @@ audit = logging.getLogger("ops_agent.audit")
 MAX_TOOLS_FOR_FULL_CATALOG = 30
 
 
+class TurnToolSet:
+    """Turn-local hydrated tool set for the orchestrator loop."""
+
+    def __init__(self, registry: "ToolRegistry", tool_names: list[str]):
+        self._registry = registry
+        self._tool_names: list[str] = []
+        self._definitions: dict[str, ToolDefinition] = {}
+        self._handlers: dict[str, Callable] = {}
+
+        seen: set[str] = set()
+        for name in tool_names:
+            clean = str(name or "").removeprefix("tool-")
+            if clean and clean not in seen and clean in registry._catalog_entries:
+                self._tool_names.append(clean)
+                seen.add(clean)
+
+    def list_tool_names(self) -> list[str]:
+        return list(self._tool_names)
+
+    def get_tool(self, name: str) -> Optional[ToolDefinition]:
+        clean = str(name or "").removeprefix("tool-")
+        if clean not in self._tool_names:
+            return None
+        if clean not in self._definitions:
+            entry = self._registry._catalog_entries.get(clean)
+            if not entry:
+                return None
+            self._definitions[clean] = entry.to_tool_definition()
+        return self._definitions.get(clean)
+
+    def _get_handler(self, name: str) -> Optional[Callable]:
+        clean = str(name or "").removeprefix("tool-")
+        if clean not in self._tool_names:
+            return None
+        if clean in self._handlers:
+            return self._handlers[clean]
+        if clean in self._registry._handlers:
+            self._handlers[clean] = self._registry._handlers[clean]
+            return self._handlers[clean]
+        factory = self._registry._handler_factories.get(clean)
+        if factory:
+            self._handlers[clean] = factory()
+        return self._handlers.get(clean)
+
+    def execute(self, tool_name: str, **kwargs) -> ToolResult:
+        handler = self._get_handler(tool_name)
+        if not handler:
+            return ToolResult(
+                success=False,
+                error=f"Unknown tool: {tool_name}",
+                tool_name=tool_name,
+            )
+        return self._registry._execute_with_handler(tool_name, handler, kwargs)
+
+    def to_vertex_tools(self) -> list[dict]:
+        declarations = []
+        for name in self._tool_names:
+            tool_def = self.get_tool(name)
+            if tool_def:
+                declarations.append(tool_def.to_llm_schema())
+        return [{"function_declarations": declarations}]
+
+
 class ToolRegistry:
     """Central registry for all ops agent tools."""
 
@@ -123,14 +186,12 @@ class ToolRegistry:
     def list_dynamic_tools(self) -> list[str]:
         return sorted(self._dynamic_tool_names)
 
-    def execute(self, tool_name: str, **kwargs) -> ToolResult:
-        handler = self.get_handler(tool_name)
-        if not handler:
-            return ToolResult(
-                success=False,
-                error=f"Unknown tool: {tool_name}",
-                tool_name=tool_name,
-            )
+    def _execute_with_handler(
+        self,
+        tool_name: str,
+        handler: Callable,
+        kwargs: dict,
+    ) -> ToolResult:
         audit.info("TOOL_CALL tool=%s params=%s", tool_name, kwargs)
         try:
             result = handler(**kwargs)
@@ -171,6 +232,16 @@ class ToolRegistry:
             audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, exc)
             self._log_interaction(tool_name, kwargs, False, str(exc))
             return ToolResult(success=False, error=str(exc), tool_name=tool_name)
+
+    def execute(self, tool_name: str, **kwargs) -> ToolResult:
+        handler = self.get_handler(tool_name)
+        if not handler:
+            return ToolResult(
+                success=False,
+                error=f"Unknown tool: {tool_name}",
+                tool_name=tool_name,
+            )
+        return self._execute_with_handler(tool_name, handler, kwargs)
 
     def _log_interaction(self, tool_name: str, params: dict, success: bool, error: str):
         try:
@@ -219,6 +290,80 @@ class ToolRegistry:
             for entry in self._catalog_entries.values()
             if entry.definition.always_available
         ]
+
+    def build_turn_toolset(
+        self,
+        tool_names: list[str],
+        *,
+        allowed_categories: list[str] | None = None,
+        include_meta: bool = True,
+    ) -> TurnToolSet:
+        self._ensure_meta_tools()
+        selected: list[str] = []
+        seen: set[str] = set()
+
+        def _maybe_add(name: str):
+            clean = str(name or "").removeprefix("tool-")
+            if not clean or clean in seen:
+                return
+            entry = self._catalog_entries.get(clean)
+            if not entry:
+                return
+            tool_def = entry.definition
+            if allowed_categories and tool_def.category not in allowed_categories:
+                return
+            selected.append(clean)
+            seen.add(clean)
+
+        for name in tool_names:
+            _maybe_add(name)
+
+        if include_meta:
+            _maybe_add("discover_tools")
+
+        return TurnToolSet(self, selected)
+
+    def build_turn_toolset_filtered(
+        self,
+        rag_tool_names: list[str],
+        *,
+        max_rag_tools: int = 12,
+        allowed_categories: list[str] | None = None,
+    ) -> TurnToolSet:
+        self._ensure_meta_tools()
+        selected_names: list[str] = []
+
+        # 1. Add 'always_available' tools (or ALL tools if catalog is small),
+        # but ALWAYS apply the category filter if provided.
+        if len(self._catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
+            for entry in self._catalog_entries.values():
+                tool_def = entry.definition
+                if allowed_categories and tool_def.category not in allowed_categories:
+                    continue
+                selected_names.append(tool_def.name)
+        else:
+            for entry in self._catalog_entries.values():
+                tool_def = entry.definition
+                if tool_def.always_available:
+                    if allowed_categories and tool_def.category not in allowed_categories:
+                        continue
+                    selected_names.append(tool_def.name)
+
+            for name in rag_tool_names[:max_rag_tools]:
+                selected_names.append(str(name or "").removeprefix("tool-"))
+
+        toolset = self.build_turn_toolset(
+            selected_names,
+            allowed_categories=allowed_categories,
+            include_meta=True,
+        )
+        logger.info(
+            "Built turn-local tool set: %s/%s (%s)",
+            len(toolset.list_tool_names()),
+            len(self._catalog_entries),
+            ", ".join(toolset.list_tool_names()),
+        )
+        return toolset
 
     @staticmethod
     def _tool_card(
@@ -479,11 +624,7 @@ class ToolRegistry:
     # -----------------------------------------------------------------
 
     def get_vertex_tools(self) -> list:
-        declarations = [
-            entry.to_tool_definition().to_llm_schema()
-            for entry in self._catalog_entries.values()
-        ]
-        return [{"function_declarations": declarations}]
+        return self.build_turn_toolset(self.list_tools()).to_vertex_tools()
 
     def get_vertex_tools_filtered(
         self,
@@ -491,53 +632,11 @@ class ToolRegistry:
         max_rag_tools: int = 12,
         allowed_categories: list[str] | None = None,
     ) -> list:
-        self._ensure_meta_tools()
-
-        # Group tools to be selected
-        selected: dict[str, ToolDefinition] = {}
-        catalog_entries = self._catalog_entries
-
-        # 1. Add 'always_available' tools (or ALL tools if catalog is small), 
-        # but ALWAYS apply the category filter if provided.
-        if len(catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
-            for entry in catalog_entries.values():
-                tool_def = entry.to_tool_definition()
-                if allowed_categories and tool_def.category not in allowed_categories:
-                    continue
-                selected[tool_def.name] = tool_def
-        else:
-            for entry in catalog_entries.values():
-                tool_def = entry.to_tool_definition()
-                if tool_def.always_available:
-                    if allowed_categories and tool_def.category not in allowed_categories:
-                        continue
-                    selected[tool_def.name] = tool_def
-
-            # 2. Add tools from RAG results
-            for name in rag_tool_names[:max_rag_tools]:
-                clean = name.removeprefix("tool-")
-                if clean in catalog_entries and clean not in selected:
-                    self._hydrate_tool(clean)
-                    tool_def = catalog_entries[clean].to_tool_definition()
-                    # Apply category filter if specified
-                    if allowed_categories and tool_def.category not in allowed_categories:
-                        continue
-                    selected[clean] = tool_def
-
-        # 3. Always include meta-tools unless explicitly filtered out (usually 'meta' category)
-        if "discover_tools" in catalog_entries:
-            dt = catalog_entries["discover_tools"].to_tool_definition()
-            if not allowed_categories or dt.category in allowed_categories:
-                selected["discover_tools"] = dt
-
-        declarations = [t.to_llm_schema() for t in selected.values()]
-        logger.info(
-            "Filtered tools: %s/%s (%s)",
-            len(selected),
-            len(catalog_entries),
-            ", ".join(selected.keys()),
-        )
-        return [{"function_declarations": declarations}]
+        return self.build_turn_toolset_filtered(
+            rag_tool_names,
+            max_rag_tools=max_rag_tools,
+            allowed_categories=allowed_categories,
+        ).to_vertex_tools()
 
     # -----------------------------------------------------------------
     # discover_tools meta-tool

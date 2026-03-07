@@ -352,12 +352,13 @@ class Orchestrator:
             max_rag = CONFIG.get("MAX_RAG_TOOLS", 12)
             
             # ── Category-based Tool Isolation (Feature 1.2) ──
-            vertex_tools = tool_registry.get_vertex_tools_filtered(
+            turn_tools = tool_registry.build_turn_toolset_filtered(
                 rag_tool_names, 
                 max_rag_tools=max_rag,
                 allowed_categories=allowed_categories
             )
-            active_tool_names = self._extract_active_tool_names(vertex_tools)
+            vertex_tools = turn_tools.to_vertex_tools()
+            active_tool_names = set(turn_tools.list_tool_names())
 
             messages = [
                 types.Content(
@@ -419,7 +420,9 @@ class Orchestrator:
                     for fc in fn_calls:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
-                        tool_def = tool_registry.get_tool(tool_name)
+                        tool_def = turn_tools.get_tool(tool_name)
+                        if not tool_def:
+                            tool_def = tool_registry.get_tool(tool_name)
 
                         if tool_def:
                             # Check for missing required parameters first. 
@@ -467,7 +470,7 @@ class Orchestrator:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
 
-                        tool_def = tool_registry.get_tool(tool_name)
+                        tool_def = turn_tools.get_tool(tool_name)
                         if not tool_def:
                             tool_def = tool_registry.resolve_discovered_tool(
                                 tool_name
@@ -490,7 +493,7 @@ class Orchestrator:
                         import time
                         tool_start = time.time()
                         
-                        result = tool_registry.execute(tool_name, **tool_args)
+                        result = turn_tools.execute(tool_name, **tool_args)
                         
                         tool_lat = (time.time() - tool_start) * 1000
                         
@@ -572,13 +575,13 @@ class Orchestrator:
 
                     if discovered_names or needs_expansion:
                         expanded = list(active_tool_names) + discovered_names
-                        vertex_tools = tool_registry.get_vertex_tools_filtered(
-                            expanded, max_rag_tools=20,
+                        turn_tools = tool_registry.build_turn_toolset(
+                            expanded,
                             allowed_categories=allowed_categories,
+                            include_meta=True,
                         )
-                        active_tool_names = self._extract_active_tool_names(
-                            vertex_tools
-                        )
+                        vertex_tools = turn_tools.to_vertex_tools()
+                        active_tool_names = set(turn_tools.list_tool_names())
 
                 if not tool_called:
                     progress.on_phase("almost_done")

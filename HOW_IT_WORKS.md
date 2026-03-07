@@ -238,7 +238,7 @@ The orchestrator (Step 5) always operates within the context of the **current is
 - Uses `config/llm_client.py` (`VertexAIClient.chat_with_tools`):
   1. Send messages + tool schema to Gemini.
   2. Receive tool call proposals (function‑calling style).
-  3. Dispatch tool calls via `tools/registry.py`.
+  3. Dispatch tool calls through a turn-local tool set built from `tools/registry.py`.
   4. Log results in:
      - `ConversationState.tool_call_log`
      - Audit logger from `logging_setup.py`

@@ -164,7 +164,7 @@ For each routed message:
       - Include `discover_tools` meta-tool for on-demand search and mid-turn expansion.
    - **Performance:** After a single `embed_query()`, the four RAG collection searches (tools, kb, sops, past_incidents) run in **parallel** via `ThreadPoolExecutor(4)` to minimize retrieval latency.
 4. Execute tool calls:
-   - Dispatch through `tools/registry`.
+   - Dispatch through a turn-local hydrated tool set built from `tools/registry`.
    - Log every call in audit logger and in `ConversationState.tool_call_log`.
    - Feed results back into LLM loop.
 5. Issue enrichment:
