@@ -563,6 +563,7 @@ class Orchestrator:
                         expanded = list(active_tool_names) + discovered_names
                         vertex_tools = tool_registry.get_vertex_tools_filtered(
                             expanded, max_rag_tools=20,
+                            allowed_categories=allowed_categories,
                         )
                         active_tool_names = self._extract_active_tool_names(
                             vertex_tools
@@ -949,11 +950,13 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         for hit in hits:
             if isinstance(hit, dict):
                 try:
-                    best_similarity = max(best_similarity, float(hit.get("similarity", 0.0) or 0.0))
+                    best_similarity = max(
+                        best_similarity,
+                        float(hit.get("score", 0.0) or hit.get("similarity", 0.0) or 0.0),
+                    )
                 except Exception:
                     pass
 
-        # If intent classifier misses but workflow match is strong, still treat as execution intent.
         if not execution_intent and best_similarity < 0.5:
             return None
 
@@ -962,7 +965,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             if not isinstance(hit, dict):
                 continue
             try:
-                sim = float(hit.get("similarity", 0.0) or 0.0)
+                sim = float(hit.get("score", 0.0) or hit.get("similarity", 0.0) or 0.0)
             except Exception:
                 sim = 0.0
             has_wf = 1.0 if str(hit.get("workflow_name") or "").strip() else 0.0
@@ -1171,18 +1174,21 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             )
 
         # Otherwise move to approval flow.
+        tool_def = tool_registry.get_tool(tool_name)
+        actual_tier = tool_def.tier if tool_def else "medium_risk"
         state.pending_action = {
             "tool": tool_name,
             "args": action_args,
-            "tier": "medium_risk",
+            "tier": actual_tier,
             "authorized_users": [],
         }
         state.pending_action_summary = f"{tool_name} on {workflow_name}"
         state.phase = ConversationPhase.AWAITING_APPROVAL
         return self.approval_gate.format_approval_prompt(
             self.approval_gate.create_approval_request(
+                state.conversation_id,
                 tool_name,
-                "medium_risk",
+                actual_tier,
                 action_args,
                 state.pending_action_summary,
             )

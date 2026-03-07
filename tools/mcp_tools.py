@@ -235,9 +235,11 @@ def _register_mcp_tools() -> None:
             always_available=False,
             metadata={"source": "mcp", "mcp_category": cat, "safety": safety},
         )
-        def _handler(**kwargs):
-            return _run_mcp_tool(tool_name, async_fn, **kwargs)
-        tool_registry.register(definition, _handler)
+        def _make_handler(_name, _fn):
+            def _handler(**kwargs):
+                return _run_mcp_tool(_name, _fn, **kwargs)
+            return _handler
+        tool_registry.register(definition, _make_handler(tool_name, async_fn))
 
     logger.info("Registered %d MCP tools (P0 + P1 support) with main app registry", len(dispatch))
 

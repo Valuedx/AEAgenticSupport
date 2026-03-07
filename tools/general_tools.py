@@ -154,11 +154,12 @@ def search_knowledge_base(query: str, collection: str = "",
         try:
             hits = rag.search(query, collection=coll, top_k=top_k)
             for h in hits:
+                score = h.get("rrf_score", h.get("similarity", 0)) or 0
                 results.append({
                     "id": h.get("id", ""),
                     "collection": coll,
                     "content": h.get("content", "")[:300],
-                    "similarity": round(h.get("similarity", 0), 3),
+                    "similarity": round(float(score), 3),
                 })
         except Exception as exc:
             logger.warning("RAG search failed for collection %s: %s", coll, exc)
