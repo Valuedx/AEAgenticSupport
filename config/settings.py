@@ -109,6 +109,9 @@ CONFIG = {
         os.environ.get("RECURRENCE_ESCALATION_THRESHOLD", "3")
     ),
     "MAX_RAG_TOOLS": int(os.environ.get("MAX_RAG_TOOLS", "12")),
+    "TOOL_FEEDBACK_HALF_LIFE_DAYS": float(
+        os.environ.get("TOOL_FEEDBACK_HALF_LIFE_DAYS", "7")
+    ),
 
     # Safety — workflows that must never be auto-restarted
     "PROTECTED_WORKFLOWS": [

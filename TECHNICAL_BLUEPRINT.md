@@ -2,7 +2,7 @@
 >
 > - **Documentation Update (2026-03-07)**: MCP server still exposes **106 tools** (P0 + P1 support), while the main-app bridge now catalogs the full set and eagerly hydrates only a curated subset; the rest are exposed via RAG and `discover_tools` with lazy runtime hydration. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
-> - **Tool Ranking Update (2026-03-07)**: `discover_tools` and turn-local tool hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, direct-callability, and observed execution-history signals.
+> - **Tool Ranking Update (2026-03-07)**: `discover_tools` and turn-local tool hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, direct-callability, and observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is used when available.
 >
 > - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, ranking, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
 >

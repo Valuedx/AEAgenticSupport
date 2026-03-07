@@ -295,14 +295,33 @@ class AgentCatalog:
         self,
         tool_names: list[str] | None = None,
         *,
+        agent_id: str = "",
         limit: int | None = None,
+        half_life_days: float | None = None,
+        now: datetime | None = None,
     ) -> dict[str, dict]:
         with self._lock:
             store = self._load()
             rows = list(store.get("interactions", []))
 
+        if agent_id:
+            rows = [
+                row for row in rows
+                if str(row.get("agentId", "")).strip() == str(agent_id).strip()
+            ]
+
         if limit and limit > 0:
             rows = rows[-limit:]
+
+        decay_half_life = max(
+            float(
+                half_life_days
+                or CONFIG.get("TOOL_FEEDBACK_HALF_LIFE_DAYS", 7.0)
+                or 7.0
+            ),
+            0.1,
+        )
+        ref_now = now or datetime.now(timezone.utc)
 
         allowed = None
         if tool_names:
@@ -320,6 +339,10 @@ class AgentCatalog:
                     "failure_count": 0,
                     "total_count": 0,
                     "success_rate": 0.0,
+                    "weighted_success_count": 0.0,
+                    "weighted_failure_count": 0.0,
+                    "weighted_total_count": 0.0,
+                    "weighted_success_rate": 0.0,
                     "last_success_at": "",
                     "last_failure_at": "",
                 }
@@ -338,31 +361,85 @@ class AgentCatalog:
                     "failure_count": 0,
                     "total_count": 0,
                     "success_rate": 0.0,
+                    "weighted_success_count": 0.0,
+                    "weighted_failure_count": 0.0,
+                    "weighted_total_count": 0.0,
+                    "weighted_success_rate": 0.0,
                     "last_success_at": "",
                     "last_failure_at": "",
                 },
             )
             success = bool(row.get("success"))
+            weight = self._feedback_weight(
+                row.get("timestamp"),
+                ref_now=ref_now,
+                half_life_days=decay_half_life,
+            )
             stats["total_count"] += 1
+            stats["weighted_total_count"] += weight
             if success:
                 stats["success_count"] += 1
+                stats["weighted_success_count"] += weight
                 stats["last_success_at"] = str(
                     row.get("timestamp") or stats["last_success_at"]
                 )
             else:
                 stats["failure_count"] += 1
+                stats["weighted_failure_count"] += weight
                 stats["last_failure_at"] = str(
                     row.get("timestamp") or stats["last_failure_at"]
                 )
 
         for stats in summary.values():
             total = int(stats.get("total_count", 0) or 0)
+            weighted_total = float(stats.get("weighted_total_count", 0.0) or 0.0)
             stats["success_rate"] = round(
                 (int(stats.get("success_count", 0) or 0) / total) if total else 0.0,
                 3,
             )
+            stats["weighted_success_count"] = round(
+                float(stats.get("weighted_success_count", 0.0) or 0.0),
+                3,
+            )
+            stats["weighted_failure_count"] = round(
+                float(stats.get("weighted_failure_count", 0.0) or 0.0),
+                3,
+            )
+            stats["weighted_total_count"] = round(weighted_total, 3)
+            stats["weighted_success_rate"] = round(
+                (
+                    float(stats.get("weighted_success_count", 0.0) or 0.0)
+                    / weighted_total
+                )
+                if weighted_total
+                else 0.0,
+                3,
+            )
 
         return summary
+
+    @staticmethod
+    def _feedback_weight(
+        timestamp,
+        *,
+        ref_now: datetime,
+        half_life_days: float,
+    ) -> float:
+        raw = str(timestamp or "").strip()
+        if not raw:
+            return 1.0
+        try:
+            observed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            age_seconds = max(
+                (ref_now - observed.astimezone(timezone.utc)).total_seconds(),
+                0.0,
+            )
+            age_days = age_seconds / 86400.0
+            return 0.5 ** (age_days / half_life_days)
+        except Exception:
+            return 1.0
 
     @staticmethod
     def _trim_params(payload: dict[str, Any], max_len: int = 400) -> dict:

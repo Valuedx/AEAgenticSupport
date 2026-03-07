@@ -26,8 +26,15 @@ MAX_TOOLS_FOR_FULL_CATALOG = 30
 class TurnToolSet:
     """Turn-local hydrated tool set for the orchestrator loop."""
 
-    def __init__(self, registry: "ToolRegistry", tool_names: list[str]):
+    def __init__(
+        self,
+        registry: "ToolRegistry",
+        tool_names: list[str],
+        *,
+        feedback_agent_id: str = "",
+    ):
         self._registry = registry
+        self._feedback_agent_id = str(feedback_agent_id or "").strip()
         self._tool_names: list[str] = []
         self._definitions: dict[str, ToolDefinition] = {}
         self._handlers: dict[str, Callable] = {}
@@ -75,6 +82,13 @@ class TurnToolSet:
                 error=f"Unknown tool: {tool_name}",
                 tool_name=tool_name,
             )
+        if (
+            str(tool_name or "").removeprefix("tool-") == "discover_tools"
+            and self._feedback_agent_id
+            and "_agent_id" not in kwargs
+        ):
+            kwargs = dict(kwargs)
+            kwargs["_agent_id"] = self._feedback_agent_id
         return self._registry._execute_with_handler(tool_name, handler, kwargs)
 
     def to_vertex_tools(self) -> list[dict]:
@@ -198,7 +212,12 @@ class ToolRegistry:
         handler: Callable,
         kwargs: dict,
     ) -> ToolResult:
-        audit.info("TOOL_CALL tool=%s params=%s", tool_name, kwargs)
+        logged_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if not str(key).startswith("_")
+        }
+        audit.info("TOOL_CALL tool=%s params=%s", tool_name, logged_kwargs)
         try:
             result = handler(**kwargs)
 
@@ -209,20 +228,20 @@ class ToolRegistry:
                     audit.info("TOOL_OK tool=%s", tool_name)
                 else:
                     audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, result.error)
-                self._log_interaction(tool_name, kwargs, result.success, result.error)
+                self._log_interaction(tool_name, logged_kwargs, result.success, result.error)
                 return result
 
             if isinstance(result, dict) and isinstance(result.get("success"), bool):
                 if result["success"]:
                     audit.info("TOOL_OK tool=%s", tool_name)
-                    self._log_interaction(tool_name, kwargs, True, "")
+                    self._log_interaction(tool_name, logged_kwargs, True, "")
                     return ToolResult(success=True, data=result, tool_name=tool_name)
                 error = str(
                     result.get("error")
                     or f"Tool '{tool_name}' reported unsuccessful execution."
                 )
                 audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, error)
-                self._log_interaction(tool_name, kwargs, False, error)
+                self._log_interaction(tool_name, logged_kwargs, False, error)
                 return ToolResult(
                     success=False,
                     data=result,
@@ -231,12 +250,12 @@ class ToolRegistry:
                 )
 
             audit.info("TOOL_OK tool=%s", tool_name)
-            self._log_interaction(tool_name, kwargs, True, "")
+            self._log_interaction(tool_name, logged_kwargs, True, "")
             return ToolResult(success=True, data=result, tool_name=tool_name)
         except Exception as exc:
             logger.error("Tool %s failed: %s", tool_name, exc, exc_info=True)
             audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, exc)
-            self._log_interaction(tool_name, kwargs, False, str(exc))
+            self._log_interaction(tool_name, logged_kwargs, False, str(exc))
             return ToolResult(success=False, error=str(exc), tool_name=tool_name)
 
     def execute(self, tool_name: str, **kwargs) -> ToolResult:
@@ -372,6 +391,7 @@ class ToolRegistry:
         allowed_categories: list[str] | None = None,
         top_k: int = 8,
         include_category_fallback: bool = False,
+        feedback_agent_id: str = "",
     ) -> list[dict]:
         candidates: dict[str, dict] = {}
         retrieval_scores: dict[str, float] = {}
@@ -412,7 +432,10 @@ class ToolRegistry:
                     },
                 )
 
-        feedback_stats = self._get_tool_feedback(list(candidates))
+        feedback_stats = self._get_tool_feedback(
+            list(candidates),
+            feedback_agent_id=feedback_agent_id,
+        )
         ranked = self._ranker.rank(
             query,
             [candidate["entry"] for candidate in candidates.values()],
@@ -434,14 +457,42 @@ class ToolRegistry:
         return cards
 
     @staticmethod
-    def _get_tool_feedback(tool_names: list[str]) -> dict[str, dict]:
+    def _get_tool_feedback(
+        tool_names: list[str],
+        *,
+        feedback_agent_id: str = "",
+    ) -> dict[str, dict]:
         if not tool_names:
             return {}
         try:
             from state.agent_catalog import get_agent_catalog
 
             limit = min(int(CONFIG.get("AGENT_INTERACTION_LOG_LIMIT", 500) or 500), 200)
-            return get_agent_catalog().summarize_tool_feedback(tool_names, limit=limit)
+            half_life_days = float(CONFIG.get("TOOL_FEEDBACK_HALF_LIFE_DAYS", 7.0) or 7.0)
+            catalog = get_agent_catalog()
+            global_feedback = catalog.summarize_tool_feedback(
+                tool_names,
+                limit=limit,
+                half_life_days=half_life_days,
+            )
+            if not feedback_agent_id:
+                return global_feedback
+
+            scoped_feedback = catalog.summarize_tool_feedback(
+                tool_names,
+                agent_id=feedback_agent_id,
+                limit=limit,
+                half_life_days=half_life_days,
+            )
+            merged: dict[str, dict] = {}
+            for tool_name in tool_names:
+                scoped = scoped_feedback.get(tool_name, {})
+                scoped_weight = float(
+                    scoped.get("weighted_total_count", scoped.get("total_count", 0.0))
+                    or 0.0
+                )
+                merged[tool_name] = scoped if scoped_weight > 0.0 else global_feedback.get(tool_name, {})
+            return merged
         except Exception:
             return {}
 
@@ -451,6 +502,7 @@ class ToolRegistry:
         *,
         allowed_categories: list[str] | None = None,
         include_meta: bool = True,
+        feedback_agent_id: str = "",
     ) -> TurnToolSet:
         self._ensure_meta_tools()
         selected: list[str] = []
@@ -477,7 +529,7 @@ class ToolRegistry:
         if include_meta:
             _maybe_add("discover_tools")
 
-        return TurnToolSet(self, selected)
+        return TurnToolSet(self, selected, feedback_agent_id=feedback_agent_id)
 
     def build_turn_toolset_filtered(
         self,
@@ -487,6 +539,7 @@ class ToolRegistry:
         rag_hits: list[dict] | None = None,
         max_rag_tools: int = 12,
         allowed_categories: list[str] | None = None,
+        feedback_agent_id: str = "",
     ) -> TurnToolSet:
         self._ensure_meta_tools()
         selected_names: list[str] = []
@@ -505,6 +558,7 @@ class ToolRegistry:
                 rag_hits=rag_hits,
                 allowed_categories=allowed_categories,
                 top_k=max_rag_tools,
+                feedback_agent_id=feedback_agent_id,
             )
             selected_names.extend(card["name"] for card in ranked_cards)
             if not ranked_cards and len(self._catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
@@ -534,6 +588,7 @@ class ToolRegistry:
             selected_names,
             allowed_categories=allowed_categories,
             include_meta=True,
+            feedback_agent_id=feedback_agent_id,
         )
         logger.info(
             "Built turn-local tool set: %s/%s (%s)",
@@ -845,6 +900,7 @@ class ToolRegistry:
         rag_hits: list[dict] | None = None,
         max_rag_tools: int = 12,
         allowed_categories: list[str] | None = None,
+        feedback_agent_id: str = "",
     ) -> list:
         return self.build_turn_toolset_filtered(
             rag_tool_names,
@@ -852,6 +908,7 @@ class ToolRegistry:
             rag_hits=rag_hits,
             max_rag_tools=max_rag_tools,
             allowed_categories=allowed_categories,
+            feedback_agent_id=feedback_agent_id,
         ).to_vertex_tools()
 
     # -----------------------------------------------------------------
@@ -863,7 +920,7 @@ class ToolRegistry:
             return
         self._meta_registered = True
 
-        def _discover_tools(query: str, category: str = "", top_k: int = 8) -> dict:
+        def _discover_tools(query: str, category: str = "", top_k: int = 8, _agent_id: str = "") -> dict:
             from rag.engine import get_rag_engine
 
             results: list[dict] = []
@@ -878,6 +935,7 @@ class ToolRegistry:
                 allowed_categories=[category] if category else None,
                 top_k=top_k,
                 include_category_fallback=bool(category),
+                feedback_agent_id=_agent_id,
             )
 
             if not results:

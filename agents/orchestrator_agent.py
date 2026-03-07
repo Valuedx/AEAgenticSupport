@@ -130,7 +130,8 @@ class OrchestratorAgent(BaseAgent):
                 user_message=user_message,
                 state=state,
                 on_progress=on_progress,
-                allowed_categories=["general", "meta"]
+                allowed_categories=["general", "meta"],
+                feedback_agent_id=self.info.agent_id,
             )
 
             # Propagate findings to the shared context

@@ -221,10 +221,22 @@ class ToolRanker:
         return min(0.16, 0.04 * overlap)
 
     def _feedback_component(self, feedback: dict) -> float:
-        total = int(feedback.get("total_count", 0) or 0)
-        if total <= 0:
+        total = float(
+            feedback.get(
+                "weighted_total_count",
+                feedback.get("total_count", 0),
+            )
+            or 0.0
+        )
+        if total <= 0.0:
             return 0.0
-        success_count = int(feedback.get("success_count", 0) or 0)
-        smoothed_rate = (success_count + 1) / (total + 2)
+        success_count = float(
+            feedback.get(
+                "weighted_success_count",
+                feedback.get("success_count", 0),
+            )
+            or 0.0
+        )
+        smoothed_rate = (success_count + 1.0) / (total + 2.0)
         confidence = min(total / 8.0, 1.0)
         return (smoothed_rate - 0.5) * 0.24 * confidence

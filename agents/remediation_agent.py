@@ -78,7 +78,8 @@ class RemediationAgent(BaseAgent):
             user_message=user_message,
             state=state,
             on_progress=on_progress,
-            allowed_categories=["remediation", "notification", "config"]
+            allowed_categories=["remediation", "notification", "config"],
+            feedback_agent_id=self.info.agent_id,
         )
 
         # ── Verification Loop (Feature 6.1) ──

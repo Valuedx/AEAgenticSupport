@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 import threading
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch, mock_open
 
 from agents.agent_context import SharedContext
@@ -175,7 +176,12 @@ class TestAgentEnhancements:
             ]
         }
 
-        summary = catalog.summarize_tool_feedback(["alpha_tool", "beta_tool"], limit=10)
+        summary = catalog.summarize_tool_feedback(
+            ["alpha_tool", "beta_tool"],
+            limit=10,
+            half_life_days=3650.0,
+            now=datetime(2026, 3, 7, 10, 2, tzinfo=timezone.utc),
+        )
 
         assert summary["alpha_tool"]["total_count"] == 2
         assert summary["alpha_tool"]["success_count"] == 1
@@ -183,6 +189,49 @@ class TestAgentEnhancements:
         assert summary["alpha_tool"]["success_rate"] == 0.5
         assert summary["beta_tool"]["total_count"] == 1
         assert summary["beta_tool"]["last_success_at"] == "2026-03-07T10:02:00+00:00"
+        assert summary["alpha_tool"]["weighted_total_count"] == 2.0
+        assert summary["beta_tool"]["weighted_success_rate"] == 1.0
+
+    def test_agent_catalog_feedback_supports_agent_scope_and_recency(self, mock_conn):
+        from state.agent_catalog import AgentCatalog
+
+        catalog = AgentCatalog.__new__(AgentCatalog)
+        catalog._lock = threading.Lock()
+        catalog._load = lambda: {
+            "interactions": [
+                {
+                    "timestamp": "2026-02-01T10:00:00+00:00",
+                    "agentId": "diagnostic_agent",
+                    "toolName": "alpha_tool",
+                    "success": True,
+                },
+                {
+                    "timestamp": "2026-03-07T09:00:00+00:00",
+                    "agentId": "diagnostic_agent",
+                    "toolName": "alpha_tool",
+                    "success": False,
+                },
+                {
+                    "timestamp": "2026-03-07T09:30:00+00:00",
+                    "agentId": "remediation_agent",
+                    "toolName": "alpha_tool",
+                    "success": True,
+                },
+            ]
+        }
+
+        summary = catalog.summarize_tool_feedback(
+            ["alpha_tool"],
+            agent_id="diagnostic_agent",
+            limit=10,
+            half_life_days=7.0,
+            now=datetime(2026, 3, 7, 10, 0, tzinfo=timezone.utc),
+        )
+
+        assert summary["alpha_tool"]["total_count"] == 2
+        assert summary["alpha_tool"]["failure_count"] == 1
+        assert summary["alpha_tool"]["weighted_total_count"] < 1.2
+        assert summary["alpha_tool"]["weighted_failure_count"] > summary["alpha_tool"]["weighted_success_count"]
 
     @patch("rag.engine.get_rag_engine")
     def test_discover_tools_reranks_toward_safer_direct_tool(self, mock_get_rag, mock_conn):
@@ -264,7 +313,7 @@ class TestAgentEnhancements:
             {
                 "id": "tool-investigate_request_beta",
                 "metadata": {"tool_name": "investigate_request_beta"},
-                "rrf_score": 0.84,
+                "rrf_score": 0.81,
             },
             {
                 "id": "tool-investigate_request_alpha",
@@ -294,6 +343,89 @@ class TestAgentEnhancements:
         assert result.success
         assert result.data["tools"][0]["name"] == "investigate_request_alpha"
         assert result.data["tools"][0]["score"] > result.data["tools"][1]["score"]
+
+    @patch("state.agent_catalog.get_agent_catalog")
+    @patch("rag.engine.get_rag_engine")
+    def test_turn_toolset_discover_tools_uses_feedback_agent_context(self, mock_get_rag, mock_get_catalog, mock_conn):
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(
+                name="investigate_request_alpha",
+                description="Investigate a request.",
+                category="status",
+                tier="read_only",
+                metadata={"source": "mcp", "tags": ["investigate", "request"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+        reg.register(
+            ToolDefinition(
+                name="investigate_request_beta",
+                description="Investigate a request.",
+                category="status",
+                tier="read_only",
+                metadata={"source": "mcp", "tags": ["investigate", "request"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+
+        mock_rag = MagicMock()
+        mock_rag.search_tools.return_value = [
+            {
+                "id": "tool-investigate_request_beta",
+                "metadata": {"tool_name": "investigate_request_beta"},
+                "rrf_score": 0.84,
+            },
+            {
+                "id": "tool-investigate_request_alpha",
+                "metadata": {"tool_name": "investigate_request_alpha"},
+                "rrf_score": 0.79,
+            },
+        ]
+        mock_get_rag.return_value = mock_rag
+
+        def _summary(tool_names, **kwargs):
+            agent_id = kwargs.get("agent_id", "")
+            if agent_id == "diagnostic_agent":
+                return {
+                    "investigate_request_alpha": {
+                        "weighted_success_count": 8.4,
+                        "weighted_failure_count": 0.3,
+                        "weighted_total_count": 8.7,
+                    },
+                    "investigate_request_beta": {
+                        "weighted_success_count": 1.1,
+                        "weighted_failure_count": 7.0,
+                        "weighted_total_count": 8.1,
+                    },
+                }
+            return {
+                "investigate_request_alpha": {
+                    "weighted_success_count": 0.8,
+                    "weighted_failure_count": 1.5,
+                    "weighted_total_count": 2.3,
+                },
+                "investigate_request_beta": {
+                    "weighted_success_count": 3.2,
+                    "weighted_failure_count": 0.4,
+                    "weighted_total_count": 3.6,
+                },
+            }
+
+        mock_get_catalog.return_value.summarize_tool_feedback.side_effect = _summary
+
+        reg._ensure_meta_tools()
+        toolset = reg.build_turn_toolset(
+            ["discover_tools"],
+            include_meta=False,
+            feedback_agent_id="diagnostic_agent",
+        )
+        result = toolset.execute("discover_tools", query="request investigation", top_k=2)
+
+        assert result.success
+        assert result.data["tools"][0]["name"] == "investigate_request_alpha"
 
     def test_turn_toolset_filtered_uses_ranked_candidates(self, mock_conn):
         reg = ToolRegistry()

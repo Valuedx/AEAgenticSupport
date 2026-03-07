@@ -1306,7 +1306,7 @@ The project includes an **independent AutomationEdge MCP (Model Context Protocol
 | Component | Purpose |
 |-----------|--------|
 | **`mcp_server/`** | Standalone MCP server (106 tools: P0 + P1 support). Run via `python -m mcp_server` for Cursor, Claude Desktop, or any MCP client. |
-| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are cataloged in the main application. A curated support subset is eagerly hydrated; the rest are exposed through RAG/`discover_tools`, ranked against custom and workflow-backed tools using retrieval plus execution-history signals, and hydrated on demand. |
+| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are cataloged in the main application. A curated support subset is eagerly hydrated; the rest are exposed through RAG/`discover_tools`, ranked against custom and workflow-backed tools using retrieval plus agent-scoped, recency-weighted execution-history signals, and hydrated on demand. |
 
 - **MCP server only**: Use with Cursor/Claude for support workflows without running the full AI Studio stack.
 - **Main app only**: Use the Flask/Teams agent with existing + dynamic tools (no MCP tools).
@@ -1367,9 +1367,14 @@ To expose the 106 `ae.*` tools (P0 + P1 support; e.g. `ae.request.get_summary`, 
    AE_DYNAMIC_DIRECT_TOOL_NAMES=write_file_tool,claims_recovery_tool
    ```
 
-4. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will catalog the 106 MCP tools. A small support-focused subset is hydrated eagerly; the rest appear in the tool catalog and are available via RAG/`discover_tools` with lazy runtime hydration for the current turn. Discovery and turn-local hydration now use the same ranking step across custom tools, MCP tools, and workflow-backed tools, and that ranker also incorporates recent tool success/failure history from the existing interaction log. Dynamic AE workflow tools default to generic-runner exposure through `trigger_workflow` unless they are listed in `AE_DYNAMIC_DIRECT_TOOL_NAMES`.
+4. **Optional**: tune how quickly older tool outcomes decay in the ranking signal:
+   ```env
+   TOOL_FEEDBACK_HALF_LIFE_DAYS=7
+   ```
 
-5. **Optional**: Ensure the agent catalog links the new tools to the orchestrator. The default behavior (`ensure_default_agent_links`) merges newly registered tool names into the orchestrator’s `linkedTools`; no extra config is required.
+5. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will catalog the 106 MCP tools. A small support-focused subset is hydrated eagerly; the rest appear in the tool catalog and are available via RAG/`discover_tools` with lazy runtime hydration for the current turn. Discovery and turn-local hydration now use the same ranking step across custom tools, MCP tools, and workflow-backed tools, and that ranker incorporates recent tool success/failure history from the existing interaction log. When an agent-specific feedback history exists, it is preferred over the global aggregate. Dynamic AE workflow tools default to generic-runner exposure through `trigger_workflow` unless they are listed in `AE_DYNAMIC_DIRECT_TOOL_NAMES`.
+
+6. **Optional**: Ensure the agent catalog links the new tools to the orchestrator. The default behavior (`ensure_default_agent_links`) merges newly registered tool names into the orchestrator's `linkedTools`; no extra config is required.
 
 If `AE_MCP_TOOLS_ENABLED` is `false` (default), the main app does not load or depend on `mcp_server`.
 

@@ -53,7 +53,8 @@ class Orchestrator:
     def handle_message(self, user_message: str,
                        state: ConversationState,
                        on_progress: ProgressCallback | None = None,
-                       allowed_categories: list[str] | None = None) -> str:
+                       allowed_categories: list[str] | None = None,
+                       feedback_agent_id: str = "ops_orchestrator") -> str:
         if not user_message.strip():
             return "It looks like your message was empty. How can I help?"
 
@@ -106,11 +107,23 @@ class Orchestrator:
                     description=user_message,
                 )
                 state.phase = ConversationPhase.IDLE
-                response = self._process_message(user_message, state, tracker, progress)
+                response = self._process_message(
+                    user_message,
+                    state,
+                    tracker,
+                    progress,
+                    feedback_agent_id=feedback_agent_id,
+                )
 
             elif classification == MessageClassification.CONTINUE_EXISTING:
                 tracker.switch_to_issue(issue_id or tracker.active_issue_id)
-                response = self._process_message(user_message, state, tracker, progress)
+                response = self._process_message(
+                    user_message,
+                    state,
+                    tracker,
+                    progress,
+                    feedback_agent_id=feedback_agent_id,
+                )
 
             elif classification == MessageClassification.RELATED_NEW:
                 parent_id = issue_id or tracker.active_issue_id
@@ -124,7 +137,13 @@ class Orchestrator:
                     "This looks related to the issue I'm already investigating "
                     "but appears to be a separate problem. I'll track it as a "
                     "linked issue.\n\n"
-                    + self._process_message(user_message, state, tracker, progress)
+                    + self._process_message(
+                        user_message,
+                        state,
+                        tracker,
+                        progress,
+                        feedback_agent_id=feedback_agent_id,
+                    )
                 )
 
             elif classification == MessageClassification.RECURRENCE:
@@ -155,7 +174,11 @@ class Orchestrator:
                         f"Let me check if the same root cause applies.\n\n"
                     )
                 response = recurrence_note + self._process_message(
-                    user_message, state, tracker, progress
+                    user_message,
+                    state,
+                    tracker,
+                    progress,
+                    feedback_agent_id=feedback_agent_id,
                 )
 
             elif classification == MessageClassification.FOLLOWUP:
@@ -175,19 +198,45 @@ class Orchestrator:
                     response = (
                         f"Resuming investigation of [{target_issue.issue_id}] "
                         f"{target_issue.title}.\n\n"
-                        + self._process_message(user_message, state, tracker, progress, allowed_categories)
+                        + self._process_message(
+                            user_message,
+                            state,
+                            tracker,
+                            progress,
+                            allowed_categories,
+                            feedback_agent_id=feedback_agent_id,
+                        )
                     )
                 else:
-                    response = self._process_message(user_message, state, tracker, progress, allowed_categories)
+                    response = self._process_message(
+                        user_message,
+                        state,
+                        tracker,
+                        progress,
+                        allowed_categories,
+                        feedback_agent_id=feedback_agent_id,
+                    )
 
             elif classification == MessageClassification.STATUS_CHECK:
                 summary = tracker.get_all_issues_summary()
                 response = (
                     f"Here's the current session status:\n\n{summary}\n\n"
-                    + self._process_message(user_message, state, tracker, progress)
+                    + self._process_message(
+                        user_message,
+                        state,
+                        tracker,
+                        progress,
+                        feedback_agent_id=feedback_agent_id,
+                    )
                 )
             else:
-                response = self._process_message(user_message, state, tracker, progress)
+                response = self._process_message(
+                    user_message,
+                    state,
+                    tracker,
+                    progress,
+                    feedback_agent_id=feedback_agent_id,
+                )
 
             state.save()
             return response
@@ -293,7 +342,8 @@ class Orchestrator:
                          state: ConversationState,
                          tracker: IssueTracker,
                          progress: ProgressCallback | None = None,
-                         allowed_categories: list[str] | None = None) -> str:
+                         allowed_categories: list[str] | None = None,
+                         feedback_agent_id: str = "ops_orchestrator") -> str:
         progress = progress or create_noop_progress()
         state.is_agent_working = True
         state.phase = ConversationPhase.INVESTIGATING
@@ -361,6 +411,7 @@ class Orchestrator:
                 rag_hits=tool_hits,
                 max_rag_tools=max_rag,
                 allowed_categories=allowed_categories,
+                feedback_agent_id=feedback_agent_id,
             )
             vertex_tools = turn_tools.to_vertex_tools()
             active_tool_names = set(turn_tools.list_tool_names())
@@ -386,6 +437,7 @@ class Orchestrator:
                 state=state,
                 active_issue=active_issue,
                 sop_hits=sop_hits,
+                feedback_agent_id=feedback_agent_id,
             )
             if preflight:
                 state.add_message("assistant", preflight)
@@ -584,6 +636,7 @@ class Orchestrator:
                             expanded,
                             allowed_categories=allowed_categories,
                             include_meta=True,
+                            feedback_agent_id=feedback_agent_id,
                         )
                         vertex_tools = turn_tools.to_vertex_tools()
                         active_tool_names = set(turn_tools.list_tool_names())
@@ -943,6 +996,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         state: ConversationState,
         active_issue=None,
         sop_hits: list[dict] | None = None,
+        feedback_agent_id: str = "ops_orchestrator",
     ) -> str | None:
         """For workflow-execution intents, ask for all required params up front.
 
@@ -957,6 +1011,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             query=msg,
             category="automationedge",
             top_k=5,
+            _agent_id=feedback_agent_id,
         )
         state.log_tool_call("discover_tools", {"query": msg, "category": "automationedge", "top_k": 5}, discover.data, discover.success)
         if not discover.success:
