@@ -37,6 +37,7 @@ Complete step-by-step guide to deploy the Agentic Support Assistant on **Automat
 10. [Troubleshooting](#10-troubleshooting)
 11. [Architecture Reference](#11-architecture-reference)
 12. [Cognibot Integration Architecture (Deep Dive)](#12-cognibot-integration-architecture-deep-dive)
+13. [MCP Server and P0/P1 Tools Integration](#13-mcp-server-and-p0p1-tools-integration)
 
 ---
 
@@ -126,6 +127,7 @@ AEAgenticSupport/
 ├── tools/
 │   ├── base.py                          #   AE API client, ToolDefinition
 │   ├── registry.py                      #   Tool registry
+│   ├── mcp_tools.py                     #   MCP P0+P1 tools bridge (when AE_MCP_TOOLS_ENABLED=true)
 │   ├── general_tools.py                 #   3 general escape-hatch tools (call_ae_api, query_database, search_knowledge_base)
 │   ├── status_tools.py                  #   5 status/health tools
 │   ├── log_tools.py                     #   2 log/history tools
@@ -133,6 +135,12 @@ AEAgenticSupport/
 │   ├── remediation_tools.py             #   5 remediation tools
 │   ├── dependency_tools.py              #   4 dependency/config tools
 │   └── notification_tools.py            #   2 notification tools
+├── mcp_server/                          # ← Independent MCP server (106 tools: P0 + P1 support)
+│   ├── server.py                        #   FastMCP server and tool registrations
+│   ├── ae_client.py                     #   Standalone AE REST client
+│   ├── config.py                        #   MCP env config
+│   ├── requirements.txt                #   mcp[cli], httpx, python-dotenv
+│   └── tools/                           #   Request, workflow, agent, schedule, dependency, support, etc.
 ├── rag/
 │   ├── engine.py                        #   Hybrid RAG (Vector + Keyword + RRF)
 │   ├── processor.py                     #   Document processing (PDF/Tables/MD)
@@ -1288,5 +1296,90 @@ This ensures:
 
 ---
 
-**Document version:** 3.0
-**Last updated:** 2026-03-04
+## 13. MCP Server and P0/P1 Tools Integration
+
+The project includes an **independent AutomationEdge MCP (Model Context Protocol) server** and optional **tool integration** into the main application so you can use the same **106 support tools** (71 P0 + 35 support-priority P1) from both Cursor/Claude and from the in-app orchestrator.
+
+### 13.1 Overview
+
+| Component | Purpose |
+|-----------|--------|
+| **`mcp_server/`** | Standalone MCP server (106 tools: P0 + P1 support). Run via `python -m mcp_server` for Cursor, Claude Desktop, or any MCP client. |
+| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are registered in the main tool registry and available to the orchestrator and specialist agents. |
+
+- **MCP server only**: Use with Cursor/Claude for support workflows without running the full AI Studio stack.
+- **Main app only**: Use the Flask/Teams agent with existing + dynamic tools (no MCP tools).
+- **Both**: Enable `AE_MCP_TOOLS_ENABLED` so the in-app agent can call `ae.request.*`, `ae.support.diagnose_*`, etc., and optionally run the MCP server for Cursor.
+
+### 13.2 Running the MCP Server (Cursor / Claude Desktop)
+
+1. **Install MCP dependencies** (from project root):
+   ```bash
+   pip install -r mcp_server/requirements.txt
+   ```
+
+2. **Configure AE connection** (same as main app): ensure `AE_BASE_URL`, `AE_USERNAME`, `AE_PASSWORD`, `AE_ORG_CODE` are set in `.env` or the environment.
+
+3. **Run the server**:
+   - **stdio** (for Cursor / Claude Desktop):  
+     `python -m mcp_server`
+   - **HTTP**:  
+     `python -m mcp_server --transport streamable-http --port 8000`
+
+4. **Cursor**: Add to `.cursor/mcp.json` (or global MCP config):
+   ```json
+   {
+     "mcpServers": {
+       "automationedge": {
+         "command": "python",
+         "args": ["-m", "mcp_server"],
+         "cwd": "/path/to/AEAgenticSupport",
+         "env": {
+           "AE_BASE_URL": "https://your-ae:8443",
+           "AE_USERNAME": "your-username",
+           "AE_PASSWORD": "your-password",
+           "AE_ORG_CODE": "your-org"
+         }
+       }
+     }
+   }
+   ```
+
+See `mcp_server/README.md` for the full tool list and more transport options.
+
+### 13.3 Enabling MCP Tools in the Main Application
+
+To expose the 106 `ae.*` tools (P0 + P1 support; e.g. `ae.request.get_summary`, `ae.support.diagnose_failed_request`, `ae.request.list_recent`, `ae.dependency.run_full_preflight_for_workflow`) to the orchestrator and specialist agents:
+
+1. **Install MCP dependencies** so `mcp_server` is importable:
+   ```bash
+   pip install -r mcp_server/requirements.txt
+   ```
+
+2. **Enable the flag** in `.env`:
+   ```env
+   AE_MCP_TOOLS_ENABLED=true
+   ```
+
+3. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will register the 106 MCP tools; they appear in the tool catalog and are available via RAG/discover_tools and to the diagnostic and remediation agents (by category: status, logs, dependency, remediation).
+
+4. **Optional**: Ensure the agent catalog links the new tools to the orchestrator. The default behavior (`ensure_default_agent_links`) merges newly registered tool names into the orchestrator’s `linkedTools`; no extra config is required.
+
+If `AE_MCP_TOOLS_ENABLED` is `false` (default), the main app does not load or depend on `mcp_server`.
+
+### 13.4 Tool Categories in the Main App
+
+MCP tools are mapped into the existing agent categories so that specialist filtering still works:
+
+| MCP category | Main app category | Used by |
+|--------------|-------------------|--------|
+| request_read, request_diag, agent_read, task_read, credential_read, platform_read, result_read, support_composite | status, logs | Diagnostic agent |
+| request_mutate, workflow_mutate, agent_mutate, schedule_mutate | remediation | Remediation agent |
+| workflow_read, schedule_read, user_read, permission_read, **dependency** | dependency | Both (dependency/discovery) |
+
+Mutating tools require `reason` and support `dry_run`; they use the same safety tiers (read_only, low_risk, medium_risk, high_risk) as the rest of the catalog.
+
+---
+
+**Document version:** 3.1
+**Last updated:** 2026-03-07

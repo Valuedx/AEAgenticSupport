@@ -1837,6 +1837,7 @@ ops_agent/
 │   ├── __init__.py
 │   ├── base.py                      # Base classes, AE API client
 │   ├── registry.py                  # Tool registry
+│   ├── mcp_tools.py                 # MCP P0+P1 tools bridge (106 ae.* tools when AE_MCP_TOOLS_ENABLED=true)
 │   ├── general_tools.py             # General escape-hatch tools (call_ae_api, query_database, search_knowledge_base)
 │   ├── status_tools.py              # Status & health tools
 │   ├── log_tools.py                 # Log & history tools
@@ -1874,7 +1875,9 @@ ops_agent/
 
 ---
 
-## 15. Appendix B — Tool Catalogue (24 tools)
+## 15. Appendix B — Tool Catalogue (24+ tools)
+
+When `AE_MCP_TOOLS_ENABLED=true`, the main app also registers **106 AutomationEdge MCP tools** (71 P0 + 35 support-priority P1) from `mcp_server` via `tools/mcp_tools.py` — e.g. `ae.request.get_summary`, `ae.support.diagnose_failed_request`, `ae.request.list_recent`, `ae.dependency.run_full_preflight_for_workflow`. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md` for the full MCP tool list.
 
 | # | Tool Name | Category | Tier | Description |
 |---|---|---|---|---|

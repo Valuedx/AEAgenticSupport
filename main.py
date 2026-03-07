@@ -25,6 +25,7 @@ import tools.remediation_tools # noqa: F401
 import tools.dependency_tools  # noqa: F401
 import tools.notification_tools  # noqa: F401
 import tools.general_tools  # noqa: F401
+import tools.mcp_tools         # noqa: F401 — MCP P0 tools when AE_MCP_TOOLS_ENABLED=true
 
 app_logger, audit_logger = setup_logging()
 gateway = MessageGateway()

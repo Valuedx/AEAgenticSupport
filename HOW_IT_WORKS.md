@@ -1,3 +1,5 @@
+> - **Documentation Update (2026-03-07)**: MCP server and main-app integration now expose **106 tools** (71 P0 + 35 support-priority P1), including dependency preflight and support handoff tools. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
+>
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
 >   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
 >   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.

@@ -67,6 +67,9 @@ CONFIG = {
     "AE_ENABLE_DYNAMIC_TOOLS": os.environ.get(
         "AE_ENABLE_DYNAMIC_TOOLS", "true"
     ).lower() in ("1", "true", "yes"),
+    "AE_MCP_TOOLS_ENABLED": os.environ.get(
+        "AE_MCP_TOOLS_ENABLED", "false"
+    ).lower() in ("1", "true", "yes"),
     "AE_TIMEOUT_SECONDS": int(
         os.environ.get("AE_TIMEOUT_SECONDS", os.environ.get("T4_TIMEOUT_SECONDS", "30"))
     ),
