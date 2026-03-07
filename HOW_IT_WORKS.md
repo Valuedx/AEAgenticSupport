@@ -58,6 +58,7 @@ Before any request flows through the system, the following must be in place:
   - Cataloged through `tools/registry.py`.
   - Long-tail MCP and workflow-backed tools are hydrated lazily at runtime.
   - Workflow-backed tools default to generic-runner exposure through `trigger_workflow`; only allowlisted workflow tools stay directly callable in the LLM surface.
+  - Discovery and turn-local hydration use the same ranking layer, so custom tools, MCP tools, and workflow-backed tools compete using retrieval score plus source, risk, latency, mutation, and direct-callability signals.
   - Indexed into RAG at startup from the catalog layer (see `main.py` and `SETUP_GUIDE.md` Section 5.2).
 
 Once these are configured, every channel (Teams, AI Studio webchat, standalone webchat/CLI) uses the same **orchestration core** described below.

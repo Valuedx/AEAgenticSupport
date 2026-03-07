@@ -15,6 +15,7 @@ from tools.ae_dynamic_tools import (
 from tools.automationedge_client import get_automationedge_client
 from tools.base import ToolDefinition, ToolResult
 from tools.catalog import ToolCatalogEntry
+from tools.ranker import ToolRanker
 
 logger = logging.getLogger("ops_agent.tools.registry")
 audit = logging.getLogger("ops_agent.audit")
@@ -93,6 +94,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
         self._handlers: dict[str, Callable] = {}
         self._handler_factories: dict[str, Callable[[], Callable]] = {}
+        self._ranker = ToolRanker()
         self._meta_registered = False
         self._dynamic_tool_names: set[str] = set()
         self._dynamic_mappings: dict[str, dict] = {}
@@ -295,6 +297,140 @@ class ToolRegistry:
             if entry.definition.always_available
         ]
 
+    @staticmethod
+    def _coerce_tool_score(raw_score) -> float:
+        try:
+            return max(0.0, float(raw_score or 0.0))
+        except Exception:
+            return 0.0
+
+    def _entry_from_rag_hit(self, hit: dict) -> tuple[ToolCatalogEntry | None, bool]:
+        metadata = hit.get("metadata", {}) or {}
+        tool_name = str(
+            metadata.get("tool_name") or hit.get("id", "").removeprefix("tool-")
+        ).strip()
+        if not tool_name:
+            return None, False
+        entry = self._catalog_entries.get(tool_name)
+        if entry:
+            return entry, True
+
+        workflow_name = str(
+            metadata.get("workflow_name")
+            or metadata.get("workflowName")
+            or ""
+        ).strip()
+        hydration_mode = str(metadata.get("hydration_mode", "lazy") or "lazy")
+        if metadata.get("llm_callable") is False and hydration_mode != "execute_via_generic_runner":
+            hydration_mode = "execute_via_generic_runner"
+
+        catalog_metadata = dict(metadata.get("catalog", {}) or {})
+        if metadata.get("use_tool"):
+            catalog_metadata["use_tool"] = metadata.get("use_tool")
+
+        definition = ToolDefinition(
+            name=tool_name,
+            description=str(metadata.get("description", "") or ""),
+            category=str(metadata.get("category", "automationedge") or "automationedge"),
+            tier=str(metadata.get("tier", "medium_risk") or "medium_risk"),
+            parameters=metadata.get("parameters", {}) or {},
+            required_params=list(metadata.get("required_params", []) or []),
+            always_available=bool(metadata.get("always_available", False)),
+            metadata={
+                "source": metadata.get("source", "automationedge"),
+                "workflow_name": workflow_name,
+                "tags": list(metadata.get("tags", []) or []),
+            },
+            use_when=str(metadata.get("use_when", "") or ""),
+            avoid_when=str(metadata.get("avoid_when", "") or ""),
+            input_examples=list(metadata.get("input_examples", []) or [])[:2],
+        )
+        return (
+            ToolCatalogEntry.from_definition(
+                definition,
+                source=str(metadata.get("source", "automationedge") or "automationedge"),
+                source_ref=workflow_name or tool_name,
+                hydration_mode=hydration_mode,
+                latency_class=str(metadata.get("latency_class", "medium") or "medium"),
+                mutating=bool(
+                    metadata.get(
+                        "mutating",
+                        str(metadata.get("tier", "read_only") or "read_only") != "read_only",
+                    )
+                ),
+                allowed_agents=list(metadata.get("allowed_agents", []) or []),
+                metadata=catalog_metadata,
+            ),
+            False,
+        )
+
+    def rank_tool_candidates(
+        self,
+        query: str,
+        *,
+        rag_hits: list[dict] | None = None,
+        allowed_categories: list[str] | None = None,
+        top_k: int = 8,
+        include_category_fallback: bool = False,
+    ) -> list[dict]:
+        candidates: dict[str, dict] = {}
+        retrieval_scores: dict[str, float] = {}
+        retrieval_ranks: dict[str, int] = {}
+
+        for idx, hit in enumerate(rag_hits or []):
+            if not isinstance(hit, dict):
+                continue
+            entry, registered = self._entry_from_rag_hit(hit)
+            if not entry:
+                continue
+            if allowed_categories and entry.definition.category not in allowed_categories:
+                continue
+            score = self._coerce_tool_score(
+                hit.get("rrf_score", hit.get("similarity", 0.0))
+            )
+            existing = candidates.get(entry.name)
+            if existing and existing["raw_score"] >= score:
+                continue
+            candidates[entry.name] = {
+                "entry": entry,
+                "registered": registered,
+                "raw_score": score,
+            }
+            retrieval_scores[entry.name] = score
+            retrieval_ranks[entry.name] = idx
+
+        if include_category_fallback:
+            for entry in self._catalog_entries.values():
+                if allowed_categories and entry.definition.category not in allowed_categories:
+                    continue
+                candidates.setdefault(
+                    entry.name,
+                    {
+                        "entry": entry,
+                        "registered": True,
+                        "raw_score": 0.0,
+                    },
+                )
+
+        ranked = self._ranker.rank(
+            query,
+            [candidate["entry"] for candidate in candidates.values()],
+            retrieval_scores=retrieval_scores,
+            retrieval_ranks=retrieval_ranks,
+        )
+
+        cards: list[dict] = []
+        for candidate in ranked[:top_k]:
+            record = candidates.get(candidate.entry.name, {})
+            cards.append(
+                self._tool_card_from_entry(
+                    candidate.entry,
+                    score=candidate.score,
+                    registered=bool(record.get("registered", False)),
+                )
+            )
+        return cards
+
     def build_turn_toolset(
         self,
         tool_names: list[str],
@@ -333,15 +469,37 @@ class ToolRegistry:
         self,
         rag_tool_names: list[str],
         *,
+        query: str = "",
+        rag_hits: list[dict] | None = None,
         max_rag_tools: int = 12,
         allowed_categories: list[str] | None = None,
     ) -> TurnToolSet:
         self._ensure_meta_tools()
         selected_names: list[str] = []
 
-        # 1. Add 'always_available' tools (or ALL tools if catalog is small),
-        # but ALWAYS apply the category filter if provided.
-        if len(self._catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
+        if rag_hits:
+            for entry in self._catalog_entries.values():
+                tool_def = entry.definition
+                if not tool_def.always_available:
+                    continue
+                if allowed_categories and tool_def.category not in allowed_categories:
+                    continue
+                selected_names.append(tool_def.name)
+
+            ranked_cards = self.rank_tool_candidates(
+                query,
+                rag_hits=rag_hits,
+                allowed_categories=allowed_categories,
+                top_k=max_rag_tools,
+            )
+            selected_names.extend(card["name"] for card in ranked_cards)
+            if not ranked_cards and len(self._catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
+                for entry in self._catalog_entries.values():
+                    tool_def = entry.definition
+                    if allowed_categories and tool_def.category not in allowed_categories:
+                        continue
+                    selected_names.append(tool_def.name)
+        elif len(self._catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
             for entry in self._catalog_entries.values():
                 tool_def = entry.definition
                 if allowed_categories and tool_def.category not in allowed_categories:
@@ -415,6 +573,8 @@ class ToolRegistry:
             registered=registered and cls._is_llm_callable_entry(entry),
         )
         card["hydration_mode"] = entry.hydration_mode
+        card["latency_class"] = entry.latency_class
+        card["mutating"] = entry.mutating
         card["llm_callable"] = cls._is_llm_callable_entry(entry)
         if not card["llm_callable"]:
             use_tool = str(
@@ -458,6 +618,8 @@ class ToolRegistry:
                     "avoidWhen": card["avoid_when"],
                     "inputExamples": card["input_examples"],
                     "hydrationMode": card["hydration_mode"],
+                    "latencyClass": card["latency_class"],
+                    "mutating": card["mutating"],
                     "llmCallable": card.get("llm_callable", True),
                     "linkedAgents": linked_agents,
                 }
@@ -665,11 +827,15 @@ class ToolRegistry:
     def get_vertex_tools_filtered(
         self,
         rag_tool_names: list[str],
+        query: str = "",
+        rag_hits: list[dict] | None = None,
         max_rag_tools: int = 12,
         allowed_categories: list[str] | None = None,
     ) -> list:
         return self.build_turn_toolset_filtered(
             rag_tool_names,
+            query=query,
+            rag_hits=rag_hits,
             max_rag_tools=max_rag_tools,
             allowed_categories=allowed_categories,
         ).to_vertex_tools()
@@ -686,60 +852,19 @@ class ToolRegistry:
         def _discover_tools(query: str, category: str = "", top_k: int = 8) -> dict:
             from rag.engine import get_rag_engine
 
-            results = []
+            results: list[dict] = []
+            rag_hits = []
 
             if query and query.strip():
-                rag_hits = get_rag_engine().search_tools(query, top_k=top_k)
-                for hit in rag_hits:
-                    metadata = hit.get("metadata", {}) or {}
-                    tool_name = metadata.get(
-                        "tool_name", hit.get("id", "").removeprefix("tool-")
-                    )
-                    entry = self._catalog_entries.get(tool_name)
-                    if entry:
-                        results.append(
-                            self._tool_card_from_entry(
-                                entry,
-                                score=hit.get("rrf_score", hit.get("similarity", 0)),
-                            )
-                        )
-                    else:
-                        # RAG-only workflow/tool hit (not currently registered as executable tool).
-                        # Return it with explicit execution guidance so the LLM can use trigger_workflow.
-                        wf_name = (
-                            metadata.get("workflow_name")
-                            or metadata.get("workflowName")
-                            or tool_name
-                        )
-                        results.append(
-                            {
-                                "name": tool_name,
-                                "workflow_name": wf_name,
-                                "description": metadata.get("description", ""),
-                                "category": metadata.get("category", "automationedge"),
-                                "tier": metadata.get("tier", "medium_risk"),
-                                "source": metadata.get("source", "automationedge"),
-                                "score": round(hit.get("rrf_score", hit.get("similarity", 0)), 3),
-                                "registered": False,
-                                "required_params": metadata.get("required_params", []),
-                                "tags": metadata.get("tags", []),
-                                "use_when": metadata.get("use_when", ""),
-                                "avoid_when": metadata.get("avoid_when", ""),
-                                "input_examples": metadata.get("input_examples", [])[:2],
-                                "use_tool": "trigger_workflow",
-                                "hint": (
-                                    "Tool not registered directly. Use trigger_workflow "
-                                    "with workflow_name and parameters."
-                                ),
-                            }
-                        )
+                rag_hits = get_rag_engine().search_tools(query, top_k=max(top_k * 3, top_k))
 
-            if category:
-                present = {r["name"] for r in results}
-                for entry in self._catalog_entries.values():
-                    td = entry.definition
-                    if td.category == category and td.name not in present:
-                        results.append(self._tool_card_from_entry(entry))
+            results = self.rank_tool_candidates(
+                query,
+                rag_hits=rag_hits,
+                allowed_categories=[category] if category else None,
+                top_k=top_k,
+                include_category_fallback=bool(category),
+            )
 
             if not results:
                 cats = sorted({entry.definition.category for entry in self._catalog_entries.values()})

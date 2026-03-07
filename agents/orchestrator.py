@@ -216,7 +216,10 @@ class Orchestrator:
                 if not isinstance(hit, dict):
                     continue
                 try:
-                    best_similarity = max(best_similarity, float(hit.get("similarity", 0.0) or 0.0))
+                    best_similarity = max(
+                        best_similarity,
+                        float(hit.get("rrf_score", hit.get("similarity", 0.0)) or 0.0),
+                    )
                 except Exception:
                     continue
         except Exception:
@@ -353,9 +356,11 @@ class Orchestrator:
             
             # ── Category-based Tool Isolation (Feature 1.2) ──
             turn_tools = tool_registry.build_turn_toolset_filtered(
-                rag_tool_names, 
+                rag_tool_names,
+                query=enriched_query,
+                rag_hits=tool_hits,
                 max_rag_tools=max_rag,
-                allowed_categories=allowed_categories
+                allowed_categories=allowed_categories,
             )
             vertex_tools = turn_tools.to_vertex_tools()
             active_tool_names = set(turn_tools.list_tool_names())
@@ -1522,7 +1527,10 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         best_tool_similarity = 0.0
         for hit in tool_hits or []:
             try:
-                best_tool_similarity = max(best_tool_similarity, float(hit.get("similarity", 0.0) or 0.0))
+                best_tool_similarity = max(
+                    best_tool_similarity,
+                    float(hit.get("rrf_score", hit.get("similarity", 0.0)) or 0.0),
+                )
             except Exception:
                 continue
         return best_tool_similarity < threshold

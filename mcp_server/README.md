@@ -2,7 +2,7 @@
 
 Independent [Model Context Protocol](https://modelcontextprotocol.io/) server for AutomationEdge IT Operations support. Exposes **106 tools** (71 P0 + 35 support-priority P1) for investigating, diagnosing, and remediating automation issues via any MCP-compatible client (Cursor, Claude Desktop, etc.).
 
-When these tools are bridged into the main app (`AE_MCP_TOOLS_ENABLED=true`), the app now catalogs the full MCP surface but eagerly hydrates only a curated support subset. The remaining MCP tools stay searchable through RAG and `discover_tools`, then hydrate on demand for the active turn.
+When these tools are bridged into the main app (`AE_MCP_TOOLS_ENABLED=true`), the app now catalogs the full MCP surface but eagerly hydrates only a curated support subset. The remaining MCP tools stay searchable through RAG and `discover_tools`, then rank alongside custom tools and AE workflow-backed tools before hydrating on demand for the active turn.
 
 ## Quick Start
 

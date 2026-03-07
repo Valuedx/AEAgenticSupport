@@ -146,6 +146,103 @@ class TestAgentEnhancements:
         assert tool_card["registered"] is False
         assert tool_card["llm_callable"] is False
         assert tool_card["use_tool"] == "trigger_workflow"
+        assert tool_card["latency_class"] == "medium"
+        assert tool_card["mutating"] is True
+
+    @patch("rag.engine.get_rag_engine")
+    def test_discover_tools_reranks_toward_safer_direct_tool(self, mock_get_rag, mock_conn):
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(
+                name="diagnose_failed_request",
+                description="Diagnose a failed request.",
+                category="status",
+                tier="read_only",
+                metadata={"source": "mcp", "tags": ["diagnose", "request", "failure"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+        reg.register(
+            ToolDefinition(
+                name="restart_failed_request",
+                description="Restart a failed request.",
+                category="remediation",
+                tier="high_risk",
+                metadata={"source": "automationedge", "tags": ["restart", "request"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+
+        mock_rag = MagicMock()
+        mock_rag.search_tools.return_value = [
+            {
+                "id": "tool-restart_failed_request",
+                "metadata": {"tool_name": "restart_failed_request"},
+                "rrf_score": 0.94,
+            },
+            {
+                "id": "tool-diagnose_failed_request",
+                "metadata": {"tool_name": "diagnose_failed_request"},
+                "rrf_score": 0.72,
+            },
+        ]
+        mock_get_rag.return_value = mock_rag
+
+        reg._ensure_meta_tools()
+        result = reg.execute("discover_tools", query="diagnose failed request", top_k=2)
+
+        assert result.success
+        assert result.data["tools"][0]["name"] == "diagnose_failed_request"
+        assert result.data["tools"][0]["score"] > result.data["tools"][1]["score"]
+
+    def test_turn_toolset_filtered_uses_ranked_candidates(self, mock_conn):
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(
+                name="diagnose_failed_request",
+                description="Diagnose a failed request.",
+                category="status",
+                tier="read_only",
+                metadata={"source": "mcp", "tags": ["diagnose", "request", "failure"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+        reg.register(
+            ToolDefinition(
+                name="restart_failed_request",
+                description="Restart a failed request.",
+                category="remediation",
+                tier="high_risk",
+                metadata={"source": "automationedge", "tags": ["restart", "request"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+
+        toolset = reg.build_turn_toolset_filtered(
+            ["restart_failed_request", "diagnose_failed_request"],
+            query="diagnose failed request",
+            rag_hits=[
+                {
+                    "id": "tool-restart_failed_request",
+                    "metadata": {"tool_name": "restart_failed_request"},
+                    "rrf_score": 0.94,
+                },
+                {
+                    "id": "tool-diagnose_failed_request",
+                    "metadata": {"tool_name": "diagnose_failed_request"},
+                    "rrf_score": 0.72,
+                },
+            ],
+            max_rag_tools=1,
+        )
+
+        names = toolset.list_tool_names()
+        assert "diagnose_failed_request" in names
+        assert "restart_failed_request" not in names
 
     # ── 3. Orchestrator Context-Aware RAG (Integration check) ──
     @patch("state.issue_tracker.IssueTracker._load_from_db", return_value=None)

@@ -9,6 +9,7 @@ Implemented in the current codebase:
 - Long-tail MCP tools are cataloged and lazily hydrated on demand.
 - Dynamic AE workflow-backed tools are cataloged and now default to generic-runner exposure through `trigger_workflow`; an allowlist can keep selected workflows as direct tools.
 - The orchestrator now uses a turn-local hydrated tool set for the main LLM investigation loop.
+- Tool discovery and turn-local hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, and direct-callability signals.
 - The existing `ToolRegistry` API remains in place as a compatibility facade.
 
 ## 1. Why This Refactor Exists

@@ -2,7 +2,9 @@
 >
 > - **Documentation Update (2026-03-07)**: MCP server still exposes **106 tools** (P0 + P1 support), while the main-app bridge now catalogs the full set and eagerly hydrates only a curated subset; the rest are exposed via RAG and `discover_tools` with lazy runtime hydration. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
-> - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
+> - **Tool Ranking Update (2026-03-07)**: `discover_tools` and turn-local tool hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, and direct-callability signals.
+>
+> - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, ranking, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
 >   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
