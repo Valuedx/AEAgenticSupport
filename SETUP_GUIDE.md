@@ -1306,7 +1306,7 @@ The project includes an **independent AutomationEdge MCP (Model Context Protocol
 | Component | Purpose |
 |-----------|--------|
 | **`mcp_server/`** | Standalone MCP server (106 tools: P0 + P1 support). Run via `python -m mcp_server` for Cursor, Claude Desktop, or any MCP client. |
-| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are registered in the main tool registry and available to the orchestrator and specialist agents. |
+| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are cataloged in the main application. A curated support subset is eagerly hydrated; the rest are exposed through RAG/`discover_tools` and hydrated on demand. |
 
 - **MCP server only**: Use with Cursor/Claude for support workflows without running the full AI Studio stack.
 - **Main app only**: Use the Flask/Teams agent with existing + dynamic tools (no MCP tools).
@@ -1362,7 +1362,7 @@ To expose the 106 `ae.*` tools (P0 + P1 support; e.g. `ae.request.get_summary`, 
    AE_MCP_TOOLS_ENABLED=true
    ```
 
-3. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will register the 106 MCP tools; they appear in the tool catalog and are available via RAG/discover_tools and to the diagnostic and remediation agents (by category: status, logs, dependency, remediation).
+3. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will catalog the 106 MCP tools. A small support-focused subset is hydrated eagerly; the rest appear in the tool catalog and are available via RAG/`discover_tools` with lazy runtime hydration for the current turn.
 
 4. **Optional**: Ensure the agent catalog links the new tools to the orchestrator. The default behavior (`ensure_default_agent_links`) merges newly registered tool names into the orchestrator’s `linkedTools`; no extra config is required.
 

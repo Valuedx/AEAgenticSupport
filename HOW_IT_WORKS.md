@@ -1,6 +1,6 @@
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out, configurable embedding dimension, batched DB queries, shared MCP executor, AE path caching, coalesced state writes, capped execution polling. Details in §5.5 below.
 >
-> - **Documentation Update (2026-03-07)**: MCP server and main-app integration now expose **106 tools** (71 P0 + 35 support-priority P1), including dependency preflight and support handoff tools. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
+> - **Documentation Update (2026-03-07)**: MCP server still exposes **106 tools** (71 P0 + 35 support-priority P1), while the main-app bridge now catalogs the full set and lazily hydrates long-tail MCP and workflow-backed tools on demand. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
 >   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
@@ -55,8 +55,9 @@ Before any request flows through the system, the following must be in place:
 
 - **Tool catalog:**
   - Tool definitions and handlers in `tools/*.py`.
-  - Registered in `tools/registry.py`.
-  - Indexed into RAG at startup (see `main.py` and `SETUP_GUIDE.md` Section 5.2).
+  - Cataloged through `tools/registry.py`.
+  - Long-tail MCP and workflow-backed tools are hydrated lazily at runtime.
+  - Indexed into RAG at startup from the catalog layer (see `main.py` and `SETUP_GUIDE.md` Section 5.2).
 
 Once these are configured, every channel (Teams, AI Studio webchat, standalone webchat/CLI) uses the same **orchestration core** described below.
 
@@ -253,7 +254,9 @@ The orchestrator (Step 5) always operates within the context of the **current is
     - **RAG Context Enrichment (Feature 1.1)**:
       - Merges user input with `active_issue` metadata (Workflows + Error Signatures) before calling the search engine.
       - Pushes relevant SOPs and incidents to the top of the context block.
-    - Include `discover_tools` meta‑tool to let the LLM search mid‑conversation.
+    - Search a unified tool catalog that includes custom tools, MCP tools, and AE workflow-backed tools.
+    - Keep a small eagerly hydrated core of `always_available` tools and lazily hydrate selected long-tail tools only when they enter the turn-local set.
+    - Include `discover_tools` meta‑tool to let the LLM search mid‑conversation and expand the active set on demand.
   - **Performance:** After one `embed_query()` call, the four RAG collection searches (tools, kb, sops, incidents) run in parallel via `ThreadPoolExecutor(4)`.
 
 ### 5.4 Integrating findings with IssueTracker

@@ -4,6 +4,7 @@ Utilities for mapping AutomationEdge workflow metadata into dynamic tools.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 from typing import Any, Optional
 
@@ -77,6 +78,23 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _coerce_examples(value: Any) -> list[dict[str, Any]]:
+    items = value if isinstance(value, list) else [value]
+    examples: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            examples.append(item)
+            continue
+        if isinstance(item, str):
+            try:
+                parsed = json.loads(item)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                examples.append(parsed)
+    return examples[:3]
+
+
 def _ae_type_to_json_type(ae_type: str) -> str:
     norm = _norm_key(ae_type)
     mapping = {
@@ -132,6 +150,9 @@ class DynamicToolMapping:
     tier: str
     active: bool
     tags: list[str]
+    use_when: str
+    avoid_when: str
+    input_examples: list[dict[str, Any]]
     parameters: dict
     required_params: list[str]
     parameter_meta: list[dict]
@@ -152,6 +173,9 @@ class DynamicToolMapping:
                 "tags": self.tags,
                 "parameter_meta": self.parameter_meta,
             },
+            use_when=self.use_when,
+            avoid_when=self.avoid_when,
+            input_examples=self.input_examples,
         )
 
 
@@ -222,6 +246,29 @@ def extract_dynamic_tool_mapping(
         tags = [str(t).strip() for t in tags_raw if str(t).strip()]
     elif isinstance(tags_raw, str):
         tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+    use_when = str(
+        _get_first_value(
+            cfg,
+            ("usewhen", "when_to_use", "recommendedfor", "intendeduse"),
+            "",
+        )
+        or ""
+    ).strip()
+    avoid_when = str(
+        _get_first_value(
+            cfg,
+            ("avoidwhen", "when_not_to_use", "dontusefor", "notfor"),
+            "",
+        )
+        or ""
+    ).strip()
+    input_examples = _coerce_examples(
+        _get_first_value(
+            cfg,
+            ("inputexamples", "exampleinputs", "examples", "sampleinputs"),
+            [],
+        )
+    )
 
     parameter_lists: list[list[dict]] = []
     _collect_parameter_lists(merged, parameter_lists)
@@ -298,6 +345,9 @@ def extract_dynamic_tool_mapping(
         tier=_infer_tier(default_tier, cfg),
         active=active,
         tags=tags,
+        use_when=use_when,
+        avoid_when=avoid_when,
+        input_examples=input_examples,
         parameters=properties,
         required_params=required,
         parameter_meta=meta,

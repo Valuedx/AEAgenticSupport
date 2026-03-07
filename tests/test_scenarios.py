@@ -159,6 +159,26 @@ class TestToolDefinition(unittest.TestCase):
         self.assertEqual(schema["name"], "test_tool")
         self.assertIn("parameters", schema)
 
+    def test_to_llm_schema_includes_usage_guidance(self):
+        tool = ToolDefinition(
+            name="search_docs",
+            description="Search documentation.",
+            category="general",
+            tier="read_only",
+            parameters={"query": {"type": "string", "description": "Search query"}},
+            required_params=["query"],
+            use_when="You need SOP or KB context before acting.",
+            avoid_when="You already have a live request ID and need current status.",
+            input_examples=[{"query": "vpn connection failed after patching"}],
+            metadata={"workflow_name": "WF_DOC_SEARCH", "tags": ["kb", "sop"]},
+        )
+
+        schema = tool.to_llm_schema()
+
+        self.assertIn("Use when: You need SOP or KB context before acting.", schema["description"])
+        self.assertIn("Avoid when: You already have a live request ID and need current status.", schema["description"])
+        self.assertIn("Example arguments:", schema["description"])
+
     def test_tool_result_success(self):
         result = ToolResult(success=True, data={"status": "ok"})
         self.assertTrue(result.success)
@@ -226,6 +246,33 @@ class TestToolRegistry(unittest.TestCase):
         from tools.registry import tool_registry
         status_tools = tool_registry.get_tools_by_category("status")
         self.assertGreater(len(status_tools), 0)
+
+    def test_lazy_catalog_tool_executes_on_demand(self):
+        from tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="lazy_tool",
+                description="Lazy test tool",
+                category="test",
+                tier="read_only",
+                parameters={"name": {"type": "string", "description": "Name"}},
+            ),
+            lambda **kwargs: {"success": True, "echo": kwargs.get("name", "")},
+            hydrate=False,
+        )
+
+        self.assertIn("lazy_tool", registry.list_tools())
+        self.assertIsNotNone(registry.get_tool("lazy_tool"))
+        self.assertEqual(len(registry.get_all_rag_documents()), 1)
+        self.assertNotIn("lazy_tool", registry._handlers)
+
+        result = registry.execute("lazy_tool", name="sample")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data.get("echo"), "sample")
+        self.assertIn("lazy_tool", registry._handlers)
 
     def test_execute_handles_embedded_failure_payload(self):
         from tools.registry import ToolRegistry

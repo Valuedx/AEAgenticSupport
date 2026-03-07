@@ -34,6 +34,11 @@ class _FakeAEClient:
                 "status": "active",
                 "category": "file_ops",
                 "tags": ["files", "automationedge"],
+                "useWhen": "You need to create or overwrite an output file through AE.",
+                "avoidWhen": "You only need to inspect a file or fetch status.",
+                "inputExamples": [
+                    {"targetPath": "/tmp/out.txt", "overwrite": True}
+                ],
             },
             "configurationParameters": [
                 {
@@ -90,12 +95,16 @@ class TestDynamicAETools(unittest.TestCase):
         self.assertIsNotNone(tool)
         self.assertEqual(tool.category, "file_ops")
         self.assertIn("targetPath", tool.parameters)
+        self.assertEqual(tool.use_when, "You need to create or overwrite an output file through AE.")
+        self.assertEqual(tool.avoid_when, "You only need to inspect a file or fetch status.")
+        self.assertEqual(tool.input_examples[0]["targetPath"], "/tmp/out.txt")
+        self.assertNotIn("write_file_tool", registry._handlers)
 
         result = registry.execute("write_file_tool", targetPath="/tmp/out.txt")
         self.assertTrue(result.success)
         self.assertEqual(result.data.get("requestId"), "REQ-200")
+        self.assertIn("write_file_tool", registry._handlers)
 
 
 if __name__ == "__main__":
     unittest.main()
-

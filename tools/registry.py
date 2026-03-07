@@ -14,6 +14,7 @@ from tools.ae_dynamic_tools import (
 )
 from tools.automationedge_client import get_automationedge_client
 from tools.base import ToolDefinition, ToolResult
+from tools.catalog import ToolCatalogEntry
 
 logger = logging.getLogger("ops_agent.tools.registry")
 audit = logging.getLogger("ops_agent.audit")
@@ -25,20 +26,77 @@ class ToolRegistry:
     """Central registry for all ops agent tools."""
 
     def __init__(self):
+        self._catalog_entries: dict[str, ToolCatalogEntry] = {}
         self._tools: dict[str, ToolDefinition] = {}
         self._handlers: dict[str, Callable] = {}
+        self._handler_factories: dict[str, Callable[[], Callable]] = {}
         self._meta_registered = False
         self._dynamic_tool_names: set[str] = set()
         self._dynamic_mappings: dict[str, dict] = {}
 
-    def register(self, definition: ToolDefinition, handler: Callable):
-        self._tools[definition.name] = definition
-        self._handlers[definition.name] = handler
-        logger.debug("Registered tool: %s", definition.name)
+    def register(
+        self,
+        definition: ToolDefinition,
+        handler: Callable,
+        *,
+        source_ref: str = "",
+        hydration_mode: str = "eager",
+        latency_class: str = "",
+        mutating: bool | None = None,
+        allowed_agents: list[str] | None = None,
+        hydrate: bool = True,
+    ):
+        self.register_catalog_entry(
+            ToolCatalogEntry.from_definition(
+                definition,
+                source_ref=source_ref,
+                hydration_mode=hydration_mode,
+                latency_class=latency_class,
+                mutating=mutating,
+                allowed_agents=allowed_agents,
+            ),
+            handler_factory=lambda _handler=handler: _handler,
+            hydrate=hydrate,
+        )
+
+    def register_catalog_entry(
+        self,
+        entry: ToolCatalogEntry,
+        *,
+        handler_factory: Callable[[], Callable] | None = None,
+        hydrate: bool = False,
+    ):
+        self._catalog_entries[entry.name] = entry
+        if handler_factory:
+            self._handler_factories[entry.name] = handler_factory
+        if hydrate:
+            self._hydrate_tool(entry.name)
+        logger.debug(
+            "Registered tool catalog entry: %s (mode=%s hydrate=%s)",
+            entry.name,
+            entry.hydration_mode,
+            hydrate,
+        )
+
+    def _hydrate_tool(self, name: str) -> Optional[ToolDefinition]:
+        if name in self._tools:
+            return self._tools[name]
+        entry = self._catalog_entries.get(name)
+        if not entry:
+            return None
+        definition = entry.to_tool_definition()
+        self._tools[name] = definition
+        factory = self._handler_factories.get(name)
+        if factory:
+            self._handlers[name] = factory()
+        logger.debug("Hydrated tool: %s", name)
+        return definition
 
     def unregister(self, name: str):
+        self._catalog_entries.pop(name, None)
         self._tools.pop(name, None)
         self._handlers.pop(name, None)
+        self._handler_factories.pop(name, None)
         self._dynamic_tool_names.discard(name)
         self._dynamic_mappings.pop(name, None)
 
@@ -49,19 +107,24 @@ class ToolRegistry:
         return len(names)
 
     def get_tool(self, name: str) -> Optional[ToolDefinition]:
-        return self._tools.get(name)
+        if name in self._tools:
+            return self._tools.get(name)
+        entry = self._catalog_entries.get(name)
+        return entry.to_tool_definition() if entry else None
 
     def get_handler(self, name: str) -> Optional[Callable]:
+        if name not in self._handlers and name in self._catalog_entries:
+            self._hydrate_tool(name)
         return self._handlers.get(name)
 
     def list_tools(self) -> list[str]:
-        return list(self._tools.keys())
+        return list(self._catalog_entries.keys())
 
     def list_dynamic_tools(self) -> list[str]:
         return sorted(self._dynamic_tool_names)
 
     def execute(self, tool_name: str, **kwargs) -> ToolResult:
-        handler = self._handlers.get(tool_name)
+        handler = self.get_handler(tool_name)
         if not handler:
             return ToolResult(
                 success=False,
@@ -128,22 +191,77 @@ class ToolRegistry:
     # -----------------------------------------------------------------
 
     def get_all_definitions(self) -> list[ToolDefinition]:
-        return list(self._tools.values())
+        return [entry.to_tool_definition() for entry in self._catalog_entries.values()]
 
     def get_all_rag_documents(self) -> list[dict]:
-        return [t.to_rag_document() for t in self._tools.values()]
+        return [entry.to_rag_document() for entry in self._catalog_entries.values()]
 
     def get_all_llm_schemas(self) -> list[dict]:
-        return [t.to_llm_schema() for t in self._tools.values()]
+        return [entry.to_tool_definition().to_llm_schema() for entry in self._catalog_entries.values()]
 
     def get_tools_by_category(self, category: str) -> list[ToolDefinition]:
-        return [t for t in self._tools.values() if t.category == category]
+        return [
+            entry.to_tool_definition()
+            for entry in self._catalog_entries.values()
+            if entry.definition.category == category
+        ]
 
     def get_tools_by_tier(self, tier: str) -> list[ToolDefinition]:
-        return [t for t in self._tools.values() if t.tier == tier]
+        return [
+            entry.to_tool_definition()
+            for entry in self._catalog_entries.values()
+            if entry.definition.tier == tier
+        ]
 
     def get_always_available(self) -> list[ToolDefinition]:
-        return [t for t in self._tools.values() if t.always_available]
+        return [
+            entry.to_tool_definition()
+            for entry in self._catalog_entries.values()
+            if entry.definition.always_available
+        ]
+
+    @staticmethod
+    def _tool_card(
+        tool_def: ToolDefinition,
+        *,
+        score: float | None = None,
+        registered: bool = True,
+    ) -> dict:
+        md = tool_def.metadata or {}
+        card = {
+            "name": tool_def.name,
+            "workflow_name": md.get("workflow_name", ""),
+            "description": tool_def.description,
+            "category": tool_def.category,
+            "tier": tool_def.tier,
+            "source": md.get("source", "static"),
+            "registered": registered,
+            "dynamic": bool(md.get("dynamic", False)),
+            "active": bool(md.get("active", True)),
+            "always_available": bool(tool_def.always_available),
+            "required_params": list(tool_def.required_params),
+            "tags": md.get("tags", []),
+            "use_when": tool_def.use_when,
+            "avoid_when": tool_def.avoid_when,
+            "input_examples": tool_def.input_examples[:2],
+        }
+        if score is not None:
+            card["score"] = round(score, 3)
+        return card
+
+    @classmethod
+    def _tool_card_from_entry(
+        cls,
+        entry: ToolCatalogEntry,
+        *,
+        score: float | None = None,
+        registered: bool = True,
+    ) -> dict:
+        return cls._tool_card(
+            entry.to_tool_definition(),
+            score=score,
+            registered=registered,
+        )
 
     def get_tool_inventory(
         self,
@@ -151,24 +269,27 @@ class ToolRegistry:
     ) -> list[dict]:
         lookup = agent_tool_map or {}
         inventory: list[dict] = []
-        for tool_name, tool_def in self._tools.items():
-            md = tool_def.metadata or {}
+        for tool_name, entry in self._catalog_entries.items():
             linked_agents = sorted(
                 agent_id for agent_id, tools in lookup.items() if tool_name in tools
             )
+            card = self._tool_card_from_entry(entry)
             inventory.append(
                 {
                     "toolName": tool_name,
-                    "workflowName": md.get("workflow_name", ""),
-                    "description": tool_def.description,
-                    "category": tool_def.category,
-                    "tier": tool_def.tier,
-                    "source": md.get("source", "static"),
-                    "dynamic": bool(md.get("dynamic", False)),
-                    "active": bool(md.get("active", True)),
-                    "tags": md.get("tags", []),
-                    "parameters": tool_def.parameters,
-                    "required": tool_def.required_params,
+                    "workflowName": card.get("workflow_name", ""),
+                    "description": card["description"],
+                    "category": card["category"],
+                    "tier": card["tier"],
+                    "source": card["source"],
+                    "dynamic": card["dynamic"],
+                    "active": card["active"],
+                    "tags": card["tags"],
+                    "parameters": entry.definition.parameters,
+                    "required": entry.definition.required_params,
+                    "useWhen": card["use_when"],
+                    "avoidWhen": card["avoid_when"],
+                    "inputExamples": card["input_examples"],
                     "linkedAgents": linked_agents,
                 }
             )
@@ -232,13 +353,27 @@ class ToolRegistry:
             if not include_inactive and not mapping.active:
                 skipped += 1
                 continue
-            if mapping.tool_name in self._tools and mapping.tool_name not in self._dynamic_tool_names:
+            if (
+                mapping.tool_name in self._catalog_entries
+                and mapping.tool_name not in self._dynamic_tool_names
+            ):
                 collisions.append(mapping.tool_name)
                 continue
 
-            handler = self._make_dynamic_tool_handler(mapping, client)
             definition = mapping.to_tool_definition()
-            self.register(definition, handler)
+            self.register_catalog_entry(
+                ToolCatalogEntry.from_definition(
+                    definition,
+                    source_ref=mapping.workflow_name,
+                    hydration_mode="lazy",
+                    latency_class="medium",
+                ),
+                handler_factory=lambda _mapping=mapping, _client=client: self._make_dynamic_tool_handler(
+                    _mapping,
+                    _client,
+                ),
+                hydrate=False,
+            )
             self._dynamic_tool_names.add(mapping.tool_name)
             self._dynamic_mappings[mapping.tool_name] = asdict(mapping)
             registered += 1
@@ -344,7 +479,10 @@ class ToolRegistry:
     # -----------------------------------------------------------------
 
     def get_vertex_tools(self) -> list:
-        declarations = [t.to_llm_schema() for t in self._tools.values()]
+        declarations = [
+            entry.to_tool_definition().to_llm_schema()
+            for entry in self._catalog_entries.values()
+        ]
         return [{"function_declarations": declarations}]
 
     def get_vertex_tools_filtered(
@@ -357,16 +495,19 @@ class ToolRegistry:
 
         # Group tools to be selected
         selected: dict[str, ToolDefinition] = {}
+        catalog_entries = self._catalog_entries
 
         # 1. Add 'always_available' tools (or ALL tools if catalog is small), 
         # but ALWAYS apply the category filter if provided.
-        if len(self._tools) <= MAX_TOOLS_FOR_FULL_CATALOG:
-            for tool_def in self._tools.values():
+        if len(catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
+            for entry in catalog_entries.values():
+                tool_def = entry.to_tool_definition()
                 if allowed_categories and tool_def.category not in allowed_categories:
                     continue
                 selected[tool_def.name] = tool_def
         else:
-            for tool_def in self._tools.values():
+            for entry in catalog_entries.values():
+                tool_def = entry.to_tool_definition()
                 if tool_def.always_available:
                     if allowed_categories and tool_def.category not in allowed_categories:
                         continue
@@ -375,16 +516,17 @@ class ToolRegistry:
             # 2. Add tools from RAG results
             for name in rag_tool_names[:max_rag_tools]:
                 clean = name.removeprefix("tool-")
-                if clean in self._tools and clean not in selected:
-                    tool_def = self._tools[clean]
+                if clean in catalog_entries and clean not in selected:
+                    self._hydrate_tool(clean)
+                    tool_def = catalog_entries[clean].to_tool_definition()
                     # Apply category filter if specified
                     if allowed_categories and tool_def.category not in allowed_categories:
                         continue
                     selected[clean] = tool_def
 
         # 3. Always include meta-tools unless explicitly filtered out (usually 'meta' category)
-        if "discover_tools" in self._tools:
-            dt = self._tools["discover_tools"]
+        if "discover_tools" in catalog_entries:
+            dt = catalog_entries["discover_tools"].to_tool_definition()
             if not allowed_categories or dt.category in allowed_categories:
                 selected["discover_tools"] = dt
 
@@ -392,7 +534,7 @@ class ToolRegistry:
         logger.info(
             "Filtered tools: %s/%s (%s)",
             len(selected),
-            len(self._tools),
+            len(catalog_entries),
             ", ".join(selected.keys()),
         )
         return [{"function_declarations": declarations}]
@@ -418,18 +560,13 @@ class ToolRegistry:
                     tool_name = metadata.get(
                         "tool_name", hit.get("id", "").removeprefix("tool-")
                     )
-                    td = self._tools.get(tool_name)
-                    if td:
-                        md = td.metadata or {}
+                    entry = self._catalog_entries.get(tool_name)
+                    if entry:
                         results.append(
-                            {
-                                "name": td.name,
-                                "description": td.description,
-                                "category": td.category,
-                                "tier": td.tier,
-                                "source": md.get("source", "static"),
-                                "score": round(hit.get("rrf_score", hit.get("similarity", 0)), 3),
-                            }
+                            self._tool_card_from_entry(
+                                entry,
+                                score=hit.get("rrf_score", hit.get("similarity", 0)),
+                            )
                         )
                     else:
                         # RAG-only workflow/tool hit (not currently registered as executable tool).
@@ -449,6 +586,11 @@ class ToolRegistry:
                                 "source": metadata.get("source", "automationedge"),
                                 "score": round(hit.get("rrf_score", hit.get("similarity", 0)), 3),
                                 "registered": False,
+                                "required_params": metadata.get("required_params", []),
+                                "tags": metadata.get("tags", []),
+                                "use_when": metadata.get("use_when", ""),
+                                "avoid_when": metadata.get("avoid_when", ""),
+                                "input_examples": metadata.get("input_examples", [])[:2],
                                 "use_tool": "trigger_workflow",
                                 "hint": (
                                     "Tool not registered directly. Use trigger_workflow "
@@ -459,35 +601,29 @@ class ToolRegistry:
 
             if category:
                 present = {r["name"] for r in results}
-                for td in self._tools.values():
+                for entry in self._catalog_entries.values():
+                    td = entry.definition
                     if td.category == category and td.name not in present:
-                        md = td.metadata or {}
-                        results.append(
-                            {
-                                "name": td.name,
-                                "description": td.description,
-                                "category": td.category,
-                                "tier": td.tier,
-                                "source": md.get("source", "static"),
-                            }
-                        )
+                        results.append(self._tool_card_from_entry(entry))
 
             if not results:
-                cats = sorted({t.category for t in self._tools.values()})
+                cats = sorted({entry.definition.category for entry in self._catalog_entries.values()})
                 return {
                     "tools": [],
-                    "total_catalog_size": len(self._tools),
+                    "total_catalog_size": len(self._catalog_entries),
                     "available_categories": cats,
                     "hint": "No matching tools found. Try a different query or browse by category.",
                 }
 
-            return {"tools": results[:top_k], "total_catalog_size": len(self._tools)}
+            return {"tools": results[:top_k], "total_catalog_size": len(self._catalog_entries)}
 
         meta_def = ToolDefinition(
             name="discover_tools",
             description=(
                 "Search the tool catalog to find tools matching a query or category. "
-                "Use when currently loaded tools are insufficient."
+                "Use when currently loaded tools are insufficient. Returns "
+                "category, risk tier, required parameters, and example arguments "
+                "when available."
             ),
             category="meta",
             tier="read_only",
@@ -508,6 +644,15 @@ class ToolRegistry:
             required_params=[],
             always_available=True,
             metadata={"source": "meta"},
+            use_when=(
+                "You need a capability that is not in the currently loaded subset "
+                "of tools, or you need to search by intent instead of exact name."
+            ),
+            avoid_when="You already have a specific tool loaded that clearly fits the task.",
+            input_examples=[
+                {"query": "find tools to diagnose failed request", "top_k": 5},
+                {"query": "workflow permissions", "category": "dependency", "top_k": 3},
+            ],
         )
         self.register(meta_def, _discover_tools)
 
@@ -516,7 +661,7 @@ class ToolRegistry:
     # -----------------------------------------------------------------
 
     def resolve_discovered_tool(self, tool_name: str) -> Optional[ToolDefinition]:
-        return self._tools.get(tool_name)
+        return self.get_tool(tool_name)
 
 
 tool_registry = ToolRegistry()

@@ -1,6 +1,8 @@
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out (4 concurrent searches), configurable embedding dimension, batched workflow catalog queries, shared MCP executor, coalesced state writes, AE path caching, capped execution polling. See §4.2 and `SETUP_GUIDE.md` §10.
 >
-> - **Documentation Update (2026-03-07)**: MCP server and bridge now register **106 tools** (P0 + P1 support). See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
+> - **Documentation Update (2026-03-07)**: MCP server still exposes **106 tools** (P0 + P1 support), while the main-app bridge now catalogs the full set and eagerly hydrates only a curated subset; the rest are exposed via RAG and `discover_tools` with lazy runtime hydration. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
+>
+> - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
 >   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
@@ -154,11 +156,12 @@ For each routed message:
    - Messages so far (user + agent).
    - Tools schema from `tools/registry.py` (function calling).
 3. Tool-selection strategy:
-   - If tool catalog is small: all tools available.
+   - If tool catalog is small: all cataloged tools available.
    - If catalog is large:
-     - Always include “always_available” tools (status, core logs, general tools).
-     - RAG-filtered typed tools via `rag.engine.PgVectorRAGEngine.search_tools`.
-     - Include `discover_tools` meta-tool for on-demand search.
+     - Always include a small eagerly hydrated `always_available` core (status, core logs, general tools, curated MCP support tools).
+      - Use catalog-backed RAG filtering via `rag.engine.PgVectorRAGEngine.search_tools`.
+      - Lazily hydrate selected tools only when they enter the turn-local set.
+      - Include `discover_tools` meta-tool for on-demand search and mid-turn expansion.
    - **Performance:** After a single `embed_query()`, the four RAG collection searches (tools, kb, sops, past_incidents) run in **parallel** via `ThreadPoolExecutor(4)` to minimize retrieval latency.
 4. Execute tool calls:
    - Dispatch through `tools/registry`.

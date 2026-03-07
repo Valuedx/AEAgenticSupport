@@ -68,6 +68,43 @@ class TestAgentEnhancements:
         assert "check_logs" in names
         assert "restart_wf" not in names  # Should be filtered out
 
+    @patch("rag.engine.get_rag_engine")
+    def test_discover_tools_returns_usage_guidance(self, mock_get_rag, mock_conn):
+        reg = ToolRegistry()
+        tool = ToolDefinition(
+            name="search_knowledge_base",
+            description="Search KB and SOP content.",
+            category="general",
+            tier="read_only",
+            parameters={"query": {"type": "string", "description": "Search query"}},
+            required_params=["query"],
+            use_when="You need historical or SOP context before acting.",
+            avoid_when="You already have a request ID and need live status.",
+            input_examples=[{"query": "dns resolution failure overnight batch"}],
+            metadata={"tags": ["kb", "sop"]},
+        )
+        reg.register(tool, lambda **_: {"success": True}, hydrate=False)
+
+        mock_rag = MagicMock()
+        mock_rag.search_tools.return_value = [
+            {
+                "id": "tool-search_knowledge_base",
+                "metadata": {"tool_name": "search_knowledge_base"},
+                "rrf_score": 0.91,
+            }
+        ]
+        mock_get_rag.return_value = mock_rag
+
+        reg._ensure_meta_tools()
+        result = reg.execute("discover_tools", query="find SOPs", top_k=3)
+
+        assert result.success
+        tool_card = result.data["tools"][0]
+        assert tool_card["required_params"] == ["query"]
+        assert tool_card["use_when"] == "You need historical or SOP context before acting."
+        assert tool_card["avoid_when"] == "You already have a request ID and need live status."
+        assert tool_card["input_examples"][0]["query"] == "dns resolution failure overnight batch"
+
     # ── 3. Orchestrator Context-Aware RAG (Integration check) ──
     @patch("state.issue_tracker.IssueTracker._load_from_db", return_value=None)
     @patch("agents.orchestrator.get_rag_engine")

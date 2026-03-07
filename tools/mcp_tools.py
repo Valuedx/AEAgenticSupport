@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from config.settings import CONFIG
 from tools.base import ToolDefinition, ToolResult
+from tools.catalog import ToolCatalogEntry
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.tools.mcp_tools")
@@ -44,6 +45,17 @@ _SAFETY_TO_TIER = {
     "safe_mutation": "low_risk",
     "guarded": "medium_risk",
     "privileged": "high_risk",
+}
+_ALWAYS_AVAILABLE_MCP_TOOLS = {
+    "ae.support.diagnose_failed_request",
+    "ae.support.diagnose_stuck_running_request",
+    "ae.support.diagnose_awaiting_input",
+    "ae.support.diagnose_agent_unavailable",
+    "ae.request.get_summary",
+    "ae.request.get_failure_message",
+    "ae.request.get_live_progress",
+    "ae.agent.get_status",
+    "ae.agent.get_details",
 }
 
 # Shared executor for MCP async tool calls (avoids per-call executor creation)
@@ -229,11 +241,13 @@ def _register_mcp_tools() -> None:
     _add(dispatch, "ae.support.prepare_human_handoff_note", _support.prepare_human_handoff_note, "support_composite", "safe_read", ["request_id"], {})
 
     descriptions = _DESCRIPTIONS
+    eager_count = 0
     for tool_name, (async_fn, cat, safety, required, optional) in dispatch.items():
         app_cat = _CATEGORY_MAP.get(cat, "status")
         tier = _SAFETY_TO_TIER.get(safety, "read_only")
         params = _build_params(required, optional)
         desc = descriptions.get(tool_name, f"AE MCP tool: {tool_name}")
+        always_available = tool_name in _ALWAYS_AVAILABLE_MCP_TOOLS
         definition = ToolDefinition(
             name=tool_name,
             description=desc,
@@ -241,16 +255,42 @@ def _register_mcp_tools() -> None:
             tier=tier,
             parameters=params,
             required_params=required,
-            always_available=False,
-            metadata={"source": "mcp", "mcp_category": cat, "safety": safety},
+            always_available=always_available,
+            metadata={
+                "source": "mcp",
+                "mcp_category": cat,
+                "safety": safety,
+                "hydration_mode": "eager" if always_available else "lazy",
+            },
         )
-        def _make_handler(_name, _fn):
-            def _handler(**kwargs):
-                return _run_mcp_tool(_name, _fn, **kwargs)
-            return _handler
-        tool_registry.register(definition, _make_handler(tool_name, async_fn))
+        if always_available:
+            eager_count += 1
 
-    logger.info("Registered %d MCP tools (P0 + P1 support) with main app registry", len(dispatch))
+        def _make_handler_factory(_name, _fn):
+            def _factory():
+                def _handler(**kwargs):
+                    return _run_mcp_tool(_name, _fn, **kwargs)
+                return _handler
+            return _factory
+
+        tool_registry.register_catalog_entry(
+            ToolCatalogEntry.from_definition(
+                definition,
+                source_ref=tool_name,
+                hydration_mode="eager" if always_available else "lazy",
+                latency_class="medium",
+                mutating=tier != "read_only",
+            ),
+            handler_factory=_make_handler_factory(tool_name, async_fn),
+            hydrate=always_available,
+        )
+
+    logger.info(
+        "Cataloged %d MCP tools with main app registry (%d eager, %d lazy)",
+        len(dispatch),
+        eager_count,
+        len(dispatch) - eager_count,
+    )
 
 
 def _add(dispatch, name, fn, cat, safety, required, optional):

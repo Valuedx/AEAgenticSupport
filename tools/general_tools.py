@@ -256,6 +256,21 @@ tool_registry.register(
         },
         required_params=["method", "endpoint"],
         always_available=True,
+        use_when=(
+            "No specific typed tool covers the exact AutomationEdge endpoint "
+            "or operation you need."
+        ),
+        avoid_when=(
+            "A typed tool already exists for the task, or the action is risky "
+            "and you have not gathered the exact endpoint and payload yet."
+        ),
+        input_examples=[
+            {
+                "method": "GET",
+                "endpoint": "/api/v1/workflows/Claims_Processing_Daily/status",
+                "params": "{\"limit\": 1}",
+            }
+        ],
     ),
     call_ae_api,
 )
@@ -265,7 +280,7 @@ tool_registry.register(
         name="query_database",
         description=(
             "Run a read-only SQL query against the operations database. "
-            "Only SELECT queries are allowed — mutations are blocked. "
+            "Only SELECT queries are allowed - mutations are blocked. "
             "Useful for checking conversation state, issue history, "
             "RAG document counts, or any custom diagnostic query. "
             "Tables: rag_documents, issue_registry, "
@@ -292,6 +307,20 @@ tool_registry.register(
         },
         required_params=["sql"],
         always_available=True,
+        use_when=(
+            "You need a read-only diagnostic lookup against internal ops tables "
+            "that no typed tool exposes."
+        ),
+        avoid_when=(
+            "A workflow/API/status tool already provides the answer, or the user "
+            "is asking to change data."
+        ),
+        input_examples=[
+            {
+                "sql": "SELECT workflow_name, status FROM workflow_catalog WHERE workflow_name = %s",
+                "params": "[\"Claims_Processing_Daily\"]",
+            }
+        ],
     ),
     query_database,
 )
@@ -328,6 +357,17 @@ tool_registry.register(
         },
         required_params=["query"],
         always_available=True,
+        use_when=(
+            "You need SOPs, prior incident context, or background knowledge "
+            "before deciding what operational action to take."
+        ),
+        avoid_when=(
+            "You already know the exact workflow/request/entity and need current "
+            "state from a live system tool."
+        ),
+        input_examples=[
+            {"query": "dns resolution failure overnight batch", "collection": "sops", "top_k": 3}
+        ],
     ),
     search_knowledge_base,
 )
