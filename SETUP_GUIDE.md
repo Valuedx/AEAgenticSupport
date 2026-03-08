@@ -723,6 +723,8 @@ In another terminal, set `AE_BASE_URL=http://localhost:5051` and:
 python main.py
 ```
 
+`main.py` now delegates tool startup initialization to `tools/bootstrap.py`, which imports the static tool modules, reloads dynamic workflow-backed tools, syncs default agent links, and indexes the tool catalog into RAG.
+
 ### 8.4 Test scenarios via CLI
 
 ```

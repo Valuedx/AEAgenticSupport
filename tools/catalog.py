@@ -75,3 +75,67 @@ class ToolCatalogEntry:
         if self.metadata:
             metadata["catalog"] = dict(self.metadata)
         return doc
+
+
+class ToolCatalog:
+    """Searchable inventory of tool metadata, independent of runtime handlers."""
+
+    def __init__(self):
+        self.entries: dict[str, ToolCatalogEntry] = {}
+
+    def register(self, entry: ToolCatalogEntry):
+        self.entries[entry.name] = entry
+
+    def unregister(self, name: str):
+        self.entries.pop(str(name or ""), None)
+
+    def get(self, name: str) -> ToolCatalogEntry | None:
+        return self.entries.get(str(name or ""))
+
+    def items(self):
+        return self.entries.items()
+
+    def values(self):
+        return self.entries.values()
+
+    def keys(self):
+        return self.entries.keys()
+
+    def __contains__(self, name: object) -> bool:
+        return str(name or "") in self.entries
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def list_names(self) -> list[str]:
+        return list(self.entries.keys())
+
+    def get_all_definitions(self) -> list[ToolDefinition]:
+        return [entry.to_tool_definition() for entry in self.entries.values()]
+
+    def get_all_rag_documents(self) -> list[dict]:
+        return [entry.to_rag_document() for entry in self.entries.values()]
+
+    def get_all_llm_schemas(self) -> list[dict]:
+        return [entry.to_tool_definition().to_llm_schema() for entry in self.entries.values()]
+
+    def get_tools_by_category(self, category: str) -> list[ToolDefinition]:
+        return [
+            entry.to_tool_definition()
+            for entry in self.entries.values()
+            if entry.definition.category == category
+        ]
+
+    def get_tools_by_tier(self, tier: str) -> list[ToolDefinition]:
+        return [
+            entry.to_tool_definition()
+            for entry in self.entries.values()
+            if entry.definition.tier == tier
+        ]
+
+    def get_always_available(self) -> list[ToolDefinition]:
+        return [
+            entry.to_tool_definition()
+            for entry in self.entries.values()
+            if entry.definition.always_available
+        ]

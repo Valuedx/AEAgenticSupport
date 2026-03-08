@@ -6,58 +6,17 @@ and exposed via its web chat interface.
 
 import os
 import sys
-import logging
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config.settings import CONFIG
 from config.logging_setup import setup_logging
 from gateway.message_gateway import MessageGateway
-from rag.engine import get_rag_engine
-from state.agent_catalog import get_agent_catalog
-from tools.registry import tool_registry
-
-# Import tool modules so they self-register with the registry
-import tools.status_tools      # noqa: F401
-import tools.log_tools         # noqa: F401
-import tools.file_tools        # noqa: F401
-import tools.remediation_tools # noqa: F401
-import tools.dependency_tools  # noqa: F401
-import tools.notification_tools  # noqa: F401
-import tools.general_tools  # noqa: F401
-import tools.mcp_tools         # noqa: F401 — MCP P0 tools when AE_MCP_TOOLS_ENABLED=true
+from tools.bootstrap import initialize_tooling
 
 app_logger, audit_logger = setup_logging()
 gateway = MessageGateway()
-
-# Load dynamic AE tools if enabled.
-try:
-    reload_summary = tool_registry.reload_automationedge_tools()
-    app_logger.info(
-        "Dynamic AE tools reload: enabled=%s registered=%s removed=%s skipped=%s collisions=%s",
-        reload_summary.get("enabled"),
-        reload_summary.get("registered"),
-        reload_summary.get("removed"),
-        reload_summary.get("skipped"),
-        len(reload_summary.get("collisions", [])),
-    )
-except Exception as e:
-    app_logger.warning(f"Dynamic AE tool sync skipped: {e}")
-
-# Keep default agent definition aligned with currently registered tools.
-try:
-    get_agent_catalog().ensure_default_agent_links(tool_registry.list_tools())
-except Exception as e:
-    app_logger.warning(f"Agent catalog initialization skipped: {e}")
-
-# Index tools into RAG on startup
-try:
-    rag = get_rag_engine()
-    tool_docs = tool_registry.get_all_rag_documents()
-    rag.index_tools(tool_docs)
-    app_logger.info("Ops Agent initialized — tools indexed into RAG")
-except Exception as e:
-    app_logger.warning(f"RAG indexing deferred (DB may not be ready): {e}")
+tooling_summary = initialize_tooling(app_logger)
+app_logger.debug("Tool bootstrap summary: %s", tooling_summary)
 
 
 def handle_chat_message(message: str, session_id: str = "default",
@@ -103,7 +62,7 @@ def handle_chat_message(message: str, session_id: str = "default",
         )
 
 
-# ── AE AI Studio Integration ──
+# AE AI Studio Integration
 # Configure AI Studio to call handle_chat_message()
 
 # Pattern B: Flask endpoint (uncomment if AI Studio routes via HTTP)
@@ -128,7 +87,7 @@ def handle_chat_message(message: str, session_id: str = "default",
 # Pattern C: Standalone CLI for testing
 if __name__ == "__main__":
     print("=" * 60)
-    print("  AutomationEdge Ops Agent — Interactive CLI")
+    print("  AutomationEdge Ops Agent - Interactive CLI")
     print("=" * 60)
     print("Type 'quit' to exit. Type 'role:business' to switch persona.\n")
 

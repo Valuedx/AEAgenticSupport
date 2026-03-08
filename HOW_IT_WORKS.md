@@ -60,7 +60,7 @@ Before any request flows through the system, the following must be in place:
   - Workflow-backed tools default to generic-runner exposure through `trigger_workflow`; only allowlisted workflow tools stay directly callable in the LLM surface.
   - Discovery and turn-local hydration use the same ranking layer, so custom tools, MCP tools, and workflow-backed tools compete using retrieval score plus source, risk, latency, mutation, direct-callability, and observed execution-history signals from the existing interaction log. When possible, that feedback is scoped to the active agent and weighted toward recent outcomes.
   - Runtime responsibilities are now split more cleanly: `tools/registry.py` remains the compatibility facade, `tools/hydrator.py` owns turn-local hydration, and `tools/executor.py` owns normalized handler execution and interaction logging.
-  - Indexed into RAG at startup from the catalog layer (see `main.py` and `SETUP_GUIDE.md` Section 5.2).
+  - Startup composition is centralized in `tools/bootstrap.py`, which imports the static tool modules, reloads dynamic workflow-backed tools, syncs default agent links, and indexes the catalog into RAG.
 
 Once these are configured, every channel (Teams, AI Studio webchat, standalone webchat/CLI) uses the same **orchestration core** described below.
 

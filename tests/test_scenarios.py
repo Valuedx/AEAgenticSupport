@@ -326,12 +326,13 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(events[0]["params"], {"visible": "yes"})
 
     def test_tool_hydrator_executes_turn_local_tool_without_persisting_handler(self):
-        from tools.catalog import ToolCatalogEntry
+        from tools.catalog import ToolCatalog, ToolCatalogEntry
         from tools.executor import ToolExecutor
         from tools.hydrator import ToolHydrator
 
-        catalog_entries = {
-            "lazy_turn_tool": ToolCatalogEntry.from_definition(
+        catalog = ToolCatalog()
+        catalog.register(
+            ToolCatalogEntry.from_definition(
                 ToolDefinition(
                     name="lazy_turn_tool",
                     description="Lazy turn-local tool",
@@ -341,11 +342,11 @@ class TestToolRegistry(unittest.TestCase):
                 ),
                 hydration_mode="lazy",
             )
-        }
+        )
         tools_cache = {}
         handlers_cache = {}
         hydrator = ToolHydrator(
-            catalog_entries=catalog_entries,
+            catalog=catalog,
             tools_cache=tools_cache,
             handlers_cache=handlers_cache,
             handler_factories={
@@ -363,6 +364,45 @@ class TestToolRegistry(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.data.get("value"), "x")
         self.assertNotIn("lazy_turn_tool", handlers_cache)
+
+    @patch("tools.bootstrap.tool_registry")
+    @patch("tools.bootstrap.get_agent_catalog")
+    @patch("tools.bootstrap.get_rag_engine")
+    @patch("tools.bootstrap.import_static_tool_modules")
+    def test_initialize_tooling_uses_bootstrap_pipeline(
+        self,
+        mock_import_static_tool_modules,
+        mock_get_rag_engine,
+        mock_get_agent_catalog,
+        mock_tool_registry,
+    ):
+        from tools.bootstrap import initialize_tooling
+
+        mock_import_static_tool_modules.return_value = ["tools.general_tools"]
+        mock_tool_registry.reload_automationedge_tools.return_value = {
+            "enabled": True,
+            "registered": 3,
+            "removed": 0,
+            "skipped": 0,
+            "collisions": [],
+        }
+        mock_tool_registry.list_tools.return_value = ["discover_tools", "trigger_workflow"]
+        mock_tool_registry.get_all_rag_documents.return_value = [{"id": "tool-discover_tools"}]
+        mock_catalog = MagicMock()
+        mock_get_agent_catalog.return_value = mock_catalog
+        mock_rag = MagicMock()
+        mock_get_rag_engine.return_value = mock_rag
+
+        summary = initialize_tooling()
+
+        self.assertEqual(summary["modules_loaded"], ["tools.general_tools"])
+        self.assertEqual(summary["catalog_size"], 1)
+        self.assertTrue(summary["agent_links_updated"])
+        self.assertTrue(summary["rag_indexed"])
+        mock_catalog.ensure_default_agent_links.assert_called_once_with(
+            ["discover_tools", "trigger_workflow"]
+        )
+        mock_rag.index_tools.assert_called_once_with([{"id": "tool-discover_tools"}])
 
     def test_execute_handles_embedded_failure_payload(self):
         from tools.registry import ToolRegistry

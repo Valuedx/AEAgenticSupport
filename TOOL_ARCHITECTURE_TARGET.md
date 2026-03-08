@@ -1,7 +1,7 @@
 # Tool Architecture Target
 
-**Status:** Target architecture and migration plan; core catalog, ranking, hydrator, and executor slices implemented  
-**Date:** 2026-03-07
+**Status:** Target architecture and migration plan; core catalog, ranking, hydrator, executor, and startup bootstrap slices implemented  
+**Date:** 2026-03-08
 
 Implemented in the current codebase:
 
@@ -12,6 +12,7 @@ Implemented in the current codebase:
 - Tool discovery and turn-local hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, and direct-callability signals.
 - The ranking step now also folds in observed success/failure history from the existing tool interaction log, weighted toward recent events and scoped to the current agent when matching feedback exists.
 - Hydration and runtime execution are now implemented in dedicated modules: `tools/hydrator.py` and `tools/executor.py`.
+- Startup tool import, dynamic workflow reload, agent-link sync, and RAG indexing now run through `tools/bootstrap.py` instead of being hard-wired inside `main.py`.
 - The existing `ToolRegistry` API remains in place as a compatibility facade.
 
 ## 1. Why This Refactor Exists
@@ -73,8 +74,10 @@ Today the code has the right pieces, but not yet the right separation:
   - Bulk-registers bridged MCP handlers into the main registry.
 - `agents/orchestrator.py`
   - Already narrows the visible tool set per turn using RAG plus `discover_tools`.
+- `tools/bootstrap.py`
+  - Loads static tool modules, reloads dynamic workflow-backed tools, syncs default agent links, and indexes catalog documents into RAG.
 - `main.py`
-  - Loads static tools, MCP tools, dynamic workflow tools, then indexes the resulting set into RAG.
+  - Calls the bootstrap entrypoint and exposes `handle_chat_message`.
 
 This means the prompt exposure is smaller than the total catalog, but the system still pays the complexity cost of large up-front registration.
 
@@ -441,13 +444,12 @@ Target role:
 
 Current role:
 
-- Imports tool modules, loads MCP and dynamic workflow tools, indexes all registered tools into RAG.
+- Calls `tools/bootstrap.initialize_tooling()`, then exposes the AI Studio entrypoint.
 
 Target role:
 
-- Initialize the catalog.
-- Index catalog documents into RAG.
-- Initialize only the always-on executable core.
+- Remain a thin channel adapter.
+- Defer tool composition and catalog startup work to the bootstrap layer.
 
 
 ## 8. Migration Plan

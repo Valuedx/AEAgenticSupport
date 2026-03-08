@@ -14,7 +14,7 @@ from tools.ae_dynamic_tools import (
 )
 from tools.automationedge_client import get_automationedge_client
 from tools.base import ToolDefinition, ToolResult
-from tools.catalog import ToolCatalogEntry
+from tools.catalog import ToolCatalog, ToolCatalogEntry
 from tools.executor import ToolExecutor
 from tools.hydrator import ToolHydrator, TurnToolSet
 from tools.ranker import ToolRanker
@@ -29,7 +29,8 @@ class ToolRegistry:
     """Central registry for all ops agent tools."""
 
     def __init__(self):
-        self._catalog_entries: dict[str, ToolCatalogEntry] = {}
+        self._catalog = ToolCatalog()
+        self._catalog_entries = self._catalog.entries
         self._tools: dict[str, ToolDefinition] = {}
         self._handlers: dict[str, Callable] = {}
         self._handler_factories: dict[str, Callable[[], Callable]] = {}
@@ -40,7 +41,7 @@ class ToolRegistry:
             interaction_logger=self._log_interaction,
         )
         self._hydrator = ToolHydrator(
-            catalog_entries=self._catalog_entries,
+            catalog=self._catalog,
             tools_cache=self._tools,
             handlers_cache=self._handlers,
             handler_factories=self._handler_factories,
@@ -83,7 +84,7 @@ class ToolRegistry:
         handler_factory: Callable[[], Callable] | None = None,
         hydrate: bool = False,
     ):
-        self._catalog_entries[entry.name] = entry
+        self._catalog.register(entry)
         if handler_factory:
             self._handler_factories[entry.name] = handler_factory
         if hydrate:
@@ -106,7 +107,7 @@ class ToolRegistry:
         return definition
 
     def unregister(self, name: str):
-        self._catalog_entries.pop(name, None)
+        self._catalog.unregister(name)
         self._tools.pop(name, None)
         self._handlers.pop(name, None)
         self._handler_factories.pop(name, None)
@@ -122,14 +123,14 @@ class ToolRegistry:
     def get_tool(self, name: str) -> Optional[ToolDefinition]:
         if name in self._tools:
             return self._tools.get(name)
-        entry = self._catalog_entries.get(name)
+        entry = self._catalog.get(name)
         return entry.to_tool_definition() if entry else None
 
     def get_handler(self, name: str) -> Optional[Callable]:
         return self._hydrator.get_handler(name, persist=True)
 
     def list_tools(self) -> list[str]:
-        return list(self._catalog_entries.keys())
+        return self._catalog.list_names()
 
     def list_dynamic_tools(self) -> list[str]:
         return sorted(self._dynamic_tool_names)
@@ -171,34 +172,22 @@ class ToolRegistry:
     # -----------------------------------------------------------------
 
     def get_all_definitions(self) -> list[ToolDefinition]:
-        return [entry.to_tool_definition() for entry in self._catalog_entries.values()]
+        return self._catalog.get_all_definitions()
 
     def get_all_rag_documents(self) -> list[dict]:
-        return [entry.to_rag_document() for entry in self._catalog_entries.values()]
+        return self._catalog.get_all_rag_documents()
 
     def get_all_llm_schemas(self) -> list[dict]:
-        return [entry.to_tool_definition().to_llm_schema() for entry in self._catalog_entries.values()]
+        return self._catalog.get_all_llm_schemas()
 
     def get_tools_by_category(self, category: str) -> list[ToolDefinition]:
-        return [
-            entry.to_tool_definition()
-            for entry in self._catalog_entries.values()
-            if entry.definition.category == category
-        ]
+        return self._catalog.get_tools_by_category(category)
 
     def get_tools_by_tier(self, tier: str) -> list[ToolDefinition]:
-        return [
-            entry.to_tool_definition()
-            for entry in self._catalog_entries.values()
-            if entry.definition.tier == tier
-        ]
+        return self._catalog.get_tools_by_tier(tier)
 
     def get_always_available(self) -> list[ToolDefinition]:
-        return [
-            entry.to_tool_definition()
-            for entry in self._catalog_entries.values()
-            if entry.definition.always_available
-        ]
+        return self._catalog.get_always_available()
 
     @staticmethod
     def _coerce_tool_score(raw_score) -> float:
@@ -214,7 +203,7 @@ class ToolRegistry:
         ).strip()
         if not tool_name:
             return None, False
-        entry = self._catalog_entries.get(tool_name)
+        entry = self._catalog.get(tool_name)
         if entry:
             return entry, True
 
@@ -304,7 +293,7 @@ class ToolRegistry:
             retrieval_ranks[entry.name] = idx
 
         if include_category_fallback:
-            for entry in self._catalog_entries.values():
+            for entry in self._catalog.values():
                 if allowed_categories and entry.definition.category not in allowed_categories:
                     continue
                 candidates.setdefault(
@@ -410,7 +399,7 @@ class ToolRegistry:
         selected_names: list[str] = []
 
         if rag_hits:
-            for entry in self._catalog_entries.values():
+            for entry in self._catalog.values():
                 tool_def = entry.definition
                 if not tool_def.always_available:
                     continue
@@ -426,20 +415,20 @@ class ToolRegistry:
                 feedback_agent_id=feedback_agent_id,
             )
             selected_names.extend(card["name"] for card in ranked_cards)
-            if not ranked_cards and len(self._catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
-                for entry in self._catalog_entries.values():
+            if not ranked_cards and len(self._catalog) <= MAX_TOOLS_FOR_FULL_CATALOG:
+                for entry in self._catalog.values():
                     tool_def = entry.definition
                     if allowed_categories and tool_def.category not in allowed_categories:
                         continue
                     selected_names.append(tool_def.name)
-        elif len(self._catalog_entries) <= MAX_TOOLS_FOR_FULL_CATALOG:
-            for entry in self._catalog_entries.values():
+        elif len(self._catalog) <= MAX_TOOLS_FOR_FULL_CATALOG:
+            for entry in self._catalog.values():
                 tool_def = entry.definition
                 if allowed_categories and tool_def.category not in allowed_categories:
                     continue
                 selected_names.append(tool_def.name)
         else:
-            for entry in self._catalog_entries.values():
+            for entry in self._catalog.values():
                 tool_def = entry.definition
                 if tool_def.always_available:
                     if allowed_categories and tool_def.category not in allowed_categories:
@@ -458,7 +447,7 @@ class ToolRegistry:
         logger.info(
             "Built turn-local tool set: %s/%s (%s)",
             len(toolset.list_tool_names()),
-            len(self._catalog_entries),
+            len(self._catalog),
             ", ".join(toolset.list_tool_names()),
         )
         return toolset
@@ -533,7 +522,7 @@ class ToolRegistry:
     ) -> list[dict]:
         lookup = agent_tool_map or {}
         inventory: list[dict] = []
-        for tool_name, entry in self._catalog_entries.items():
+        for tool_name, entry in self._catalog.items():
             linked_agents = sorted(
                 agent_id for agent_id, tools in lookup.items() if tool_name in tools
             )
@@ -632,7 +621,7 @@ class ToolRegistry:
                 skipped += 1
                 continue
             if (
-                mapping.tool_name in self._catalog_entries
+                mapping.tool_name in self._catalog
                 and mapping.tool_name not in self._dynamic_tool_names
             ):
                 collisions.append(mapping.tool_name)
@@ -812,15 +801,15 @@ class ToolRegistry:
             )
 
             if not results:
-                cats = sorted({entry.definition.category for entry in self._catalog_entries.values()})
+                cats = sorted({entry.definition.category for entry in self._catalog.values()})
                 return {
                     "tools": [],
-                    "total_catalog_size": len(self._catalog_entries),
+                    "total_catalog_size": len(self._catalog),
                     "available_categories": cats,
                     "hint": "No matching tools found. Try a different query or browse by category.",
                 }
 
-            return {"tools": results[:top_k], "total_catalog_size": len(self._catalog_entries)}
+            return {"tools": results[:top_k], "total_catalog_size": len(self._catalog)}
 
         meta_def = ToolDefinition(
             name="discover_tools",

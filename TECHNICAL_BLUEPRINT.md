@@ -6,6 +6,8 @@
 >
 > - **Hydrator/Executor Split (2026-03-08)**: Turn-local hydration and normalized runtime execution are now implemented in `tools/hydrator.py` and `tools/executor.py`, while `tools/registry.py` remains as a compatibility facade.
 >
+> - **Tool Bootstrap Update (2026-03-08)**: Startup-time tool imports, dynamic workflow reload, agent-link sync, and tool-doc RAG indexing now run through `tools/bootstrap.py`, keeping `main.py` as a thin entry adapter.
+>
 > - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, ranking, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
@@ -102,6 +104,7 @@ Request path examples:
   - Standalone Flask/SSE server that exposes the agent as HTTP (`/chat`, `/chat/stream`, webchat UI).
 - **`main.py`**
   - AI Studio project entrypoint (`handle_chat_message`), used for webchat / Extension deployments.
+  - Delegates tool startup initialization to `tools/bootstrap.py`.
 
 ---
 
