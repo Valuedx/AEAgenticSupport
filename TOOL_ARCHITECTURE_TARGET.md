@@ -1,6 +1,6 @@
 # Tool Architecture Target
 
-**Status:** Target architecture and migration plan; phase-one slice partially implemented  
+**Status:** Target architecture and migration plan; core catalog, ranking, hydrator, and executor slices implemented  
 **Date:** 2026-03-07
 
 Implemented in the current codebase:
@@ -11,6 +11,7 @@ Implemented in the current codebase:
 - The orchestrator now uses a turn-local hydrated tool set for the main LLM investigation loop.
 - Tool discovery and turn-local hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, and direct-callability signals.
 - The ranking step now also folds in observed success/failure history from the existing tool interaction log, weighted toward recent events and scoped to the current agent when matching feedback exists.
+- Hydration and runtime execution are now implemented in dedicated modules: `tools/hydrator.py` and `tools/executor.py`.
 - The existing `ToolRegistry` API remains in place as a compatibility facade.
 
 ## 1. Why This Refactor Exists

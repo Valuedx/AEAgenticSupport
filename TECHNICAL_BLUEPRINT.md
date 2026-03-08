@@ -4,6 +4,8 @@
 >
 > - **Tool Ranking Update (2026-03-07)**: `discover_tools` and turn-local tool hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, direct-callability, and observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is used when available.
 >
+> - **Hydrator/Executor Split (2026-03-08)**: Turn-local hydration and normalized runtime execution are now implemented in `tools/hydrator.py` and `tools/executor.py`, while `tools/registry.py` remains as a compatibility facade.
+>
 > - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, ranking, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:

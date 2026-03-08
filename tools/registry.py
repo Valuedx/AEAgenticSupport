@@ -15,89 +15,14 @@ from tools.ae_dynamic_tools import (
 from tools.automationedge_client import get_automationedge_client
 from tools.base import ToolDefinition, ToolResult
 from tools.catalog import ToolCatalogEntry
+from tools.executor import ToolExecutor
+from tools.hydrator import ToolHydrator, TurnToolSet
 from tools.ranker import ToolRanker
 
 logger = logging.getLogger("ops_agent.tools.registry")
 audit = logging.getLogger("ops_agent.audit")
 
 MAX_TOOLS_FOR_FULL_CATALOG = 30
-
-
-class TurnToolSet:
-    """Turn-local hydrated tool set for the orchestrator loop."""
-
-    def __init__(
-        self,
-        registry: "ToolRegistry",
-        tool_names: list[str],
-        *,
-        feedback_agent_id: str = "",
-    ):
-        self._registry = registry
-        self._feedback_agent_id = str(feedback_agent_id or "").strip()
-        self._tool_names: list[str] = []
-        self._definitions: dict[str, ToolDefinition] = {}
-        self._handlers: dict[str, Callable] = {}
-
-        seen: set[str] = set()
-        for name in tool_names:
-            clean = str(name or "").removeprefix("tool-")
-            if clean and clean not in seen and clean in registry._catalog_entries:
-                self._tool_names.append(clean)
-                seen.add(clean)
-
-    def list_tool_names(self) -> list[str]:
-        return list(self._tool_names)
-
-    def get_tool(self, name: str) -> Optional[ToolDefinition]:
-        clean = str(name or "").removeprefix("tool-")
-        if clean not in self._tool_names:
-            return None
-        if clean not in self._definitions:
-            entry = self._registry._catalog_entries.get(clean)
-            if not entry:
-                return None
-            self._definitions[clean] = entry.to_tool_definition()
-        return self._definitions.get(clean)
-
-    def _get_handler(self, name: str) -> Optional[Callable]:
-        clean = str(name or "").removeprefix("tool-")
-        if clean not in self._tool_names:
-            return None
-        if clean in self._handlers:
-            return self._handlers[clean]
-        if clean in self._registry._handlers:
-            self._handlers[clean] = self._registry._handlers[clean]
-            return self._handlers[clean]
-        factory = self._registry._handler_factories.get(clean)
-        if factory:
-            self._handlers[clean] = factory()
-        return self._handlers.get(clean)
-
-    def execute(self, tool_name: str, **kwargs) -> ToolResult:
-        handler = self._get_handler(tool_name)
-        if not handler:
-            return ToolResult(
-                success=False,
-                error=f"Unknown tool: {tool_name}",
-                tool_name=tool_name,
-            )
-        if (
-            str(tool_name or "").removeprefix("tool-") == "discover_tools"
-            and self._feedback_agent_id
-            and "_agent_id" not in kwargs
-        ):
-            kwargs = dict(kwargs)
-            kwargs["_agent_id"] = self._feedback_agent_id
-        return self._registry._execute_with_handler(tool_name, handler, kwargs)
-
-    def to_vertex_tools(self) -> list[dict]:
-        declarations = []
-        for name in self._tool_names:
-            tool_def = self.get_tool(name)
-            if tool_def:
-                declarations.append(tool_def.to_llm_schema())
-        return [{"function_declarations": declarations}]
 
 
 class ToolRegistry:
@@ -109,6 +34,19 @@ class ToolRegistry:
         self._handlers: dict[str, Callable] = {}
         self._handler_factories: dict[str, Callable[[], Callable]] = {}
         self._ranker = ToolRanker()
+        self._executor = ToolExecutor(
+            app_logger=logger,
+            audit_logger=audit,
+            interaction_logger=self._log_interaction,
+        )
+        self._hydrator = ToolHydrator(
+            catalog_entries=self._catalog_entries,
+            tools_cache=self._tools,
+            handlers_cache=self._handlers,
+            handler_factories=self._handler_factories,
+            executor=self._executor,
+            is_llm_callable=self._is_llm_callable_entry,
+        )
         self._meta_registered = False
         self._dynamic_tool_names: set[str] = set()
         self._dynamic_mappings: dict[str, dict] = {}
@@ -162,17 +100,9 @@ class ToolRegistry:
         return entry.hydration_mode != "execute_via_generic_runner"
 
     def _hydrate_tool(self, name: str) -> Optional[ToolDefinition]:
-        if name in self._tools:
-            return self._tools[name]
-        entry = self._catalog_entries.get(name)
-        if not entry:
-            return None
-        definition = entry.to_tool_definition()
-        self._tools[name] = definition
-        factory = self._handler_factories.get(name)
-        if factory:
-            self._handlers[name] = factory()
-        logger.debug("Hydrated tool: %s", name)
+        definition = self._hydrator.hydrate_tool(name)
+        if definition:
+            logger.debug("Hydrated tool: %s", name)
         return definition
 
     def unregister(self, name: str):
@@ -196,9 +126,7 @@ class ToolRegistry:
         return entry.to_tool_definition() if entry else None
 
     def get_handler(self, name: str) -> Optional[Callable]:
-        if name not in self._handlers and name in self._catalog_entries:
-            self._hydrate_tool(name)
-        return self._handlers.get(name)
+        return self._hydrator.get_handler(name, persist=True)
 
     def list_tools(self) -> list[str]:
         return list(self._catalog_entries.keys())
@@ -212,51 +140,7 @@ class ToolRegistry:
         handler: Callable,
         kwargs: dict,
     ) -> ToolResult:
-        logged_kwargs = {
-            key: value
-            for key, value in kwargs.items()
-            if not str(key).startswith("_")
-        }
-        audit.info("TOOL_CALL tool=%s params=%s", tool_name, logged_kwargs)
-        try:
-            result = handler(**kwargs)
-
-            if isinstance(result, ToolResult):
-                if result.tool_name == "":
-                    result.tool_name = tool_name
-                if result.success:
-                    audit.info("TOOL_OK tool=%s", tool_name)
-                else:
-                    audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, result.error)
-                self._log_interaction(tool_name, logged_kwargs, result.success, result.error)
-                return result
-
-            if isinstance(result, dict) and isinstance(result.get("success"), bool):
-                if result["success"]:
-                    audit.info("TOOL_OK tool=%s", tool_name)
-                    self._log_interaction(tool_name, logged_kwargs, True, "")
-                    return ToolResult(success=True, data=result, tool_name=tool_name)
-                error = str(
-                    result.get("error")
-                    or f"Tool '{tool_name}' reported unsuccessful execution."
-                )
-                audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, error)
-                self._log_interaction(tool_name, logged_kwargs, False, error)
-                return ToolResult(
-                    success=False,
-                    data=result,
-                    error=error,
-                    tool_name=tool_name,
-                )
-
-            audit.info("TOOL_OK tool=%s", tool_name)
-            self._log_interaction(tool_name, logged_kwargs, True, "")
-            return ToolResult(success=True, data=result, tool_name=tool_name)
-        except Exception as exc:
-            logger.error("Tool %s failed: %s", tool_name, exc, exc_info=True)
-            audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, exc)
-            self._log_interaction(tool_name, logged_kwargs, False, str(exc))
-            return ToolResult(success=False, error=str(exc), tool_name=tool_name)
+        return self._executor.execute(tool_name, handler, kwargs)
 
     def execute(self, tool_name: str, **kwargs) -> ToolResult:
         handler = self.get_handler(tool_name)
@@ -266,7 +150,7 @@ class ToolRegistry:
                 error=f"Unknown tool: {tool_name}",
                 tool_name=tool_name,
             )
-        return self._execute_with_handler(tool_name, handler, kwargs)
+        return self._executor.execute(tool_name, handler, kwargs)
 
     def _log_interaction(self, tool_name: str, params: dict, success: bool, error: str):
         try:
@@ -505,31 +389,12 @@ class ToolRegistry:
         feedback_agent_id: str = "",
     ) -> TurnToolSet:
         self._ensure_meta_tools()
-        selected: list[str] = []
-        seen: set[str] = set()
-
-        def _maybe_add(name: str):
-            clean = str(name or "").removeprefix("tool-")
-            if not clean or clean in seen:
-                return
-            entry = self._catalog_entries.get(clean)
-            if not entry:
-                return
-            if not self._is_llm_callable_entry(entry):
-                return
-            tool_def = entry.definition
-            if allowed_categories and tool_def.category not in allowed_categories:
-                return
-            selected.append(clean)
-            seen.add(clean)
-
-        for name in tool_names:
-            _maybe_add(name)
-
-        if include_meta:
-            _maybe_add("discover_tools")
-
-        return TurnToolSet(self, selected, feedback_agent_id=feedback_agent_id)
+        return self._hydrator.build_turn_toolset(
+            tool_names,
+            allowed_categories=allowed_categories,
+            include_meta=include_meta,
+            feedback_agent_id=feedback_agent_id,
+        )
 
     def build_turn_toolset_filtered(
         self,

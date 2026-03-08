@@ -301,6 +301,69 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(result.data.get("value"), "x")
         self.assertNotIn("lazy_turn_tool", registry._handlers)
 
+    def test_tool_executor_filters_internal_params_from_logs(self):
+        from tools.executor import ToolExecutor
+
+        events = []
+        executor = ToolExecutor(
+            interaction_logger=lambda tool, params, success, error: events.append(
+                {
+                    "tool": tool,
+                    "params": params,
+                    "success": success,
+                    "error": error,
+                }
+            )
+        )
+
+        result = executor.execute(
+            "sample_tool",
+            lambda **kwargs: {"success": True, "seen": kwargs.get("_hidden", "")},
+            {"visible": "yes", "_hidden": "secret"},
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(events[0]["params"], {"visible": "yes"})
+
+    def test_tool_hydrator_executes_turn_local_tool_without_persisting_handler(self):
+        from tools.catalog import ToolCatalogEntry
+        from tools.executor import ToolExecutor
+        from tools.hydrator import ToolHydrator
+
+        catalog_entries = {
+            "lazy_turn_tool": ToolCatalogEntry.from_definition(
+                ToolDefinition(
+                    name="lazy_turn_tool",
+                    description="Lazy turn-local tool",
+                    category="test",
+                    tier="read_only",
+                    parameters={"value": {"type": "string", "description": "Value"}},
+                ),
+                hydration_mode="lazy",
+            )
+        }
+        tools_cache = {}
+        handlers_cache = {}
+        hydrator = ToolHydrator(
+            catalog_entries=catalog_entries,
+            tools_cache=tools_cache,
+            handlers_cache=handlers_cache,
+            handler_factories={
+                "lazy_turn_tool": lambda: (
+                    lambda **kwargs: {"success": True, "value": kwargs.get("value")}
+                )
+            },
+            executor=ToolExecutor(),
+            is_llm_callable=lambda entry: entry.hydration_mode != "execute_via_generic_runner",
+        )
+
+        toolset = hydrator.build_turn_toolset(["lazy_turn_tool"], include_meta=False)
+        result = toolset.execute("lazy_turn_tool", value="x")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data.get("value"), "x")
+        self.assertNotIn("lazy_turn_tool", handlers_cache)
+
     def test_execute_handles_embedded_failure_payload(self):
         from tools.registry import ToolRegistry
 
