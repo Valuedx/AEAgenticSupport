@@ -13,6 +13,7 @@ except ImportError:
 
 from config.settings import CONFIG
 from config.metrics import metrics_collector, TokenUsage
+from state.app_config import get_runtime_value
 
 logger = logging.getLogger("ops_agent.llm")
 
@@ -21,8 +22,14 @@ class VertexAIClient:
 
     def __init__(self):
         self.project = CONFIG["GOOGLE_CLOUD_PROJECT"]
-        self.location = CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1")
-        self.model_name = CONFIG.get("VERTEX_AI_MODEL", "gemini-2.0-flash")
+        self.location = get_runtime_value(
+            "GOOGLE_CLOUD_LOCATION",
+            CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        )
+        self.model_name = get_runtime_value(
+            "VERTEX_AI_MODEL",
+            CONFIG.get("VERTEX_AI_MODEL", "gemini-2.0-flash"),
+        )
         
         # Initialize the GenAI client
         self.client = genai.Client(
@@ -130,3 +137,9 @@ class VertexAIClient:
 
 
 llm_client = VertexAIClient()
+
+
+def reset_llm_client() -> VertexAIClient:
+    global llm_client
+    llm_client = VertexAIClient()
+    return llm_client

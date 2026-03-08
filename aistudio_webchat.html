@@ -265,20 +265,15 @@
   <div class="header">
     <div class="dot" id="statusDot" style="background:#ffc107"></div>
     <div>
-      <h1>AI Studio â€” Agentic Ops Support</h1>
+      <h1 id="chatTitle">AI Studio Agentic Ops Support</h1>
       <div class="info" id="convInfo">Connecting to Cognibot via WebSocket...</div>
     </div>
     <span class="status" id="statusText">Connecting...</span>
-    <a class="navlink" href="/tools">Tools & Agents</a>
+    <a class="navlink" href="/admin">Control Center</a>
   </div>
   <div class="chat-area" id="chatArea"></div>
   <div class="typing" id="typing"><span></span><span></span><span></span></div>
-  <div class="quick-actions" id="quickActions">
-    <button onclick="sendQuick('Policy_Renewal_Batch workflow is failing')">Policy_Renewal_Batch failing</button>
-    <button onclick="sendQuick('Check system health')">System health</button>
-    <button onclick="sendQuick('What workflows are having issues?')">Workflow issues</button>
-    <button onclick="sendQuick('status')">My open cases</button>
-  </div>
+  <div class="quick-actions" id="quickActions"></div>
   <div class="input-area">
     <select id="roleSelect" title="Audience role">
       <option value="technical" selected>Technical</option>
@@ -289,12 +284,26 @@
   </div>
 
   <script>
-    const COGNIBOT_URL = 'http://localhost:3978';
-    const WS_URL = 'ws://localhost:3978/v3/directline';
-    const CLIENT_SECRET = 'secret.secret.secret';
-
+    const DEFAULT_UI = {
+      assistantName: 'AutomationEdge Ops Agent',
+      technicalRoleLabel: 'Technical',
+      businessRoleLabel: 'Business',
+      inputPlaceholder: 'Describe your issue...',
+      technicalWelcomeMessage: 'Connected to AI Studio. Share the workflow, symptom, or request you want investigated.',
+      businessWelcomeMessage: 'Connected to AI Studio. Tell me what business issue is blocked and I will guide you in plain language.',
+      quickActions: [
+        'Policy_Renewal_Batch workflow is failing',
+        'Check system health',
+        'What workflows are having issues?',
+        'status'
+      ],
+      aistudioConfigured: true
+    };
+    let chatUi = { ...DEFAULT_UI };
     let conversationId = null;
+    let streamUrl = '';
     let ws = null;
+    let reconnectTimer = null;
 
     const chatArea = document.getElementById('chatArea');
     const msgInput = document.getElementById('msgInput');
@@ -304,6 +313,8 @@
     const statusDot = document.getElementById('statusDot');
     const statusTxt = document.getElementById('statusText');
     const convInfo = document.getElementById('convInfo');
+    const titleEl = document.getElementById('chatTitle');
+    const quickActionsEl = document.getElementById('quickActions');
 
     function addMsg(text, cls, label) {
       const d = document.createElement('div');
@@ -321,6 +332,53 @@
       chatArea.scrollTop = chatArea.scrollHeight;
     }
 
+    function renderQuickActions() {
+      quickActionsEl.innerHTML = '';
+      (chatUi.quickActions || []).forEach((text) => {
+        const btn = document.createElement('button');
+        btn.textContent = text.length > 28 ? text.slice(0, 28) + '...' : text;
+        btn.onclick = () => sendQuick(text);
+        quickActionsEl.appendChild(btn);
+      });
+    }
+
+    function applyChatUi() {
+      titleEl.textContent = chatUi.assistantName || DEFAULT_UI.assistantName;
+      msgInput.placeholder = chatUi.inputPlaceholder || DEFAULT_UI.inputPlaceholder;
+      roleSel.innerHTML = '';
+      [
+        ['technical', chatUi.technicalRoleLabel || DEFAULT_UI.technicalRoleLabel],
+        ['business', chatUi.businessRoleLabel || DEFAULT_UI.businessRoleLabel]
+      ].forEach(([value, label], index) => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = label;
+        if (index === 0) opt.selected = true;
+        roleSel.appendChild(opt);
+      });
+      renderQuickActions();
+    }
+
+    async function loadChatUi() {
+      try {
+        const r = await fetch('/api/ui-config/chat', { signal: AbortSignal.timeout(4000) });
+        if (!r.ok) return;
+        const payload = await r.json();
+        chatUi = { ...DEFAULT_UI, ...(payload || {}) };
+      } catch (e) { }
+      applyChatUi();
+    }
+
+    function assistantLabel() {
+      return chatUi.assistantName || DEFAULT_UI.assistantName;
+    }
+
+    function currentWelcome() {
+      return roleSel.value === 'business'
+        ? (chatUi.businessWelcomeMessage || DEFAULT_UI.businessWelcomeMessage)
+        : (chatUi.technicalWelcomeMessage || DEFAULT_UI.technicalWelcomeMessage);
+    }
+
     function setStatus(state) {
       const colors = { ok: '#4caf50', warn: '#ffc107', err: '#f44336' };
       const labels = { ok: 'Connected via WebSocket', warn: 'Connecting...', err: 'Disconnected' };
@@ -332,36 +390,50 @@
     }
 
     async function startConversation() {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       try {
-        const r = await fetch(COGNIBOT_URL + '/v3/directline/conversations', {
+        setStatus('warn');
+        const r = await fetch('/api/aistudio/conversations', {
           method: 'POST',
-          headers: {
-            'Authorization': 'Bearer ' + CLIENT_SECRET,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ user: { id: 'webchat_user', name: 'Webchat User' } }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: 'webchat_user', user_name: 'Webchat User' }),
         });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const data = await r.json();
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+        if (!data.conversationId) throw new Error('No conversation ID was returned.');
+        if (!data.webSocketUrl && !data.streamUrl) {
+          throw new Error('No WebSocket stream was returned by the server.');
+        }
         conversationId = data.conversationId;
+        streamUrl = data.webSocketUrl || data.streamUrl || '';
         convInfo.textContent = 'Conversation: ' + conversationId;
-        connectWebSocket();
+        connectWebSocket(streamUrl);
       } catch (e) {
         console.error('Failed to start conversation:', e);
         setStatus('err');
         addMsg('Cannot connect to Cognibot. Error: ' + e.message, 'error');
-        setTimeout(startConversation, 5000);
+        reconnectTimer = setTimeout(startConversation, 5000);
       }
     }
 
-    function connectWebSocket() {
-      const wsUrl = WS_URL + '/' + conversationId + '?secret=' + CLIENT_SECRET;
-      ws = new WebSocket(wsUrl);
+    function connectWebSocket(nextStreamUrl) {
+      if (!nextStreamUrl) {
+        startConversation();
+        return;
+      }
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+      ws = new WebSocket(nextStreamUrl);
 
       ws.onopen = () => {
         console.log('WebSocket connected');
         setStatus('ok');
-        addMsg('Connected to AI Studio. How can I help with your AutomationEdge workflows?', 'system');
+        addMsg(currentWelcome(), 'bot', assistantLabel());
       };
 
       ws.onmessage = (event) => {
@@ -371,7 +443,7 @@
 
           const showReply = (text) => {
             typingEl.style.display = 'none';
-            addMsg(text, 'bot', 'Ops Agent');
+            addMsg(text, 'bot', assistantLabel());
             sendBtn.disabled = false;
             msgInput.disabled = false;
             msgInput.focus();
@@ -398,7 +470,7 @@
           console.log('WS non-JSON:', raw);
           if (raw && typeof raw === 'string' && raw.length > 0) {
             typingEl.style.display = 'none';
-            addMsg(raw, 'bot', 'Ops Agent');
+            addMsg(raw, 'bot', assistantLabel());
             sendBtn.disabled = false;
             msgInput.disabled = false;
           }
@@ -409,7 +481,13 @@
         console.log('WebSocket closed:', event.code, event.reason);
         setStatus('err');
         addMsg('Connection lost. Reconnecting...', 'system');
-        setTimeout(connectWebSocket, 3000);
+        reconnectTimer = setTimeout(() => {
+          if (streamUrl) {
+            connectWebSocket(streamUrl);
+            return;
+          }
+          startConversation();
+        }, 3000);
       };
 
       ws.onerror = (error) => {
@@ -438,12 +516,9 @@
       };
 
       try {
-        const r = await fetch(COGNIBOT_URL + '/v3/directline/conversations/' + conversationId + '/activities', {
+        const r = await fetch('/api/aistudio/conversations/' + encodeURIComponent(conversationId) + '/activities', {
           method: 'POST',
-          headers: {
-            'Authorization': 'Bearer ' + CLIENT_SECRET,
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(activity),
         });
         if (!r.ok) {
@@ -464,7 +539,15 @@
 
     msgInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !sendBtn.disabled) sendMessage(); });
 
-    startConversation();
+    loadChatUi().finally(() => {
+      if (chatUi.aistudioConfigured === false) {
+        setStatus('err');
+        convInfo.textContent = 'AI Studio channel is not configured on this server.';
+        addMsg('AI Studio chat is not configured on this server yet. Ask an administrator to add the Cognibot connection profile and secret.', 'error');
+        return;
+      }
+      startConversation();
+    });
   </script>
 </body>
 

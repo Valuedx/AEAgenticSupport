@@ -8,6 +8,8 @@
 >
 > - **Tool Bootstrap Update (2026-03-08)**: Startup-time tool imports, dynamic workflow reload, agent-link sync, and tool-doc RAG indexing now run through `tools/bootstrap.py`, keeping `main.py` as a thin entry adapter.
 >
+> - **Control Center Update (2026-03-08)**: Added a React-based admin workspace plus persisted stores for application settings, tool overrides, scheduler tasks, documentation catalog entries, and conversation-history review. The standalone server now exposes `/admin`, `/tools`, `/docs`, `/api/ui-config/docs`, `/api/docs/catalog`, and admin-friendly history APIs.
+>
 > - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, ranking, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
@@ -31,8 +33,8 @@
 >
 ## AutomationEdge Agentic Support — Technical Blueprint
 
-**Version:** 1.1  
-**Last updated:** 2026-03-07
+**Version:** 1.2  
+**Last updated:** 2026-03-08
 
 ---
 
@@ -47,10 +49,12 @@
 - **LLM + RAG layer**: Gemini (Vertex AI) plus PostgreSQL/pgvector.
 - **Agent orchestration**: Supervisor (Orchestrator) + Specialists (Diagnostic, Remediation) + AgentRouter + Gateway + State.
 - **Tool layer**: Typed tools over AE REST APIs and DB.
+- **Control plane**: React control center plus JSON-backed configuration stores for UI-managed runtime metadata.
 - **Chat interfaces**:
   - AI Studio web chat / Extension.
   - MS Teams via Azure Bot / Cognibot.
   - Standalone webchat via `agent_server.py`.
+  - Public documentation library via `/docs`.
 
 Request path examples:
 - **AI Studio webchat → `main.py` → `MessageGateway` → `AgentRouter` → `Supervisor` → (Delegation) → `Specialist` → tools + Hybrid RAG → response**
@@ -90,9 +94,15 @@ Request path examples:
 - **`state/`**
   - `conversation_state.py`: Per-session state (messages, findings, tool logs, phase, persona).
   - `issue_tracker.py`: Multi-issue registry with recurrence and cascade detection (PostgreSQL-backed).
+  - `app_config.py`: Persisted control-center sections for user experience, rules, approvals, monitoring, and integrations.
+  - `tool_overrides.py`: Persisted admin overrides for tool metadata and visibility.
+  - `scheduler_store.py`: Persisted custom scheduler task catalog.
+  - `docs_catalog.py`: Persisted public documentation library manifest.
 - **`templates/`**
   - `rca_templates.py`: Prompt building helpers and RCA structures.
   - `adaptive_cards.py`: **[NEW]** JSON schema generators for MS Teams rich notifications.
+- **`static/`**
+  - `admin_app.js` + `admin_app.css`: React control-center application.
 - **`custom/` (AI Studio Extension layer)**
   - `custom_hooks.py`: Async Cognibot hooks (`api_messages_hook`) with locks, dedupe, and routing.
   - `models.py` + `migrations/`: Django models for cases, approvals, processed messages, links.
@@ -101,7 +111,9 @@ Request path examples:
 - **`custom_cognibot/`**
   - Thin-proxy hooks used for local Cognibot → standalone agent server integration.
 - **`agent_server.py`**
-  - Standalone Flask/SSE server that exposes the agent as HTTP (`/chat`, `/chat/stream`, webchat UI).
+  - Standalone Flask/SSE server that exposes the agent as HTTP (`/chat`, `/chat/stream`, webchat UI, admin UI, docs UI).
+  - Hosts admin configuration, tool override, scheduler, document catalog, and conversation-history APIs.
+  - Proxies AI Studio Direct Line requests server-side so browser clients do not need the raw secret.
 - **`main.py`**
   - AI Studio project entrypoint (`handle_chat_message`), used for webchat / Extension deployments.
   - Delegates tool startup initialization to `tools/bootstrap.py`.
@@ -121,6 +133,12 @@ Request path examples:
   - Purpose: Which issue is currently active per conversation.  
   - Key fields: `conversation_id`, `active_issue_id`, `updated_at`.
 - Conversation state tables (managed by code in `state/`) are embedded into the above, so that conversation/issue context survives process restarts and deployments.
+
+**JSON-backed control-plane stores:**
+- `app_control_center.json`: High-level runtime settings that used to be hardcoded in UI or helper modules.
+- `tool_overrides.json`: Business-owned tool labels, visibility, and routing overrides.
+- `scheduler_catalog.json`: Custom monitoring and automation tasks.
+- `docs_catalog.json`: Public documentation library entries.
 
 **Django (AI Studio Extension DB):**
 - `ProcessedMessage`: Idempotency log keyed by `(thread_id, teams_message_id)`.
@@ -226,9 +244,33 @@ For each routed message:
   - `/chat`: JSON request → synchronous response.
   - `/chat/stream`: SSE events for progress + final answer.
   - `/`: Serves `webchat.html`.
+  - `/admin` and `/tools`: Serve the React control center.
+  - `/docs`: Serves the public documentation library.
 - Thin-proxy Cognibot mode:
   - `custom_cognibot/` hooks forward Cognibot traffic to `/chat`.
   - Used for local testing of full Cognibot → agent pipeline.
+
+### 5.4 Operations Control Center
+
+The control center is the application's admin and business-operations workspace.
+
+Primary responsibilities:
+
+- manage public chat wording and quick actions
+- manage monitoring and approval defaults
+- manage agent metadata and tool overrides
+- manage custom scheduler tasks
+- manage SOPs and public documentation entries
+- review conversation history, summaries, exports, and human handoff flags
+
+Key APIs:
+
+- `/api/admin/bootstrap`
+- `/api/admin/config/<section>`
+- `/api/tools/<tool_name>/config`
+- `/api/scheduler/tasks`
+- `/api/docs/catalog`
+- `/api/history/conversations`
 
 ---
 

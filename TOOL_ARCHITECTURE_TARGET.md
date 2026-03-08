@@ -14,6 +14,7 @@ Implemented in the current codebase:
 - Hydration and runtime execution are now implemented in dedicated modules: `tools/hydrator.py` and `tools/executor.py`.
 - Startup tool import, dynamic workflow reload, agent-link sync, and RAG indexing now run through `tools/bootstrap.py` instead of being hard-wired inside `main.py`.
 - The existing `ToolRegistry` API remains in place as a compatibility facade.
+- Admin-managed tool overrides now sit on top of the catalog so business or operations owners can change labels, visibility, always-available status, and allowed-agent routing through the control center without editing Python modules.
 
 ## 1. Why This Refactor Exists
 

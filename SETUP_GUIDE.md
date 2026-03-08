@@ -6,6 +6,13 @@
 >   - **Rich Notifications**: Added `Adaptive Cards` support for MS Teams, enabling interactive high-fidelity approval and escalation alerts.
 > - Validation status: `test_enhancements.py` and `test_multi_agent.py` passed.
 >
+> - **Control Center Update (2026-03-08)**:
+>   - Added a React-based admin workspace at `/admin` and `/tools`.
+>   - Added persisted control-center stores for application settings, tool overrides, scheduler tasks, and documentation catalog entries.
+>   - Public docs now load from `/docs` using `/api/ui-config/docs` and `/api/docs/content/<doc_id>` instead of hardcoded page constants.
+>   - AI Studio webchat now uses server-side proxy routes for Direct Line conversation creation and activity posting, keeping the Direct Line secret out of the browser.
+>   - Conversation history search, summary refresh, export preview, and human handoff actions are now exposed in the admin workspace.
+>
 > **Documentation Update (2026-03-04)**  
 >
 > **Documentation Update (2026-03-02)**  
@@ -38,6 +45,7 @@ Complete step-by-step guide to deploy the Agentic Support Assistant on **Automat
 11. [Architecture Reference](#11-architecture-reference)
 12. [Cognibot Integration Architecture (Deep Dive)](#12-cognibot-integration-architecture-deep-dive)
 13. [MCP Server and P0/P1 Tools Integration](#13-mcp-server-and-p0p1-tools-integration)
+14. [Operations Control Center](#14-operations-control-center)
 
 ---
 
@@ -298,6 +306,8 @@ EMBEDDING_MODEL=text-embedding-004
 # Tool Gateway
 TOOL_BASE_URL=https://your-ae-server:8443/api/v1
 TOOL_AUTH_TOKEN=your-ae-service-account-api-key
+COGNIBOT_BASE_URL=http://localhost:3978
+# COGNIBOT_DIRECTLINE_SECRET stays server-side only; do not expose it in browser code
 
 # Agent Behaviour
 MAX_AGENT_ITERATIONS=15
@@ -318,6 +328,12 @@ MONITORED_WORKFLOWS=inventory_sync,claims_batch
 RBAC_ENABLED=true
 AGENT_ADMIN_TOKEN=your-random-secret
 # (Roles and ranks are defined in config/settings.py)
+
+# Control center persisted stores
+APP_CONTROL_CENTER_PATH=state/app_control_center.json
+TOOL_OVERRIDE_PATH=state/tool_overrides.json
+SCHEDULER_CATALOG_PATH=state/scheduler_catalog.json
+DOCS_CATALOG_PATH=state/docs_catalog.json
 ```
 
 ### 3.2 Set environment variables on the server
@@ -1395,5 +1411,60 @@ Mutating tools require `reason` and support `dry_run`; they use the same safety 
 
 ---
 
-**Document version:** 3.1
-**Last updated:** 2026-03-07
+## 14. Operations Control Center
+
+The application now includes a React-based admin workspace that moves a large portion of runtime configuration out of hardcoded HTML and JavaScript.
+
+Primary entry points:
+
+- `/admin`
+- `/tools`
+- `/docs`
+
+### 14.1 What admins can manage through UI
+
+- public chat wording and quick actions
+- documentation page title and subtitle
+- application guardrails and monitoring defaults
+- non-secret integration settings
+- agent catalog metadata
+- tool overrides
+- custom scheduler tasks
+- SOP content
+- public documentation catalog
+- conversation history review and export
+
+### 14.2 Persisted stores
+
+The control center writes to JSON-backed stores under `state/`:
+
+- `state/app_config.py`
+- `state/tool_overrides.py`
+- `state/scheduler_store.py`
+- `state/docs_catalog.py`
+- `state/agent_catalog.py`
+
+These file paths are configurable through the environment variables listed in Section 3.
+
+### 14.3 AI Studio webchat secret handling
+
+The AI Studio webchat page now starts conversations through server routes:
+
+- `POST /api/aistudio/conversations`
+- `POST /api/aistudio/conversations/<conversation_id>/activities`
+
+Keep `COGNIBOT_DIRECTLINE_SECRET` only on the server. The browser should never contain the raw Direct Line secret.
+
+### 14.4 Public documentation library
+
+The documentation page at `/docs` now loads its catalog from:
+
+- `GET /api/ui-config/docs`
+- `GET /api/docs/content/<doc_id>`
+
+Use the `Knowledge` tab in the control center to manage which markdown files appear there.
+
+---
+
+**Document version:** 3.2
+**Last updated:** 2026-03-08

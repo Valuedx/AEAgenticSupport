@@ -21,6 +21,7 @@ import logging
 import os
 import queue
 import re
+import requests
 import sys
 import threading
 from datetime import datetime, timezone
@@ -34,6 +35,13 @@ from flask_cors import CORS
 from config.settings import CONFIG
 from main import handle_chat_message
 from state.agent_catalog import get_agent_catalog
+from state.app_config import (
+    get_app_config_store,
+    get_public_chat_config,
+    get_public_docs_config,
+    get_runtime_value,
+)
+from state.docs_catalog import get_docs_catalog_store
 from tools.registry import tool_registry
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
@@ -71,6 +79,105 @@ def _bool_arg(value, default: bool = False) -> bool:
 def _slugify(value: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
     return text or "agent"
+
+
+def _refresh_runtime_section(section_name: str) -> None:
+    if section_name == "integrations":
+        from config.llm_client import reset_llm_client
+        from rag.engine import reset_rag_engine
+        from tools.automationedge_client import reset_automationedge_client
+
+        reset_automationedge_client()
+        reset_llm_client()
+        reset_rag_engine()
+        return
+
+    if section_name == "monitoring":
+        from agents.scheduler import get_scheduler, setup_default_tasks
+        from state.session_manager import register_cleanup_task
+
+        scheduler = get_scheduler()
+        was_running = scheduler.is_running
+        if was_running:
+            scheduler.stop()
+        setup_default_tasks(scheduler)
+        register_cleanup_task()
+        if was_running:
+            scheduler.start()
+
+
+def _admin_bootstrap_payload() -> dict:
+    store = get_app_config_store()
+    payload = {
+        "schema": store.get_schema(),
+        "config": store.get_all_sections(),
+        "links": {
+            "legacyTools": "/tools/legacy",
+            "webchat": "/webchat",
+            "aistudioWebchat": "/aistudio-webchat",
+            "documentation": "/docs",
+        },
+        "overview": {
+            "toolCount": len(tool_registry.list_tools()),
+            "agentCatalogCount": len(get_agent_catalog().list_agents()),
+        },
+    }
+    try:
+        from agents.agent_registry import get_agent_registry
+
+        payload["overview"]["specialistAgentCount"] = len(
+            get_agent_registry().list_agent_info(active_only=False)
+        )
+    except Exception as exc:
+        log.warning("Bootstrap specialist agent count unavailable: %s", exc)
+        payload["overview"]["specialistAgentCount"] = None
+    return payload
+
+
+def _find_tool_inventory_item(tool_name: str) -> dict | None:
+    catalog = get_agent_catalog()
+    catalog.ensure_default_agent_links(tool_registry.list_tools())
+    inventory = tool_registry.get_tool_inventory(catalog.get_agent_tool_map())
+    clean = str(tool_name or "").strip()
+    return next((item for item in inventory if item.get("toolName") == clean), None)
+
+
+def _cognibot_secret() -> str:
+    return str(CONFIG.get("COGNIBOT_DIRECTLINE_SECRET", "")).strip()
+
+
+def _cognibot_base_url() -> str:
+    return str(
+        get_runtime_value("COGNIBOT_BASE_URL", CONFIG.get("COGNIBOT_BASE_URL", ""))
+    ).strip().rstrip("/")
+
+
+def _cognibot_request(method: str, path: str, payload: dict | None = None) -> tuple[dict, int]:
+    base_url = _cognibot_base_url()
+    secret = _cognibot_secret()
+    if not base_url or not secret:
+        raise RuntimeError(
+            "AI Studio chat is not configured on this server. Set COGNIBOT_BASE_URL "
+            "and COGNIBOT_DIRECTLINE_SECRET."
+        )
+
+    response = requests.request(
+        method=method.upper(),
+        url=f"{base_url}/{path.lstrip('/')}",
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=20,
+    )
+    try:
+        data = response.json()
+    except ValueError:
+        data = {"message": response.text.strip()}
+    if not isinstance(data, dict):
+        data = {"data": data}
+    return data, response.status_code
 
 
 @app.route("/chat", methods=["POST"])
@@ -154,6 +261,163 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/ui-config/chat", methods=["GET"])
+def api_ui_chat_config():
+    return jsonify(get_public_chat_config())
+
+
+@app.route("/api/ui-config/docs", methods=["GET"])
+def api_ui_docs_config():
+    docs = get_docs_catalog_store().list_documents(include_inactive=False)
+    config = get_public_docs_config()
+    return jsonify(
+        {
+            **config,
+            "documents": docs,
+            "defaultDocumentId": docs[0]["id"] if docs else "",
+        }
+    )
+
+
+@app.route("/api/aistudio/conversations", methods=["POST"])
+def api_aistudio_start_conversation():
+    payload = request.get_json(force=True, silent=True) or {}
+    user_blob = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    user_id = str(
+        payload.get("user_id") or user_blob.get("id") or "webchat_user"
+    ).strip() or "webchat_user"
+    user_name = (
+        str(payload.get("user_name") or user_blob.get("name") or "Webchat User").strip()
+        or "Webchat User"
+    )
+    try:
+        data, status_code = _cognibot_request(
+            "POST",
+            "/v3/directline/conversations",
+            {"user": {"id": user_id, "name": user_name}},
+        )
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except requests.RequestException as exc:
+        log.error("Failed to start AI Studio conversation: %s", exc, exc_info=True)
+        return jsonify({"error": f"Unable to reach Cognibot: {exc}"}), 502
+
+    if status_code >= 400:
+        message = data.get("error") or data.get("message") or f"HTTP {status_code}"
+        return jsonify({"error": message, "details": data}), status_code
+
+    conversation_id = str(data.get("conversationId", "")).strip()
+    stream_url = (
+        str(data.get("streamUrl") or data.get("webSocketUrl") or "").strip()
+    )
+    if not conversation_id:
+        return jsonify({"error": "Cognibot did not return a conversation ID."}), 502
+
+    return jsonify(
+        {
+            "conversationId": conversation_id,
+            "streamUrl": stream_url,
+            "webSocketUrl": stream_url,
+            "expiresIn": data.get("expires_in") or data.get("expiresIn"),
+        }
+    )
+
+
+@app.route("/api/aistudio/conversations/<conversation_id>/activities", methods=["POST"])
+def api_aistudio_send_activity(conversation_id: str):
+    payload = request.get_json(force=True, silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "payload must be an object"}), 400
+    try:
+        data, status_code = _cognibot_request(
+            "POST",
+            f"/v3/directline/conversations/{conversation_id}/activities",
+            payload,
+        )
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except requests.RequestException as exc:
+        log.error("Failed to send AI Studio activity: %s", exc, exc_info=True)
+        return jsonify({"error": f"Unable to reach Cognibot: {exc}"}), 502
+
+    if status_code >= 400:
+        message = data.get("error") or data.get("message") or f"HTTP {status_code}"
+        return jsonify({"error": message, "details": data}), status_code
+
+    return jsonify(data), status_code
+
+
+@app.route("/api/admin/bootstrap", methods=["GET"])
+def api_admin_bootstrap():
+    check = _admin_check()
+    if check:
+        return check
+    return jsonify(_admin_bootstrap_payload())
+
+
+@app.route("/api/admin/schema", methods=["GET"])
+def api_admin_schema():
+    check = _admin_check()
+    if check:
+        return check
+    return jsonify({"sections": get_app_config_store().get_schema()})
+
+
+@app.route("/api/admin/config", methods=["GET"])
+def api_admin_config_all():
+    check = _admin_check()
+    if check:
+        return check
+    return jsonify({"config": get_app_config_store().get_all_sections()})
+
+
+@app.route("/api/admin/config/<section>", methods=["GET", "PUT"])
+def api_admin_config_section(section: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    store = get_app_config_store()
+    if request.method == "GET":
+        try:
+            return jsonify({"section": section, "config": store.get_section(section)})
+        except KeyError:
+            return jsonify({"error": "section not found"}), 404
+
+    payload = request.get_json(force=True, silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "payload must be an object"}), 400
+    try:
+        saved = store.update_section(section, payload)
+        _refresh_runtime_section(section)
+        return jsonify({"saved": True, "section": section, "config": saved})
+    except KeyError:
+        return jsonify({"error": "section not found"}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        log.error("Failed to update config section %s: %s", section, exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/config/<section>/reset", methods=["POST"])
+def api_admin_config_reset(section: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    store = get_app_config_store()
+    try:
+        reset = store.reset_section(section)
+        _refresh_runtime_section(section)
+        return jsonify({"reset": True, "section": section, "config": reset})
+    except KeyError:
+        return jsonify({"error": "section not found"}), 404
+    except Exception as exc:
+        log.error("Failed to reset config section %s: %s", section, exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/webchat", methods=["GET"])
 @app.route("/", methods=["GET"])
 def webchat_page():
@@ -169,12 +433,30 @@ def aistudio_webchat_page():
         return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-@app.route("/tools", methods=["GET"])
-def tools_page():
+@app.route("/docs", methods=["GET"])
+def docs_page():
+    html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    with open(html_path, "r", encoding="utf-8") as handle:
+        return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/tools/legacy", methods=["GET"])
+def tools_page_legacy():
     check = _admin_check()
     if check:
         return check
     html_path = os.path.join(os.path.dirname(__file__), "agent_admin.html")
+    with open(html_path, "r", encoding="utf-8") as handle:
+        return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/admin", methods=["GET"])
+@app.route("/tools", methods=["GET"])
+def admin_page():
+    check = _admin_check()
+    if check:
+        return check
+    html_path = os.path.join(os.path.dirname(__file__), "admin_console.html")
     with open(html_path, "r", encoding="utf-8") as handle:
         return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
@@ -278,6 +560,59 @@ def api_tools_sync():
     )
     get_agent_catalog().ensure_default_agent_links(tool_registry.list_tools())
     return jsonify(summary)
+
+
+@app.route("/api/tools/<tool_name>/config", methods=["GET", "PUT"])
+def api_tool_config(tool_name: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    item = _find_tool_inventory_item(tool_name)
+    if not item:
+        return jsonify({"error": "tool not found"}), 404
+
+    if request.method == "GET":
+        return jsonify(
+            {
+                "tool": item,
+                "override": tool_registry.get_tool_override(tool_name),
+            }
+        )
+
+    payload = request.get_json(force=True, silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "payload must be an object"}), 400
+    try:
+        override = tool_registry.update_tool_override(tool_name, payload)
+        updated = _find_tool_inventory_item(tool_name)
+        return jsonify({"saved": True, "tool": updated, "override": override})
+    except KeyError:
+        return jsonify({"error": "tool not found"}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        log.error("Failed to update tool config %s: %s", tool_name, exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/tools/<tool_name>/config/reset", methods=["POST"])
+def api_tool_config_reset(tool_name: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    try:
+        tool_registry.reset_tool_override(tool_name)
+        updated = _find_tool_inventory_item(tool_name)
+        if not updated:
+            return jsonify({"error": "tool not found"}), 404
+        return jsonify({"reset": True, "tool": updated, "override": {}})
+    except KeyError:
+        return jsonify({"error": "tool not found"}), 404
+    except Exception as exc:
+        log.error("Failed to reset tool config %s: %s", tool_name, exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/tools/<tool_name>/test", methods=["POST"])
@@ -414,6 +749,99 @@ def api_sops_list():
         return jsonify({"count": len(items), "sops": items})
     except Exception as exc:
         log.error("Failed to list SOPs: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/docs/catalog", methods=["GET", "POST"])
+def api_docs_catalog():
+    check = _admin_check()
+    if check:
+        return check
+
+    store = get_docs_catalog_store()
+    if request.method == "GET":
+        return jsonify({"documents": store.list_documents(include_inactive=True)})
+
+    payload = request.get_json(force=True, silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "payload must be an object"}), 400
+    try:
+        document = store.upsert_document(payload)
+        return jsonify({"document": document})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        log.error("Failed to save document catalog entry: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/docs/catalog/<doc_id>", methods=["DELETE"])
+def api_docs_catalog_delete(doc_id: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    try:
+        removed = get_docs_catalog_store().delete_document(doc_id)
+        if not removed:
+            return jsonify({"error": "document not found"}), 404
+        return jsonify({"removed": True})
+    except Exception as exc:
+        log.error("Failed to delete document catalog entry %s: %s", doc_id, exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/docs/content/<doc_id>", methods=["GET"])
+def api_docs_content(doc_id: str):
+    try:
+        document = get_docs_catalog_store().read_document_content(doc_id)
+        return jsonify(document)
+    except KeyError:
+        return jsonify({"error": "document not found"}), 404
+    except FileNotFoundError:
+        return jsonify({"error": "document file not found"}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        log.error("Failed to load document content %s: %s", doc_id, exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/sops/<sop_id>", methods=["GET"])
+def api_sops_get(sop_id: str):
+    check = _admin_check()
+    if check:
+        return check
+
+    try:
+        from rag.engine import get_rag_engine
+
+        docs = get_rag_engine().list_collection("sops")
+        match = next((doc for doc in docs if doc.get("id") == sop_id), None)
+        if not match:
+            return jsonify({"error": "sop not found"}), 404
+
+        metadata = match.get("metadata") or {}
+        title = metadata.get("title") or match.get("id", "")
+        raw_content = str(match.get("content", ""))
+        prefixed_content = f"{title}\n\n"
+        editor_content = (
+            raw_content[len(prefixed_content) :]
+            if raw_content.startswith(prefixed_content)
+            else raw_content
+        )
+        return jsonify(
+            {
+                "id": match.get("id", ""),
+                "title": title,
+                "tags": metadata.get("tags", []),
+                "reference_id": metadata.get("reference_id", ""),
+                "created_at": metadata.get("created_at", ""),
+                "content": editor_content,
+            }
+        )
+    except Exception as exc:
+        log.error("Failed to load SOP %s: %s", sop_id, exc, exc_info=True)
         return jsonify({"error": str(exc)}), 500
 
 
@@ -567,6 +995,19 @@ def api_scheduler_status():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/scheduler/handlers", methods=["GET"])
+def api_scheduler_handlers():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from agents.scheduler import get_scheduler
+
+        return jsonify({"handlers": get_scheduler().list_handler_catalog()})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/scheduler/start", methods=["POST"])
 def api_scheduler_start():
     check = _admin_check()
@@ -601,37 +1042,65 @@ def api_scheduler_tasks():
     if check:
         return check
     try:
-        from agents.scheduler import get_scheduler, ScheduledTask, ScheduleType
+        from agents.scheduler import get_scheduler, ScheduledTask
+        from state.scheduler_store import get_scheduler_store
+
         sched = get_scheduler()
+        store = get_scheduler_store()
 
         if request.method == "GET":
             return jsonify({"tasks": sched.list_tasks()})
 
         payload = request.get_json(force=True, silent=True) or {}
-        task = ScheduledTask(
-            name=payload.get("name", "Custom Task"),
-            description=payload.get("description", ""),
-            schedule_type=ScheduleType(payload.get("schedule_type", "interval")),
-            interval_seconds=int(payload.get("interval_seconds", 300)),
-            handler_name=payload.get("handler_name", ""),
-            handler_args=payload.get("handler_args", {}),
-            enabled=payload.get("enabled", True),
-        )
-        sched.add_task(task)
+        saved = store.upsert_task(payload)
+        task = ScheduledTask.from_dict(saved)
+        task.is_system = False
+        sched.upsert_task(task)
         return jsonify(task.to_dict()), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
 
-@app.route("/api/scheduler/tasks/<task_id>", methods=["DELETE"])
-def api_scheduler_task_delete(task_id: str):
+@app.route("/api/scheduler/tasks/<task_id>", methods=["PUT", "DELETE"])
+def api_scheduler_task_update_or_delete(task_id: str):
     check = _admin_check()
     if check:
         return check
     try:
-        from agents.scheduler import get_scheduler
-        removed = get_scheduler().remove_task(task_id)
-        return jsonify({"removed": removed})
+        from agents.scheduler import get_scheduler, ScheduledTask
+        from state.scheduler_store import get_scheduler_store
+
+        sched = get_scheduler()
+        task = sched.get_task(task_id)
+        if not task:
+            return jsonify({"error": "task not found"}), 404
+        if task.is_system:
+            return jsonify({"error": "system tasks are managed by application settings"}), 400
+
+        store = get_scheduler_store()
+        if request.method == "DELETE":
+            removed = sched.remove_task(task_id)
+            store.delete_task(task_id)
+            return jsonify({"removed": removed})
+
+        payload = request.get_json(force=True, silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "payload must be an object"}), 400
+        payload["task_id"] = task_id
+        saved = store.upsert_task(payload)
+        updated = ScheduledTask.from_dict(saved)
+        updated.is_system = False
+        updated.run_count = task.run_count
+        updated.failure_count = task.failure_count
+        updated.last_run = task.last_run
+        updated.last_result = task.last_result
+        updated.last_status = task.last_status
+        sched.upsert_task(updated)
+        return jsonify(updated.to_dict())
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -643,7 +1112,15 @@ def api_scheduler_task_enable(task_id: str):
         return check
     try:
         from agents.scheduler import get_scheduler
-        ok = get_scheduler().enable_task(task_id)
+        from state.scheduler_store import get_scheduler_store
+
+        sched = get_scheduler()
+        task = sched.get_task(task_id)
+        ok = sched.enable_task(task_id)
+        if ok and task and not task.is_system:
+            payload = task.to_dict()
+            payload["enabled"] = True
+            get_scheduler_store().upsert_task(payload)
         return jsonify({"enabled": ok})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -656,7 +1133,15 @@ def api_scheduler_task_disable(task_id: str):
         return check
     try:
         from agents.scheduler import get_scheduler
-        ok = get_scheduler().disable_task(task_id)
+        from state.scheduler_store import get_scheduler_store
+
+        sched = get_scheduler()
+        task = sched.get_task(task_id)
+        ok = sched.disable_task(task_id)
+        if ok and task and not task.is_system:
+            payload = task.to_dict()
+            payload["enabled"] = False
+            get_scheduler_store().upsert_task(payload)
         return jsonify({"disabled": ok})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -723,12 +1208,47 @@ def api_webhooks():
 
 @app.route("/api/history/search", methods=["GET"])
 def api_history_search():
+    check = _admin_check()
+    if check:
+        return check
     try:
         query = request.args.get("q", "")
         limit = int(request.args.get("limit", 10))
         from state.conversation_state import ConversationState
         results = ConversationState.search_history(query, limit)
         return jsonify({"results": results})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/history/conversations", methods=["GET"])
+def api_history_conversations():
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        query = request.args.get("q", "")
+        limit = int(request.args.get("limit", 25))
+        from state.conversation_state import ConversationState
+
+        results = ConversationState.search_conversations(query, limit)
+        return jsonify({"results": results})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/history/conversations/<conversation_id>", methods=["GET"])
+def api_history_conversation_detail(conversation_id: str):
+    check = _admin_check()
+    if check:
+        return check
+    try:
+        from state.conversation_state import ConversationState
+
+        state = ConversationState.load(conversation_id)
+        if not state.exists_in_store:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify({"conversation": state.to_detail_dict()})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -741,7 +1261,7 @@ def api_history_export(conversation_id: str):
         fmt = request.args.get("format", "json")
         from state.conversation_state import ConversationState
         state = ConversationState.load(conversation_id)
-        if not state:
+        if not state.exists_in_store:
             return jsonify({"error": "Not found"}), 404
         
         content = state.export_history(fmt)
@@ -756,10 +1276,13 @@ def api_history_export(conversation_id: str):
 
 @app.route("/api/history/summary/<conversation_id>", methods=["POST"])
 def api_history_summary(conversation_id: str):
+    check = _admin_check()
+    if check:
+        return check
     try:
         from state.conversation_state import ConversationState
         state = ConversationState.load(conversation_id)
-        if not state:
+        if not state.exists_in_store:
             return jsonify({"error": "Not found"}), 404
         
         summary = state.generate_summary(force=True)
@@ -781,7 +1304,7 @@ def api_history_feedback():
             
         from state.conversation_state import ConversationState
         state = ConversationState.load(cid)
-        if not state:
+        if not state.exists_in_store:
             return jsonify({"error": "Not found"}), 404
             
         state.save_feedback(int(rating), comments)
@@ -792,10 +1315,13 @@ def api_history_feedback():
 
 @app.route("/api/history/handoff/<conversation_id>", methods=["POST"])
 def api_history_handoff(conversation_id: str):
+    check = _admin_check()
+    if check:
+        return check
     try:
         from state.conversation_state import ConversationState
         state = ConversationState.load(conversation_id)
-        if not state:
+        if not state.exists_in_store:
             return jsonify({"error": "Not found"}), 404
         
         state.is_human_handoff = True

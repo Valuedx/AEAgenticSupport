@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 import logging
 from typing import Callable, Optional
+from state.app_config import get_progress_min_interval
 
 logger = logging.getLogger("ops_agent.progress")
 
@@ -167,11 +168,15 @@ class ProgressCallback:
         self,
         send_fn: Optional[Callable[[str], None]] = None,
         user_role: str = "technical",
-        min_interval: float = MIN_INTERVAL_SECONDS,
+        min_interval: float | None = None,
     ):
         self._send = send_fn
         self._role = user_role
-        self._min_interval = min_interval
+        self._min_interval = (
+            float(min_interval)
+            if min_interval is not None
+            else float(get_progress_min_interval())
+        )
         self._last_sent: float = 0.0
         self._sent_count: int = 0
         self._tool_history: list[str] = []

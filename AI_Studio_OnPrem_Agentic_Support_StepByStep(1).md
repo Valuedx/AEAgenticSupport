@@ -1470,4 +1470,8 @@ Key things to remember:
 ---
 
 **Generated:** 2026-02-20 06:19:06 | **Last updated:** 2026-03-04
-
+> **Documentation Update (2026-03-08)**
+> - The standalone server now exposes a React-based admin workspace at `/admin` and `/tools`.
+> - The AI Studio webchat browser client now uses server-side proxy routes for Direct Line activity instead of exposing the secret in page code.
+> - Public documentation is now served at `/docs` from a persisted document catalog that can be managed through the control center.
+>

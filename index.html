@@ -38,6 +38,11 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 .doc-btn:hover{background:var(--surface2)}
 .doc-btn.active{background:var(--accent-dim);color:#fff;font-weight:600}
 .doc-btn .icon{width:20px;height:20px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:.75rem;flex-shrink:0}
+.doc-btn .doc-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
+.doc-btn .doc-copy strong{font-size:.88rem;font-weight:600;line-height:1.35}
+.doc-btn .doc-copy small{font-size:.72rem;line-height:1.35;color:var(--text-muted)}
+.doc-btn.active .doc-copy small{color:#d9e3ff}
+.doc-btn .icon.dynamic{background:#0f766e22;color:#79d9cc}
 .doc-btn .icon.p2{background:#2563eb22;color:#60a5fa}
 .doc-btn .icon.ss{background:#8b5cf622;color:#a78bfa}
 
@@ -118,6 +123,7 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 
 /* ─── Loading state ─── */
 .loader{display:flex;flex-direction:column;align-items:center;justify-content:center;height:60vh;color:var(--text-muted);gap:16px}
+.empty-state{padding:24px;border:1px dashed var(--border);border-radius:var(--radius);color:var(--text-muted);background:var(--surface2)}
 .spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 </style>
@@ -129,7 +135,7 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
     <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
       <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
     </button>
-    <div class="logo">AE Agentic Support</div>
+    <div class="logo" id="libraryBrand">AE Agentic Support</div>
     <div class="sep"></div>
     <div class="title" id="headerTitle">Documentation</div>
 
@@ -146,14 +152,7 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar">
     <h3>Documents</h3>
-    <button class="doc-btn active" data-doc="part2" onclick="switchDoc('part2',this)">
-      <span class="icon p2">P2</span>
-      Implementation Guide Part 2
-    </button>
-    <button class="doc-btn" data-doc="stepbystep" onclick="switchDoc('stepbystep',this)">
-      <span class="icon ss">SS</span>
-      StepByStep Configuration
-    </button>
+    <div id="docList"></div>
     <h3>Table of Contents</h3>
     <div id="tocContainer"></div>
   </aside>
@@ -174,17 +173,35 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
 <script>
-const DOC_FILES = {
-  part2:      'AE_Agentic_OpsSupport_Implementation_Guide_Part2.md',
-  stepbystep: 'AI_Studio_OnPrem_Agentic_Support_StepByStep(1).md'
-};
-const DOC_TITLES = {
-  part2:      'Implementation Guide — Part 2',
-  stepbystep: 'StepByStep Configuration + Code'
+const DEFAULT_DOCS_CONFIG = {
+  documentationTitle: 'Operations Knowledge Library',
+  documentationSubtitle: 'Documentation',
+  documents: [
+    {
+      id: 'part2',
+      title: 'Implementation Guide Part 2',
+      badge: 'P2',
+      summary: 'Technical implementation guidance for the agentic support platform.',
+      audience: 'Platform and support engineering',
+      path: 'AE_Agentic_OpsSupport_Implementation_Guide_Part2.md',
+      active: true
+    },
+    {
+      id: 'stepbystep',
+      title: 'Step-by-Step Configuration',
+      badge: 'SS',
+      summary: 'Hands-on setup guide for AI Studio and on-prem support workflows.',
+      audience: 'Administrators and implementers',
+      path: 'AI_Studio_OnPrem_Agentic_Support_StepByStep(1).md',
+      active: true
+    }
+  ],
+  defaultDocumentId: 'part2'
 };
 
 const cache = {};
-let currentDoc = 'part2';
+let docsConfig = { ...DEFAULT_DOCS_CONFIG };
+let currentDoc = docsConfig.defaultDocumentId;
 let rawMd = '';
 
 // Marked config
@@ -218,14 +235,96 @@ renderer.code = function(code, lang) {
 };
 marked.use({ renderer });
 
+function getDocumentMeta(key) {
+  return (docsConfig.documents || []).find(doc => doc.id === key) || null;
+}
+
+function applyDocsBranding() {
+  const brand = docsConfig.documentationTitle || DEFAULT_DOCS_CONFIG.documentationTitle;
+  const subtitle = docsConfig.documentationSubtitle || 'Documentation';
+  document.title = brand;
+  document.getElementById('libraryBrand').textContent = brand;
+  if (!currentDoc) {
+    document.getElementById('headerTitle').textContent = subtitle;
+  }
+}
+
+function renderDocButtons() {
+  const container = document.getElementById('docList');
+  container.innerHTML = '';
+  const docs = (docsConfig.documents || []).filter(doc => doc.active !== false);
+  docs.forEach(doc => {
+    const button = document.createElement('button');
+    button.className = 'doc-btn' + (doc.id === currentDoc ? ' active' : '');
+    button.dataset.doc = doc.id;
+    const icon = document.createElement('span');
+    icon.className = 'icon dynamic';
+    icon.textContent = doc.badge || 'DOC';
+
+    const copy = document.createElement('span');
+    copy.className = 'doc-copy';
+
+    const title = document.createElement('strong');
+    title.textContent = doc.title;
+
+    const summary = document.createElement('small');
+    summary.textContent = doc.summary || doc.audience || 'Reference document';
+
+    copy.appendChild(title);
+    copy.appendChild(summary);
+    button.appendChild(icon);
+    button.appendChild(copy);
+    button.onclick = () => switchDoc(doc.id, button);
+    container.appendChild(button);
+  });
+}
+
+async function loadDocsConfig() {
+  try {
+    const response = await fetch('/api/ui-config/docs');
+    if (!response.ok) throw new Error(response.statusText);
+    const payload = await response.json();
+    docsConfig = {
+      ...DEFAULT_DOCS_CONFIG,
+      ...payload,
+      documents: Array.isArray(payload.documents) && payload.documents.length
+        ? payload.documents
+        : DEFAULT_DOCS_CONFIG.documents
+    };
+  } catch (e) {
+    docsConfig = { ...DEFAULT_DOCS_CONFIG };
+  }
+
+  currentDoc = docsConfig.defaultDocumentId
+    || docsConfig.documents?.[0]?.id
+    || DEFAULT_DOCS_CONFIG.defaultDocumentId;
+  applyDocsBranding();
+  renderDocButtons();
+}
+
 async function loadDoc(key) {
   if (cache[key]) return cache[key];
+  const meta = getDocumentMeta(key);
+  if (!meta) {
+    cache[key] = '# Document not found\n\nThis document is not available in the current catalog.';
+    return cache[key];
+  }
   try {
-    const res = await fetch(DOC_FILES[key]);
+    const response = await fetch(`/api/docs/content/${encodeURIComponent(key)}`);
+    if (response.ok) {
+      const payload = await response.json();
+      cache[key] = payload.content || '';
+      return cache[key];
+    }
+  } catch (e) {
+    // Fall back to direct file loading when not served by the Flask app.
+  }
+  try {
+    const res = await fetch(meta.path);
     if (!res.ok) throw new Error(res.statusText);
     cache[key] = await res.text();
   } catch (e) {
-    cache[key] = `# Failed to load\n\nCould not load \`${DOC_FILES[key]}\`.\n\nMake sure you're serving from the project directory (e.g. \`npx serve .\` or \`python -m http.server\`).`;
+    cache[key] = `# Failed to load\n\nCould not load \`${meta.path}\`.\n\nMake sure you're serving from the project directory (e.g. \`npx serve .\` or \`python -m http.server\`).`;
   }
   return cache[key];
 }
@@ -233,8 +332,10 @@ async function loadDoc(key) {
 async function switchDoc(key, btn) {
   currentDoc = key;
   document.querySelectorAll('.doc-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  document.getElementById('headerTitle').textContent = DOC_TITLES[key];
+  const activeButton = btn || document.querySelector(`.doc-btn[data-doc="${key}"]`);
+  if (activeButton) activeButton.classList.add('active');
+  const meta = getDocumentMeta(key);
+  document.getElementById('headerTitle').textContent = meta?.title || docsConfig.documentationSubtitle || 'Documentation';
   document.querySelector('.sidebar').classList.remove('open');
 
   rawMd = await loadDoc(key);
@@ -308,8 +409,9 @@ function highlightText(node, query) {
 }
 
 function printDoc() {
+  const meta = getDocumentMeta(currentDoc);
   const w = window.open('', '_blank');
-  w.document.write(`<!DOCTYPE html><html><head><title>${DOC_TITLES[currentDoc]}</title>
+  w.document.write(`<!DOCTYPE html><html><head><title>${meta?.title || docsConfig.documentationSubtitle || 'Documentation'}</title>
     <style>
       body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 24px;color:#1a1a1a;line-height:1.7;font-size:14px}
       h1{border-bottom:2px solid #ddd;padding-bottom:.3em}
@@ -342,7 +444,14 @@ document.addEventListener('keydown', e => {
 });
 
 // Init
-switchDoc('part2', document.querySelector('.doc-btn'));
+loadDocsConfig().then(() => {
+  const firstDoc = currentDoc || docsConfig.documents?.[0]?.id;
+  if (!firstDoc) {
+    document.getElementById('mdContent').innerHTML = '<div class="empty-state">No documents are available.</div>';
+    return;
+  }
+  switchDoc(firstDoc, document.querySelector(`.doc-btn[data-doc="${firstDoc}"]`));
+});
 </script>
 </body>
 </html>

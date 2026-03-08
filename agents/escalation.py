@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from state.app_config import get_monitoring_overrides, get_runtime_value
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.escalation")
@@ -25,11 +26,22 @@ class EscalationAgent:
     def should_escalate(
         self,
         attempts: int,
-        max_attempts: int = 3,
+        max_attempts: int | None = None,
         has_protected_workflow: bool = False,
         recurrence_count: int = 0,
-        recurrence_threshold: int = 3,
+        recurrence_threshold: int | None = None,
     ) -> bool:
+        monitoring = get_monitoring_overrides()
+        max_attempts = int(
+            max_attempts
+            if max_attempts is not None
+            else monitoring.get("escalationMaxAttempts", 3)
+        )
+        recurrence_threshold = int(
+            recurrence_threshold
+            if recurrence_threshold is not None
+            else get_runtime_value("RECURRENCE_ESCALATION_THRESHOLD", 3)
+        )
         if has_protected_workflow:
             return True
         if attempts >= max_attempts:
@@ -55,13 +67,18 @@ class EscalationAgent:
     def escalate(
         self,
         issue_summary: str,
-        tier: str = "L2",
+        tier: str | None = None,
         channel: str = "teams",
         recipients: Optional[list[str]] = None,
-        ticket_priority: str = "P3",
+        ticket_priority: str | None = None,
         findings: list[dict] | None = None,
     ) -> dict:
         results = {}
+        monitoring = get_monitoring_overrides()
+        tier = tier or str(monitoring.get("defaultEscalationTier", "L2"))
+        ticket_priority = ticket_priority or str(
+            monitoring.get("defaultTicketPriority", "P3")
+        )
 
         try:
             full_description = issue_summary

@@ -338,20 +338,15 @@
   <div class="header">
     <div class="dot" id="statusDot" style="background:#ffc107"></div>
     <div>
-      <h1>AutomationEdge Ops Agent</h1>
+      <h1 id="chatTitle">AutomationEdge Ops Agent</h1>
       <div class="session" id="sessionInfo">Session: checking...</div>
     </div>
     <span class="status" id="statusText">Checking agent...</span>
-    <a class="navlink" href="/tools">Tools & Agents</a>
+    <a class="navlink" href="/admin">Control Center</a>
   </div>
   <div class="chat-area" id="chatArea"></div>
   <div class="typing" id="typing"><span></span><span></span><span></span></div>
-  <div class="quick-actions" id="quickActions">
-    <button onclick="sendQuick('Policy_Renewal_Batch workflow is failing')">Policy_Renewal_Batch failing</button>
-    <button onclick="sendQuick('Check system health')">System health</button>
-    <button onclick="sendQuick('What workflows are having issues?')">Workflow issues</button>
-    <button onclick="sendQuick('status')">My open cases</button>
-  </div>
+  <div class="quick-actions" id="quickActions"></div>
   <div class="input-area">
     <select id="roleSelect" title="Audience role">
       <option value="technical" selected>Technical</option>
@@ -364,6 +359,21 @@
   <script>
     const AGENT_URL = '';
     const SESSION_ID = 'webchat-' + Date.now().toString(36);
+    const DEFAULT_UI = {
+      assistantName: 'AutomationEdge Ops Agent',
+      technicalRoleLabel: 'Technical',
+      businessRoleLabel: 'Business',
+      inputPlaceholder: 'Describe your issue...',
+      technicalWelcomeMessage: 'Agent is online. How can I help you with your AutomationEdge workflows?',
+      businessWelcomeMessage: 'Agent is online. Tell me what business issue is blocked and I will guide you in plain language.',
+      quickActions: [
+        'Policy_Renewal_Batch workflow is failing',
+        'Check system health',
+        'What workflows are having issues?',
+        'status'
+      ]
+    };
+    let chatUi = { ...DEFAULT_UI };
 
     const chatArea = document.getElementById('chatArea');
     const msgInput = document.getElementById('msgInput');
@@ -373,6 +383,8 @@
     const statusDot = document.getElementById('statusDot');
     const statusTxt = document.getElementById('statusText');
     const sessionEl = document.getElementById('sessionInfo');
+    const titleEl = document.getElementById('chatTitle');
+    const quickActionsEl = document.getElementById('quickActions');
 
     sessionEl.textContent = 'Session: ' + SESSION_ID;
 
@@ -452,6 +464,43 @@
       chatArea.scrollTop = chatArea.scrollHeight;
     }
 
+    function renderQuickActions() {
+      quickActionsEl.innerHTML = '';
+      (chatUi.quickActions || []).forEach((text) => {
+        const btn = document.createElement('button');
+        btn.textContent = text.length > 28 ? text.slice(0, 28) + '...' : text;
+        btn.onclick = () => sendQuick(text);
+        quickActionsEl.appendChild(btn);
+      });
+    }
+
+    function applyChatUi() {
+      titleEl.textContent = chatUi.assistantName || DEFAULT_UI.assistantName;
+      msgInput.placeholder = chatUi.inputPlaceholder || DEFAULT_UI.inputPlaceholder;
+      roleSel.innerHTML = '';
+      [
+        ['technical', chatUi.technicalRoleLabel || DEFAULT_UI.technicalRoleLabel],
+        ['business', chatUi.businessRoleLabel || DEFAULT_UI.businessRoleLabel]
+      ].forEach(([value, label], index) => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = label;
+        if (index === 0) opt.selected = true;
+        roleSel.appendChild(opt);
+      });
+      renderQuickActions();
+    }
+
+    async function loadChatUi() {
+      try {
+        const r = await fetch('/api/ui-config/chat', { signal: AbortSignal.timeout(4000) });
+        if (!r.ok) return;
+        const payload = await r.json();
+        chatUi = { ...DEFAULT_UI, ...(payload || {}) };
+      } catch (e) { }
+      applyChatUi();
+    }
+
     function setStatus(state) {
       const colors = { ok: '#4caf50', warn: '#ffc107', err: '#f44336' };
       const labels = { ok: 'Connected', warn: 'Checking...', err: 'Disconnected' };
@@ -467,7 +516,10 @@
         const r = await fetch(AGENT_URL + '/health', { signal: AbortSignal.timeout(5000) });
         if (r.ok) {
           setStatus('ok');
-          addMsg('Agent is online. How can I help you with your AutomationEdge workflows?', 'bot', 'Ops Agent');
+          const welcome = roleSel.value === 'business'
+            ? (chatUi.businessWelcomeMessage || DEFAULT_UI.businessWelcomeMessage)
+            : (chatUi.technicalWelcomeMessage || DEFAULT_UI.technicalWelcomeMessage);
+          addMsg(welcome, 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
           return;
         }
       } catch (e) { }
@@ -541,7 +593,7 @@
               } else if (eventType === 'done') {
                 if (progressEl) { progressEl.remove(); progressEl = null; }
                 typingEl.style.display = 'none';
-                addMsg(parsed || 'No response.', 'bot', 'Ops Agent');
+                addMsg(parsed || 'No response.', 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
               }
               eventType = '';
             }
@@ -561,7 +613,7 @@
 
     msgInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !sendBtn.disabled) sendMessage(); });
 
-    checkHealth();
+    loadChatUi().finally(checkHealth);
   </script>
 </body>
 

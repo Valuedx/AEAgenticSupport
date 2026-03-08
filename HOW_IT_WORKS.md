@@ -40,9 +40,11 @@ Before any request flows through the system, the following must be in place:
     - `POSTGRES_DSN`
     - `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS`
     - `VERTEX_AI_MODEL`, `EMBEDDING_MODEL`
+    - `APP_CONTROL_CENTER_PATH`, `TOOL_OVERRIDE_PATH`, `SCHEDULER_CATALOG_PATH`, `DOCS_CATALOG_PATH`
     - Safety knobs: `MAX_AGENT_ITERATIONS`, `MAX_RAG_TOOLS`, `MAX_RESTARTS_PER_WORKFLOW`, `MAX_BULK_OPERATIONS`, `RECURRENCE_ESCALATION_THRESHOLD`, `PROTECTED_WORKFLOWS`
   - `config/llm_client.py` — initializes Gemini (Vertex AI) using `CONFIG`.
   - `config/logging_setup.py` — configures app + audit loggers and log file locations.
+  - `state/app_config.py`, `state/tool_overrides.py`, `state/scheduler_store.py`, `state/docs_catalog.py` — persisted control-center stores.
 
 - **Database & RAG:**
   - PostgreSQL (with or without `pgvector`) created as per **Section 2 of `SETUP_GUIDE.md`**.
@@ -93,8 +95,10 @@ Once these are configured, every channel (Teams, AI Studio webchat, standalone w
   - **File:** `agent_server.py`
   - **Endpoints:**
     - `/` — serves `webchat.html`
-    - `/chat` — JSON in/out (non‑streaming)
-    - `/chat/stream` — Server‑Sent Events (progress + final answer)
+    - `/chat` — JSON in/out (non‐streaming)
+    - `/chat/stream` — Server‐Sent Events (progress + final answer)
+    - `/admin` and `/tools` — React control center
+    - `/docs` — public documentation library
   - Both call into the same `MessageGateway` as AI Studio.
   - Setup and usage: **Section 8.2 of `SETUP_GUIDE.md`**.
 
@@ -493,4 +497,24 @@ Before sending the final response to the user:
 
 This flow touches the key code and configuration surfaces described in this document, and provides a template for reasoning about any new scenarios you introduce.
 
+---
 
+## 12. Operations Control Center And Documentation Library
+
+The standalone server now includes a business-facing and admin-facing control plane.
+
+Primary paths:
+
+- `/admin`
+- `/tools`
+- `/docs`
+
+What the control center adds:
+
+- editable workspace wording and quick actions
+- persisted tool metadata overrides
+- custom scheduler task management
+- SOP and public document catalog management
+- conversation-history search, summary refresh, export preview, and human handoff actions
+
+The documentation library at `/docs` now reads its title, subtitle, and document manifest from persisted stores rather than hardcoded page constants.

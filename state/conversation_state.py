@@ -46,6 +46,7 @@ class ConversationState:
 
     def __init__(self):
         self.conversation_id: str = ""
+        self.exists_in_store: bool = False
         self.user_id: str = ""
         self.user_role: str = "technical"
 
@@ -208,6 +209,7 @@ class ConversationState:
                     )
                     row = cur.fetchone()
                     if row:
+                        state.exists_in_store = True
                         state.user_id = row[0] or ""
                         state.user_role = row[1] or "technical"
                         state.phase = ConversationPhase(row[2] or "idle")
@@ -246,6 +248,17 @@ class ConversationState:
             "preferred_language": self.preferred_language,
         }
 
+    def to_detail_dict(self) -> dict:
+        return {
+            **self.to_dict(),
+            "messages": list(self.messages),
+            "findings": [asdict(finding) for finding in self.findings],
+            "tool_call_log": list(self.tool_call_log),
+            "pending_action": self.pending_action,
+            "pending_action_summary": self.pending_action_summary,
+            "param_collection": dict(self.param_collection or {}),
+        }
+
     # ── History & Search ───────────────────────────────────────────
 
     @staticmethod
@@ -274,6 +287,91 @@ class ConversationState:
                     return results
         except Exception as e:
             logger.warning(f"Search failed: {e}")
+            return []
+
+    @staticmethod
+    def search_conversations(query: str, limit: int = 20) -> list[dict]:
+        """Search conversations with one result row per conversation."""
+        clean_query = str(query or "").strip()
+        text_like = f"%{clean_query}%"
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                            s.conversation_id,
+                            s.user_id,
+                            s.user_role,
+                            s.phase,
+                            COALESCE(s.summary, ''),
+                            s.is_human_handoff,
+                            s.updated_at,
+                            COALESCE(msg_counts.message_count, 0),
+                            COALESCE(latest.content, ''),
+                            latest.created_at,
+                            COALESCE(match_hit.content, '')
+                        FROM conversation_state s
+                        LEFT JOIN LATERAL (
+                            SELECT COUNT(*) AS message_count
+                            FROM chat_messages
+                            WHERE conversation_id = s.conversation_id
+                        ) AS msg_counts ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT content, created_at
+                            FROM chat_messages
+                            WHERE conversation_id = s.conversation_id
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        ) AS latest ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT content, created_at
+                            FROM chat_messages
+                            WHERE conversation_id = s.conversation_id
+                              AND (%s = '' OR content ILIKE %s)
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        ) AS match_hit ON TRUE
+                        WHERE (
+                            %s = ''
+                            OR s.conversation_id ILIKE %s
+                            OR COALESCE(s.user_id, '') ILIKE %s
+                            OR COALESCE(s.summary, '') ILIKE %s
+                            OR match_hit.content <> ''
+                        )
+                        ORDER BY COALESCE(match_hit.created_at, latest.created_at, s.updated_at) DESC
+                        LIMIT %s
+                        """,
+                        (
+                            clean_query,
+                            text_like,
+                            clean_query,
+                            text_like,
+                            text_like,
+                            text_like,
+                            limit,
+                        ),
+                    )
+                    results = []
+                    for row in cur.fetchall():
+                        results.append(
+                            {
+                                "conversation_id": row[0],
+                                "user_id": row[1] or "",
+                                "user_role": row[2] or "technical",
+                                "phase": row[3] or "idle",
+                                "summary": row[4] or "",
+                                "is_human_handoff": bool(row[5]),
+                                "updated_at": row[6].isoformat() if row[6] else "",
+                                "message_count": int(row[7] or 0),
+                                "last_message": row[8] or "",
+                                "last_message_at": row[9].isoformat() if row[9] else "",
+                                "match_excerpt": row[10] or "",
+                            }
+                        )
+                    return results
+        except Exception as e:
+            logger.warning(f"Conversation search failed: {e}")
             return []
 
     def export_history(self, format: str = "json") -> str:

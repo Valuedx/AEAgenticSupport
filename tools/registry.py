@@ -3,11 +3,13 @@ Tool registry: central catalog of available tools.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict
 import logging
 from typing import Callable, Optional
 
 from config.settings import CONFIG
+from state.tool_overrides import get_tool_override_store
 from tools.ae_dynamic_tools import (
     DynamicToolMapping,
     extract_dynamic_tool_mappings_from_payload,
@@ -31,10 +33,12 @@ class ToolRegistry:
     def __init__(self):
         self._catalog = ToolCatalog()
         self._catalog_entries = self._catalog.entries
+        self._base_entries: dict[str, ToolCatalogEntry] = {}
         self._tools: dict[str, ToolDefinition] = {}
         self._handlers: dict[str, Callable] = {}
         self._handler_factories: dict[str, Callable[[], Callable]] = {}
         self._ranker = ToolRanker()
+        self._override_store = get_tool_override_store()
         self._executor = ToolExecutor(
             app_logger=logger,
             audit_logger=audit,
@@ -84,7 +88,10 @@ class ToolRegistry:
         handler_factory: Callable[[], Callable] | None = None,
         hydrate: bool = False,
     ):
-        self._catalog.register(entry)
+        self._base_entries[entry.name] = deepcopy(entry)
+        effective_entry = self._apply_entry_overrides(entry)
+        self._catalog.register(effective_entry)
+        self._tools.pop(entry.name, None)
         if handler_factory:
             self._handler_factories[entry.name] = handler_factory
         if hydrate:
@@ -100,6 +107,45 @@ class ToolRegistry:
     def _is_llm_callable_entry(entry: ToolCatalogEntry) -> bool:
         return entry.hydration_mode != "execute_via_generic_runner"
 
+    @staticmethod
+    def _is_active_entry(entry: ToolCatalogEntry) -> bool:
+        return bool((entry.definition.metadata or {}).get("active", True))
+
+    def _apply_entry_overrides(self, entry: ToolCatalogEntry) -> ToolCatalogEntry:
+        effective = deepcopy(entry)
+        definition = effective.definition
+        definition.metadata = dict(definition.metadata or {})
+        definition.metadata.setdefault("active", True)
+
+        override = self._override_store.get_override(effective.name)
+        if not override:
+            return effective
+
+        if "title" in override:
+            definition.metadata["title"] = override["title"]
+        if "description" in override:
+            definition.description = override["description"]
+        if "category" in override:
+            definition.category = override["category"]
+        if "tier" in override:
+            definition.tier = override["tier"]
+        if "safety" in override:
+            definition.metadata["safety"] = override["safety"]
+        if "tags" in override:
+            definition.metadata["tags"] = list(override["tags"])
+        if "useWhen" in override:
+            definition.use_when = override["useWhen"]
+        if "avoidWhen" in override:
+            definition.avoid_when = override["avoidWhen"]
+        if "alwaysAvailable" in override:
+            definition.always_available = bool(override["alwaysAvailable"])
+        if "active" in override:
+            definition.metadata["active"] = bool(override["active"])
+        if "allowedAgents" in override:
+            effective.allowed_agents = list(override["allowedAgents"])
+        definition.metadata["has_admin_override"] = True
+        return effective
+
     def _hydrate_tool(self, name: str) -> Optional[ToolDefinition]:
         definition = self._hydrator.hydrate_tool(name)
         if definition:
@@ -108,6 +154,7 @@ class ToolRegistry:
 
     def unregister(self, name: str):
         self._catalog.unregister(name)
+        self._base_entries.pop(name, None)
         self._tools.pop(name, None)
         self._handlers.pop(name, None)
         self._handler_factories.pop(name, None)
@@ -129,6 +176,31 @@ class ToolRegistry:
     def get_handler(self, name: str) -> Optional[Callable]:
         return self._hydrator.get_handler(name, persist=True)
 
+    def get_tool_override(self, name: str) -> dict:
+        return self._override_store.get_override(name)
+
+    def has_tool_override(self, name: str) -> bool:
+        return self._override_store.has_override(name)
+
+    def update_tool_override(self, name: str, payload: dict) -> dict:
+        clean = str(name or "").strip()
+        base_entry = self._base_entries.get(clean)
+        if not base_entry:
+            raise KeyError(clean)
+        saved = self._override_store.update_override(clean, payload)
+        self._catalog.register(self._apply_entry_overrides(base_entry))
+        self._tools.pop(clean, None)
+        return saved
+
+    def reset_tool_override(self, name: str) -> None:
+        clean = str(name or "").strip()
+        base_entry = self._base_entries.get(clean)
+        if not base_entry:
+            raise KeyError(clean)
+        self._override_store.reset_override(clean)
+        self._catalog.register(self._apply_entry_overrides(base_entry))
+        self._tools.pop(clean, None)
+
     def list_tools(self) -> list[str]:
         return self._catalog.list_names()
 
@@ -144,6 +216,13 @@ class ToolRegistry:
         return self._executor.execute(tool_name, handler, kwargs)
 
     def execute(self, tool_name: str, **kwargs) -> ToolResult:
+        entry = self._catalog.get(tool_name)
+        if entry and not self._is_active_entry(entry):
+            return ToolResult(
+                success=False,
+                error=f"Tool '{tool_name}' is currently disabled in the control center.",
+                tool_name=tool_name,
+            )
         handler = self.get_handler(tool_name)
         if not handler:
             return ToolResult(
@@ -276,6 +355,8 @@ class ToolRegistry:
             entry, registered = self._entry_from_rag_hit(hit)
             if not entry:
                 continue
+            if not self._is_active_entry(entry):
+                continue
             if allowed_categories and entry.definition.category not in allowed_categories:
                 continue
             score = self._coerce_tool_score(
@@ -294,6 +375,8 @@ class ToolRegistry:
 
         if include_category_fallback:
             for entry in self._catalog.values():
+                if not self._is_active_entry(entry):
+                    continue
                 if allowed_categories and entry.definition.category not in allowed_categories:
                     continue
                 candidates.setdefault(
@@ -539,6 +622,7 @@ class ToolRegistry:
                     "source": card["source"],
                     "dynamic": card["dynamic"],
                     "active": card["active"],
+                    "alwaysAvailable": card["always_available"],
                     "tags": card["tags"],
                     "parameters": entry.definition.parameters,
                     "required": entry.definition.required_params,
@@ -548,10 +632,12 @@ class ToolRegistry:
                     "hydrationMode": card["hydration_mode"],
                     "latencyClass": card["latency_class"],
                     "mutating": card["mutating"],
+                    "allowedAgents": list(entry.allowed_agents),
                     "llmCallable": card.get("llm_callable", True),
                     "structuredOutput": card.get("structured_output", False),
                     "outputSchema": entry.definition.metadata.get("output_schema", {}),
                     "annotations": entry.definition.metadata.get("annotations", {}),
+                    "hasOverride": self.has_tool_override(tool_name),
                     "linkedAgents": linked_agents,
                 }
             )

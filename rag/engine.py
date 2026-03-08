@@ -25,6 +25,7 @@ except ImportError:
 
 from config.db import get_conn, get_readonly_conn
 from config.settings import CONFIG
+from state.app_config import get_runtime_value
 
 logger = logging.getLogger("ops_agent.rag")
 
@@ -44,7 +45,10 @@ class VertexEmbedder:
 
     def __init__(self, model_name: str = "text-embedding-004"):
         self.project = CONFIG["GOOGLE_CLOUD_PROJECT"]
-        self.location = CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        self.location = get_runtime_value(
+            "GOOGLE_CLOUD_LOCATION",
+            CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        )
         self.model_name = model_name
         
         self.client = genai.Client(
@@ -97,7 +101,10 @@ class VertexEmbedder:
 class PgVectorRAGEngine:
 
     def __init__(self):
-        embed_model_name = CONFIG.get("EMBEDDING_MODEL", "text-embedding-004")
+        embed_model_name = get_runtime_value(
+            "EMBEDDING_MODEL",
+            CONFIG.get("EMBEDDING_MODEL", "text-embedding-004"),
+        )
         self.embedder = VertexEmbedder(embed_model_name)
         self.embed_dim = self.embedder.dimension
         logger.info(
@@ -441,3 +448,8 @@ def get_rag_engine() -> PgVectorRAGEngine:
     if _rag_engine is None:
         _rag_engine = PgVectorRAGEngine()
     return _rag_engine
+
+
+def reset_rag_engine() -> None:
+    global _rag_engine
+    _rag_engine = None

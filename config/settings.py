@@ -97,6 +97,8 @@ CONFIG = {
     # Tool gateway
     "TOOL_BASE_URL": os.environ.get("TOOL_BASE_URL", "http://localhost:9999"),
     "TOOL_AUTH_TOKEN": os.environ.get("TOOL_AUTH_TOKEN", ""),
+    "COGNIBOT_BASE_URL": os.environ.get("COGNIBOT_BASE_URL", "http://localhost:3978"),
+    "COGNIBOT_DIRECTLINE_SECRET": os.environ.get("COGNIBOT_DIRECTLINE_SECRET", ""),
 
     # Agent behaviour limits
     "MAX_AGENT_ITERATIONS": int(os.environ.get("MAX_AGENT_ITERATIONS", "15")),
@@ -125,15 +127,29 @@ CONFIG = {
     # Logging
     "LOG_DIR": os.environ.get("LOG_DIR", "logs"),
     "LOG_LEVEL": os.environ.get("LOG_LEVEL", "INFO"),
+    "LOG_JSON": os.environ.get("LOG_JSON", "true").lower() == "true",
 
     # Agent management UI / catalog
     "AGENT_CATALOG_PATH": os.environ.get(
         "AGENT_CATALOG_PATH", "state/agent_catalog.json"
     ),
+    "APP_CONTROL_CENTER_PATH": os.environ.get(
+        "APP_CONTROL_CENTER_PATH", "state/app_control_center.json"
+    ),
+    "TOOL_OVERRIDE_PATH": os.environ.get(
+        "TOOL_OVERRIDE_PATH", "state/tool_overrides.json"
+    ),
+    "SCHEDULER_CATALOG_PATH": os.environ.get(
+        "SCHEDULER_CATALOG_PATH", "state/scheduler_catalog.json"
+    ),
+    "DOCS_CATALOG_PATH": os.environ.get(
+        "DOCS_CATALOG_PATH", "state/docs_catalog.json"
+    ),
     "AGENT_ADMIN_TOKEN": os.environ.get("AGENT_ADMIN_TOKEN", ""),
     "AGENT_INTERACTION_LOG_LIMIT": int(
         os.environ.get("AGENT_INTERACTION_LOG_LIMIT", "500")
     ),
+    "SESSION_TTL_DAYS": int(os.environ.get("SESSION_TTL_DAYS", "30")),
 
     # RBAC & Security (Feature 2.6)
     "RBAC_ENABLED": os.environ.get("RBAC_ENABLED", "true").lower() == "true",

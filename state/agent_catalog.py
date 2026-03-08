@@ -42,6 +42,10 @@ class AgentCatalog:
                     "usecase": "default_ops_support",
                     "status": "active",
                     "persona": "technical",
+                    "capabilities": ["orchestration"],
+                    "domains": ["operations", "automationedge"],
+                    "priority": 10,
+                    "version": "1.0.0",
                     "linkedTools": [],
                     "tags": ["default", "orchestrator"],
                     "createdAt": _utc_now_iso(),
@@ -96,6 +100,28 @@ class AgentCatalog:
             if not isinstance(tags, list):
                 tags = []
 
+            capabilities = payload.get("capabilities", [])
+            if isinstance(capabilities, str):
+                capabilities = [
+                    item.strip() for item in capabilities.split(",") if item.strip()
+                ]
+            if not isinstance(capabilities, list):
+                capabilities = []
+
+            domains = payload.get("domains", [])
+            if isinstance(domains, str):
+                domains = [item.strip() for item in domains.split(",") if item.strip()]
+            if not isinstance(domains, list):
+                domains = []
+
+            existing = next((a for a in agents if a.get("agentId") == agent_id), None)
+
+            raw_priority = payload.get("priority", (existing or {}).get("priority", 50))
+            try:
+                priority = int(raw_priority)
+            except (TypeError, ValueError):
+                priority = 50
+
             now = _utc_now_iso()
             candidate = {
                 "agentId": agent_id,
@@ -104,12 +130,22 @@ class AgentCatalog:
                 "usecase": str(payload.get("usecase", "")).strip(),
                 "status": str(payload.get("status", "active")).strip() or "active",
                 "persona": str(payload.get("persona", "technical")).strip() or "technical",
+                "capabilities": sorted(
+                    {str(item).strip() for item in capabilities if str(item).strip()}
+                ),
+                "domains": sorted(
+                    {str(item).strip() for item in domains if str(item).strip()}
+                ),
+                "priority": priority,
+                "version": str(
+                    payload.get("version", (existing or {}).get("version", "1.0.0"))
+                ).strip()
+                or "1.0.0",
                 "linkedTools": sorted({str(t).strip() for t in linked_tools if str(t).strip()}),
                 "tags": sorted({str(t).strip() for t in tags if str(t).strip()}),
                 "updatedAt": now,
             }
 
-            existing = next((a for a in agents if a.get("agentId") == agent_id), None)
             if existing:
                 candidate["createdAt"] = existing.get("createdAt", now)
                 for idx, row in enumerate(agents):
@@ -163,6 +199,10 @@ class AgentCatalog:
                         "usecase": "default_ops_support",
                         "status": "active",
                         "persona": "technical",
+                        "capabilities": ["orchestration"],
+                        "domains": ["operations", "automationedge"],
+                        "priority": 10,
+                        "version": "1.0.0",
                         "linkedTools": sorted(set(tool_names)),
                         "tags": ["default", "orchestrator"],
                         "createdAt": _utc_now_iso(),
@@ -175,6 +215,10 @@ class AgentCatalog:
                         existing = set(agent.get("linkedTools", []))
                         merged = sorted(existing | set(tool_names))
                         agents[idx]["linkedTools"] = merged
+                        agents[idx].setdefault("capabilities", ["orchestration"])
+                        agents[idx].setdefault("domains", ["operations", "automationedge"])
+                        agents[idx].setdefault("priority", 10)
+                        agents[idx].setdefault("version", "1.0.0")
                         agents[idx]["updatedAt"] = _utc_now_iso()
                         break
             store["agents"] = agents

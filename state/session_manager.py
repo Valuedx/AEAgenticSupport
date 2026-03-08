@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 from config.db import get_conn
-from config.settings import CONFIG
+from state.app_config import get_runtime_value
 
 logger = logging.getLogger("ops_agent.session_manager")
 
@@ -27,7 +27,7 @@ class SessionManager:
         Returns the number of cleaned up sessions.
         """
         if max_age_days is None:
-            max_age_days = int(CONFIG.get("SESSION_TTL_DAYS", 30))
+            max_age_days = int(get_runtime_value("SESSION_TTL_DAYS", 30))
 
         cutoff = datetime.now() - timedelta(days=max_age_days)
         
@@ -98,6 +98,7 @@ def register_cleanup_task():
 
     sched = get_scheduler()
     sched.register_handler("session_cleanup", cleanup_handler)
+    sched.remove_task("system-session-cleanup")
     
     # Run once a day at 2 AM
     sched.add_task(ScheduledTask(
@@ -108,7 +109,8 @@ def register_cleanup_task():
         cron_hour=2,
         cron_minute=0,
         handler_name="session_cleanup",
-        handler_args={"days": 30},
-        enabled=True
+        handler_args={"days": int(get_runtime_value("SESSION_TTL_DAYS", 30))},
+        enabled=True,
+        is_system=True,
     ))
     logger.info("Session cleanup task registered.")

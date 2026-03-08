@@ -13,16 +13,12 @@ from typing import Optional
 
 from config.settings import CONFIG
 from config.llm_client import llm_client
+from state.app_config import get_approval_tier_sets, get_runtime_value
 
 from config.db import get_conn
 from psycopg2.extras import Json
 
 logger = logging.getLogger("ops_agent.approval")
-
-SAFE_TIERS = {"read_only"}
-AUTO_APPROVE_TIERS = {"low_risk"}
-APPROVAL_REQUIRED_TIERS = {"medium_risk", "high_risk"}
-
 
 @dataclass
 class ApprovalRequest:
@@ -109,15 +105,19 @@ class ApprovalGate:
         # Protected workflows should always require explicit approval,
         # even for otherwise low-risk tools.
         workflow = params.get("workflow_name", "")
-        if workflow in CONFIG.get("PROTECTED_WORKFLOWS", []):
+        if workflow in get_runtime_value(
+            "PROTECTED_WORKFLOWS",
+            CONFIG.get("PROTECTED_WORKFLOWS", []),
+        ):
             return True
 
-        if tier in SAFE_TIERS:
+        tier_sets = get_approval_tier_sets()
+        if tier in tier_sets["safe"]:
             return False
-        if tier in AUTO_APPROVE_TIERS:
+        if tier in tier_sets["auto"]:
             return False
 
-        return tier in APPROVAL_REQUIRED_TIERS
+        return tier in tier_sets["required"]
 
     def create_approval_request(self, conversation_id: str, tool_name: str, tier: str,
                                 params: dict,

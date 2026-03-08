@@ -21,7 +21,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, Optional
 
-from config.settings import CONFIG
+from state.app_config import get_runtime_value
+from state.scheduler_store import get_scheduler_store
 
 logger = logging.getLogger("ops_agent.scheduler")
 
@@ -62,6 +63,7 @@ class ScheduledTask:
     last_status: TaskStatus = TaskStatus.PENDING
     run_count: int = 0
     failure_count: int = 0
+    is_system: bool = False
     created_at: str = field(
         default_factory=lambda: datetime.now().isoformat()
     )
@@ -73,13 +75,42 @@ class ScheduledTask:
             "description": self.description,
             "schedule_type": self.schedule_type.value,
             "interval_seconds": self.interval_seconds,
+            "cron_hour": self.cron_hour,
+            "cron_minute": self.cron_minute,
             "enabled": self.enabled,
             "handler_name": self.handler_name,
+            "handler_args": dict(self.handler_args or {}),
             "last_run": self.last_run,
+            "last_result": self.last_result,
             "last_status": self.last_status.value,
             "run_count": self.run_count,
             "failure_count": self.failure_count,
+            "created_at": self.created_at,
+            "is_system": self.is_system,
+            "managed_by": "system" if self.is_system else "custom",
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ScheduledTask":
+        return cls(
+            task_id=str(payload.get("task_id", "")).strip() or f"task-{uuid.uuid4().hex[:8]}",
+            name=str(payload.get("name", "")).strip(),
+            description=str(payload.get("description", "")).strip(),
+            schedule_type=ScheduleType(str(payload.get("schedule_type", "interval"))),
+            interval_seconds=max(1, int(payload.get("interval_seconds", 300) or 300)),
+            cron_hour=int(payload.get("cron_hour", -1) or -1),
+            cron_minute=int(payload.get("cron_minute", 0) or 0),
+            enabled=bool(payload.get("enabled", True)),
+            handler_name=str(payload.get("handler_name", "")).strip(),
+            handler_args=dict(payload.get("handler_args", {}) or {}),
+            last_run=str(payload.get("last_run", "")).strip(),
+            last_result=str(payload.get("last_result", "")).strip(),
+            last_status=TaskStatus(str(payload.get("last_status", "pending"))),
+            run_count=int(payload.get("run_count", 0) or 0),
+            failure_count=int(payload.get("failure_count", 0) or 0),
+            is_system=bool(payload.get("is_system", False)),
+            created_at=str(payload.get("created_at", "")).strip() or datetime.now().isoformat(),
+        )
 
 
 @dataclass
@@ -236,6 +267,13 @@ _BUILTIN_HANDLERS: dict[str, Callable[..., TaskResult]] = {
     "daily_summary": daily_summary_handler,
 }
 
+_HANDLER_SUMMARIES: dict[str, str] = {
+    "health_check": "Checks platform health and recent failures at a regular interval.",
+    "workflow_monitor": "Watches a defined list of workflows for failures or stuck states.",
+    "daily_summary": "Creates a daily plain-language operations summary for stakeholders.",
+    "session_cleanup": "Removes stale conversation state after the configured retention period.",
+}
+
 
 # ── Scheduler engine ────────────────────────────────────────────────
 
@@ -261,10 +299,16 @@ class AgentScheduler:
 
     def add_task(self, task: ScheduledTask) -> None:
         with self._lock:
+            existing_timer = self._timers.pop(task.task_id, None)
+            if existing_timer:
+                existing_timer.cancel()
             self._tasks[task.task_id] = task
             logger.info("Scheduled task added: %s (%s)", task.name, task.task_id)
             if self._running and task.enabled:
                 self._schedule_next(task)
+
+    def upsert_task(self, task: ScheduledTask) -> None:
+        self.add_task(task)
 
     def remove_task(self, task_id: str) -> bool:
         with self._lock:
@@ -304,6 +348,20 @@ class AgentScheduler:
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def list_handler_catalog(self) -> list[dict[str, str]]:
+        names = sorted(set(_BUILTIN_HANDLERS) | set(self._custom_handlers))
+        return [
+            {
+                "name": name,
+                "summary": _HANDLER_SUMMARIES.get(
+                    name,
+                    "Custom scheduler handler registered at runtime.",
+                ),
+                "source": "builtin" if name in _BUILTIN_HANDLERS else "custom",
+            }
+            for name in names
+        ]
 
     # ── Handler registration ─────────────────────────────────────────
 
@@ -474,6 +532,7 @@ class AgentScheduler:
             "running": self._running,
             "task_count": len(self._tasks),
             "tasks": self.list_tasks(),
+            "handlers": self.list_handler_catalog(),
         }
 
 
@@ -593,6 +652,7 @@ def get_scheduler() -> AgentScheduler:
     global _scheduler
     if _scheduler is None:
         _scheduler = AgentScheduler()
+        load_persisted_tasks(_scheduler)
     return _scheduler
 
 
@@ -612,9 +672,15 @@ def setup_default_tasks(scheduler: AgentScheduler | None = None) -> None:
     Called during server startup.
     """
     sched = scheduler or get_scheduler()
+    for task_id in (
+        "default-health-check",
+        "default-wf-monitor",
+        "default-daily-summary",
+    ):
+        sched.remove_task(task_id)
 
-    health_interval = int(CONFIG.get("HEALTH_CHECK_INTERVAL_SECONDS", 300))
-    monitored_wfs = CONFIG.get("MONITORED_WORKFLOWS", [])
+    health_interval = int(get_runtime_value("HEALTH_CHECK_INTERVAL_SECONDS", 300))
+    monitored_wfs = get_runtime_value("MONITORED_WORKFLOWS", [])
 
     # System health check
     sched.add_task(ScheduledTask(
@@ -625,7 +691,8 @@ def setup_default_tasks(scheduler: AgentScheduler | None = None) -> None:
         interval_seconds=health_interval,
         handler_name="health_check",
         handler_args={"hours": 1},
-        enabled=bool(CONFIG.get("ENABLE_PROACTIVE_MONITORING", False)),
+        enabled=bool(get_runtime_value("ENABLE_PROACTIVE_MONITORING", False)),
+        is_system=True,
     ))
 
     # Workflow monitor (if workflows configured)
@@ -638,7 +705,8 @@ def setup_default_tasks(scheduler: AgentScheduler | None = None) -> None:
             interval_seconds=health_interval,
             handler_name="workflow_monitor",
             handler_args={"workflows": monitored_wfs},
-            enabled=bool(CONFIG.get("ENABLE_PROACTIVE_MONITORING", False)),
+            enabled=bool(get_runtime_value("ENABLE_PROACTIVE_MONITORING", False)),
+            is_system=True,
         ))
 
     # Daily summary
@@ -647,13 +715,25 @@ def setup_default_tasks(scheduler: AgentScheduler | None = None) -> None:
         name="Daily Ops Summary",
         description="Generate daily operations summary",
         schedule_type=ScheduleType.CRON_LIKE,
-        cron_hour=int(CONFIG.get("DAILY_SUMMARY_HOUR", 8)),
+        cron_hour=int(get_runtime_value("DAILY_SUMMARY_HOUR", 8)),
         cron_minute=0,
         handler_name="daily_summary",
-        enabled=bool(CONFIG.get("ENABLE_DAILY_SUMMARY", False)),
+        enabled=bool(get_runtime_value("ENABLE_DAILY_SUMMARY", False)),
+        is_system=True,
     ))
 
     logger.info(
         "Default scheduled tasks configured: %d task(s)",
         len(sched.list_tasks()),
     )
+
+
+def load_persisted_tasks(scheduler: AgentScheduler | None = None) -> None:
+    sched = scheduler or get_scheduler()
+    for task_payload in get_scheduler_store().list_tasks():
+        try:
+            task = ScheduledTask.from_dict(task_payload)
+            task.is_system = False
+            sched.upsert_task(task)
+        except Exception as exc:
+            logger.warning("Skipping persisted custom task due to load error: %s", exc)

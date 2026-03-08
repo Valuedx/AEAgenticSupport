@@ -2283,3 +2283,8 @@ def get_rag_engine() -> PgVectorRAGEngine:
 ---
 
 *End of Implementation Guide — Version 2.0 — Updated 2026-03-04*
+> **Documentation Update (2026-03-08)**
+> - The standalone stack now includes a React-based admin control center at `/admin` and `/tools`.
+> - Public documentation is now served at `/docs` from a persisted document catalog instead of hardcoded page constants.
+> - Tool overrides, custom scheduler tasks, and conversation-history review are now part of the admin surface and should be treated as the primary operations workflow.
+>

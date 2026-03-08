@@ -17,15 +17,14 @@ from agents.approval_gate import ApprovalGate, ApprovalIntent
 from agents.escalation import EscalationAgent
 from config.llm_client import llm_client
 from config.metrics import metrics_collector
-from config.settings import CONFIG
 from gateway.progress import ProgressCallback, create_noop_progress
 from rag.engine import get_rag_engine
+from state.app_config import get_runtime_value
 from state.conversation_state import ConversationState, ConversationPhase
 from state.issue_tracker import (
     IssueTracker,
     MessageClassification,
     IssueStatus,
-    RECURRENCE_ESCALATION_THRESHOLD,
 )
 from tools.base import get_ae_client
 from tools.registry import tool_registry
@@ -402,7 +401,7 @@ class Orchestrator:
                 h.get("metadata", {}).get("tool_name", h.get("id", ""))
                 for h in tool_hits
             ]
-            max_rag = CONFIG.get("MAX_RAG_TOOLS", 12)
+            max_rag = get_runtime_value("MAX_RAG_TOOLS", 12)
             
             # ── Category-based Tool Isolation (Feature 1.2) ──
             turn_tools = tool_registry.build_turn_toolset_filtered(
@@ -424,7 +423,7 @@ class Orchestrator:
             ]
 
             active_issue = tracker.get_active_issue()
-            max_iterations = CONFIG.get("MAX_AGENT_ITERATIONS", 15)
+            max_iterations = get_runtime_value("MAX_AGENT_ITERATIONS", 15)
 
             param_followup = self._continue_param_collection(user_message, state, tracker)
             if param_followup:
@@ -847,12 +846,14 @@ class Orchestrator:
 
     def _check_rbac(self, state: ConversationState, tier: str) -> tuple[bool, str]:
         """Verify the user's role allows actions of the given risk tier."""
-        if not CONFIG.get("RBAC_ENABLED", False):
+        if not get_runtime_value("RBAC_ENABLED", False):
             return True, ""
             
         role = (state.user_role or "readonly").lower()
-        role_rank = CONFIG["ROLE_RANK"].get(role, 0)
-        tier_rank = CONFIG["TIER_RANK"].get(tier.lower(), 100) # Default to max rank for unknown
+        role_ranks = dict(get_runtime_value("ROLE_RANK", {}))
+        tier_ranks = dict(get_runtime_value("TIER_RANK", {}))
+        role_rank = role_ranks.get(role, 0)
+        tier_rank = tier_ranks.get(tier.lower(), 100) # Default to max rank for unknown
         
         if role_rank >= tier_rank:
             return True, ""
@@ -864,9 +865,11 @@ class Orchestrator:
         )
 
     def _get_min_role_for_tier(self, tier: str) -> str:
-        tier_rank = CONFIG["TIER_RANK"].get(tier.lower(), 100)
+        tier_ranks = dict(get_runtime_value("TIER_RANK", {}))
+        role_ranks = dict(get_runtime_value("ROLE_RANK", {}))
+        tier_rank = tier_ranks.get(tier.lower(), 100)
         # Sort roles by rank to find the smallest rank that satisfies the tier
-        roles = sorted(CONFIG["ROLE_RANK"].items(), key=lambda x: x[1])
+        roles = sorted(role_ranks.items(), key=lambda x: x[1])
         for role, rank in roles:
             if rank >= tier_rank:
                 return role

@@ -19,13 +19,9 @@ from config.db import get_conn
 from config.llm_client import llm_client
 from config.settings import CONFIG
 from rag.engine import get_rag_engine
+from state.app_config import get_classification_signal_groups, get_runtime_value
 
 logger = logging.getLogger("ops_agent.issue_tracker")
-
-RECURRENCE_ESCALATION_THRESHOLD = CONFIG.get(
-    "RECURRENCE_ESCALATION_THRESHOLD", 3
-)
-
 
 class IssueStatus(Enum):
     ACTIVE = "active"
@@ -71,7 +67,7 @@ class Issue:
     recurrence_count: int = 0
 
     def is_stale(self, stale_minutes: int = None) -> bool:
-        minutes = stale_minutes or CONFIG.get("STALE_ISSUE_MINUTES", 30)
+        minutes = stale_minutes or get_runtime_value("STALE_ISSUE_MINUTES", 30)
         last = datetime.fromisoformat(self.updated_at)
         return (datetime.now() - last) > timedelta(minutes=minutes)
 
@@ -96,20 +92,6 @@ class Issue:
     def from_dict(cls, d: dict) -> "Issue":
         d["status"] = IssueStatus(d["status"])
         return cls(**d)
-
-
-# =========================================================================
-# Heuristic signal lists
-# =========================================================================
-
-from config.classification_signals import (
-    CONTINUE_SIGNALS,
-    NEW_ISSUE_SIGNALS,
-    RECURRENCE_SIGNALS,
-    FOLLOWUP_SIGNALS,
-    STATUS_CHECK_SIGNALS,
-    CANCEL_SIGNALS,
-)
 
 
 class IssueTracker:
@@ -229,11 +211,12 @@ class IssueTracker:
     def _heuristic_classify(
         self, msg_lower: str,
     ) -> tuple[MessageClassification, str | None] | None:
+        signals = get_classification_signal_groups()
         if msg_lower in ("approve", "reject", "yes", "no",
                          "go ahead", "proceed"):
             return MessageClassification.CONTINUE_EXISTING, self.active_issue_id
 
-        for signal in CANCEL_SIGNALS:
+        for signal in signals["cancel"]:
             if signal in msg_lower:
                 if self.active_issue_id and self.active_issue_id in self.issues:
                     issue = self.issues[self.active_issue_id]
@@ -245,22 +228,22 @@ class IssueTracker:
                         self._persist_issue(issue)
                 return MessageClassification.NEW_ISSUE, None
 
-        for signal in STATUS_CHECK_SIGNALS:
+        for signal in signals["status_check"]:
             if signal in msg_lower:
                 return MessageClassification.STATUS_CHECK, None
 
-        for signal in NEW_ISSUE_SIGNALS:
+        for signal in signals["new_issue"]:
             if signal in msg_lower:
                 return MessageClassification.NEW_ISSUE, None
 
-        for signal in RECURRENCE_SIGNALS:
+        for signal in signals["recurrence"]:
             if signal in msg_lower:
                 match = self._check_recurrence_by_workflow(msg_lower)
                 if match:
                     return MessageClassification.RECURRENCE, match
                 return None  # ambiguous — LLM fallback
 
-        for signal in FOLLOWUP_SIGNALS:
+        for signal in signals["followup"]:
             if signal in msg_lower:
                 best = self._find_followup_target(msg_lower)
                 return (
@@ -268,7 +251,7 @@ class IssueTracker:
                     best or self.active_issue_id,
                 )
 
-        for signal in CONTINUE_SIGNALS:
+        for signal in signals["continue"]:
             if (msg_lower.startswith(signal)
                     or f" {signal} " in f" {msg_lower} "):
                 return (
@@ -471,7 +454,7 @@ If no issue_id applies: CLASSIFICATION|none"""
         if issue_id in self.issues:
             return (
                 self.issues[issue_id].recurrence_count
-                >= RECURRENCE_ESCALATION_THRESHOLD
+                >= int(get_runtime_value("RECURRENCE_ESCALATION_THRESHOLD", 3))
             )
         return False
 
@@ -576,7 +559,7 @@ If no issue_id applies: CLASSIFICATION|none"""
         ]
 
     def _mark_stale_issues(self):
-        stale_minutes = CONFIG.get("STALE_ISSUE_MINUTES", 30)
+        stale_minutes = get_runtime_value("STALE_ISSUE_MINUTES", 30)
         for issue in self._get_active_issues():
             if issue.is_stale(stale_minutes):
                 issue.status = IssueStatus.STALE

@@ -11,13 +11,9 @@ from typing import Optional, Tuple
 from django.utils import timezone
 
 from custom.models import Case, IssueLink
+from state.app_config import get_classification_signal_groups, get_runtime_value
 
 logger = logging.getLogger("support_agent.issue_classifier")
-
-RECURRENCE_ESCALATION_THRESHOLD = int(
-    os.environ.get("RECURRENCE_ESCALATION_THRESHOLD", "3")
-)
-
 
 class IssueClassification:
     CONTINUE_EXISTING = "continue_existing"
@@ -28,26 +24,16 @@ class IssueClassification:
     STATUS_CHECK = "status_check"
 
 
-from config.classification_signals import (  # noqa: E402
-    APPROVAL_SIGNALS,
-    CONTINUE_SIGNALS,
-    NEW_ISSUE_SIGNALS,
-    RECURRENCE_SIGNALS,
-    FOLLOWUP_SIGNALS,
-    STATUS_CHECK_SIGNALS,
-    CANCEL_SIGNALS,
-)
-
-
 def classify_message(thread_id: str, user_text: str,
                      active_case: Optional[Case]
                      ) -> Tuple[str, Optional[str]]:
     msg_lower = user_text.strip().lower()
+    signals = get_classification_signal_groups()
 
     if not active_case:
         return IssueClassification.NEW_ISSUE, None
 
-    for signal in CANCEL_SIGNALS:
+    for signal in signals["cancel"]:
         if signal in msg_lower:
             if active_case and active_case.state not in ("CLOSED", "CANCELLED"):
                 active_case.state = "CANCELLED"
@@ -55,30 +41,30 @@ def classify_message(thread_id: str, user_text: str,
                 active_case.save()
             return IssueClassification.NEW_ISSUE, None
 
-    for signal in STATUS_CHECK_SIGNALS:
+    for signal in signals["status_check"]:
         if signal in msg_lower:
             return IssueClassification.STATUS_CHECK, None
 
-    if msg_lower in APPROVAL_SIGNALS:
+    if msg_lower in signals["approval"]:
         return IssueClassification.CONTINUE_EXISTING, active_case.case_id
 
-    for signal in NEW_ISSUE_SIGNALS:
+    for signal in signals["new_issue"]:
         if signal in msg_lower:
             return IssueClassification.NEW_ISSUE, None
 
-    for signal in RECURRENCE_SIGNALS:
+    for signal in signals["recurrence"]:
         if signal in msg_lower:
             match = _find_recurrence_match(thread_id, msg_lower)
             if match:
                 return IssueClassification.RECURRENCE, match
             break
 
-    for signal in FOLLOWUP_SIGNALS:
+    for signal in signals["followup"]:
         if signal in msg_lower:
             target = _find_followup_target(thread_id, msg_lower, active_case)
             return IssueClassification.FOLLOWUP, target
 
-    for signal in CONTINUE_SIGNALS:
+    for signal in signals["continue"]:
         if msg_lower.startswith(signal) or f" {signal} " in f" {msg_lower} ":
             return IssueClassification.CONTINUE_EXISTING, active_case.case_id
 
@@ -233,4 +219,9 @@ def link_cases(case_id_1: str, case_id_2: str,
 
 
 def should_escalate_recurrence(case: Case) -> bool:
-    return case.recurrence_count >= RECURRENCE_ESCALATION_THRESHOLD
+    return case.recurrence_count >= int(
+        get_runtime_value(
+            "RECURRENCE_ESCALATION_THRESHOLD",
+            os.environ.get("RECURRENCE_ESCALATION_THRESHOLD", "3"),
+        )
+    )

@@ -163,6 +163,8 @@ class ToolHydrator:
             if not self._is_llm_callable(entry):
                 return
             tool_def = entry.definition
+            if not bool((tool_def.metadata or {}).get("active", True)):
+                return
             if allowed_categories and tool_def.category not in allowed_categories:
                 return
             selected.append(clean)

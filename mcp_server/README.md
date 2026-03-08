@@ -4,6 +4,8 @@ Independent [Model Context Protocol](https://modelcontextprotocol.io/) server fo
 
 When these tools are bridged into the main app (`AE_MCP_TOOLS_ENABLED=true`), the app now catalogs the full MCP surface but eagerly hydrates only a curated support subset. The remaining MCP tools stay searchable through RAG and `discover_tools`, then rank alongside custom tools and AE workflow-backed tools using retrieval plus observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is preferred when it exists, before hydrating on demand for the active turn.
 
+When the main app bridge is enabled, in-app metadata can now also be tuned through the React control center. Operations owners can override title, description, category, tier, tags, always-available behavior, active status, and allowed-agent routing for the bridged tool catalog without editing the MCP server itself.
+
 Recent MCP SDK features are wired through the registry now:
 
 - Every tool publishes a human-friendly `title`.
