@@ -520,4 +520,4 @@ def check_file():
 
 if __name__ == "__main__":
     print("Starting Mock AE API on http://localhost:5051")
-    mock_app.run(host="0.0.0.0", port=5051, debug=True)
+    mock_app.run(host="0.0.0.0", port=5051, debug=False, use_reloader=False)

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -34,8 +35,14 @@ class TestAutomationEdgeClient(unittest.TestCase):
         CONFIG["AE_ORG_CODE"] = "ORG1"
         CONFIG["AE_DEFAULT_USERID"] = "ops_user"
         CONFIG["AE_TIMEOUT_SECONDS"] = 10
+        self._runtime_value_patch = patch(
+            "tools.automationedge_client.get_runtime_value",
+            side_effect=lambda key, default=None: CONFIG.get(key, default),
+        )
+        self._runtime_value_patch.start()
 
     def tearDown(self):
+        self._runtime_value_patch.stop()
         CONFIG.clear()
         CONFIG.update(self._backup)
 
@@ -149,6 +156,106 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertEqual(workflows[0]["name"], "WF-POST")
         self.assertEqual(calls["get"], 1)
         self.assertEqual(calls["post"], 1)
+        client.close()
+
+    def test_get_workflow_latest_instance_uses_modern_status_endpoint(self):
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            if request.url.path.endswith("/api/v1/workflows/Policy_Renewal_Batch/status"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "workflow_name": "Policy_Renewal_Batch",
+                        "status": "active",
+                        "errorMessage": "Input file missing",
+                    },
+                )
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+        client.resolve_cached_workflow_name = lambda _: ""
+
+        result = client.get_workflow_latest_instance("Policy_Renewal_Batch")
+
+        self.assertEqual(result["workflow_name"], "Policy_Renewal_Batch")
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(result["errorMessage"], "Input file missing")
+        client.close()
+
+    def test_get_workflow_instances_uses_modern_executions_endpoint(self):
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            if request.url.path.endswith("/api/v1/workflows/Policy_Renewal_Batch/executions"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "executions": [
+                            {"execution_id": "EX-0042", "status": "failed"},
+                            {"execution_id": "EX-0043", "status": "success"},
+                        ]
+                    },
+                )
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+        client.resolve_cached_workflow_name = lambda _: ""
+
+        result = client.get_workflow_instances("Policy_Renewal_Batch", limit=1)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["execution_id"], "EX-0042")
+        client.close()
+
+    def test_check_agent_status_uses_modern_agents_endpoint_without_org(self):
+        CONFIG["AE_ORG_CODE"] = ""
+
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            if request.url.path.endswith("/api/v1/agents/status"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "agents": [
+                            {"name": "agent-prod-01", "status": "online", "id": "A1"},
+                            {"name": "agent-prod-02", "status": "offline", "id": "A2"},
+                        ]
+                    },
+                )
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+
+        result = client.check_agent_status()
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["agentName"], "agent-prod-01")
+        self.assertEqual(result[0]["agentState"], "ONLINE")
+        self.assertEqual(result[0]["agentId"], "A1")
+        client.close()
+
+    def test_get_execution_logs_uses_modern_logs_endpoint(self):
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            if request.url.path.endswith("/api/v1/executions/EX-0042/logs"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "execution_id": "EX-0042",
+                        "logs": [{"level": "ERROR", "message": "File missing"}],
+                    },
+                )
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+
+        result = client.get_execution_logs("EX-0042", tail=10)
+
+        self.assertEqual(result["execution_id"], "EX-0042")
+        self.assertEqual(result["logs"][0]["level"], "ERROR")
         client.close()
 
 

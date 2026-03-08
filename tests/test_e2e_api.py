@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import os
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -70,7 +71,7 @@ def test_chat_quick_action():
         f"{AGENT_URL}/chat",
         json={
             "message": "Policy_Renewal_Batch failing",
-            "session_id": "e2e-test-session",
+            "session_id": f"e2e-test-session-{uuid.uuid4().hex[:8]}",
             "user_id": "test_user",
             "user_role": "technical",
         },

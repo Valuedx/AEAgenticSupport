@@ -17,6 +17,7 @@ import httpx
 import urllib3
 
 from config.settings import CONFIG
+from state.app_config import get_runtime_value
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger("ops_agent.tools.ae_client")
@@ -33,8 +34,15 @@ class AutomationEdgeClient:
     """HTTP client for AutomationEdge APIs with auto re-auth handling."""
 
     def __init__(self, client: Optional[httpx.Client] = None):
-        self.base_url = str(CONFIG["AE_BASE_URL"]).rstrip("/")
-        self.timeout = int(CONFIG.get("AE_TIMEOUT_SECONDS", 30))
+        self.base_url = str(
+            get_runtime_value("AE_BASE_URL", CONFIG["AE_BASE_URL"])
+        ).rstrip("/")
+        self.timeout = int(
+            get_runtime_value(
+                "AE_TIMEOUT_SECONDS",
+                CONFIG.get("AE_TIMEOUT_SECONDS", 30),
+            )
+        )
         self.verify_ssl = False
 
         self.api_key = str(CONFIG.get("AE_API_KEY", "")).strip()
@@ -42,7 +50,10 @@ class AutomationEdgeClient:
         self.password = str(CONFIG.get("AE_PASSWORD", "")).strip()
 
         self.rest_base_path = str(
-            CONFIG.get("AE_REST_BASE_PATH", "/aeengine/rest")
+            get_runtime_value(
+                "AE_REST_BASE_PATH",
+                CONFIG.get("AE_REST_BASE_PATH", "/aeengine/rest"),
+            )
         ).strip() or "/aeengine/rest"
         self.auth_endpoint = str(
             CONFIG.get("AE_AUTH_ENDPOINT", "/authenticate")
@@ -74,7 +85,12 @@ class AutomationEdgeClient:
         self.token_field = str(CONFIG.get("AE_TOKEN_FIELD", "token")).strip() or "token"
         self.token_ttl_seconds = int(CONFIG.get("AE_TOKEN_TTL_SECONDS", 1800))
         self.default_org_code = str(CONFIG.get("AE_ORG_CODE", "")).strip()
-        self.default_user_id = str(CONFIG.get("AE_DEFAULT_USERID", "ops_agent")).strip()
+        self.default_user_id = str(
+            get_runtime_value(
+                "AE_DEFAULT_USERID",
+                CONFIG.get("AE_DEFAULT_USERID", "ops_agent"),
+            )
+        ).strip()
 
         self._session_token = ""
         self._token_expiry: Optional[datetime] = None
@@ -516,7 +532,8 @@ class AutomationEdgeClient:
     def get_workflow_latest_instance(self, workflow_name: str, org_code: str = "") -> dict:
         """Get latest workflow instance for a workflow.
 
-        Tries org-scoped and global variants, with and without REST prefix.
+        Tries modern local/mock status endpoints first, then org-scoped/global T4 variants
+        with and without REST prefix.
         Returns the first item when API returns a list.
         """
         name = str(workflow_name or "").strip()
@@ -524,28 +541,53 @@ class AutomationEdgeClient:
             raise ValueError("workflow_name is required")
 
         resolved = self.resolve_cached_workflow_name(name)
-        if resolved:
-            name = resolved
-        elif not name.upper().startswith("WF_"):
-            raise ValueError(
-                f"Workflow '{workflow_name}' was not found in catalog. "
-                "Please use the exact workflow name (usually starts with WF_)."
-            )
+        candidate_names: list[str] = []
+        for candidate in (
+            resolved,
+            name,
+            f"WF_{name}" if not resolved and not name.upper().startswith("WF_") else "",
+        ):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate.lower() not in {item.lower() for item in candidate_names}:
+                candidate_names.append(candidate)
 
         org = (org_code or self.default_org_code or "").strip()
-        paths = []
-        if org:
-            paths.append(f"/{org}/workflows/{name}/instances")
-        paths.append(f"/workflows/{name}/instances")
+        modern_paths = [f"/api/v1/workflows/{candidate}/status" for candidate in candidate_names]
+        t4_paths = []
+        for candidate in candidate_names:
+            if org:
+                t4_paths.append(f"/{org}/workflows/{candidate}/instances")
+            t4_paths.append(f"/workflows/{candidate}/instances")
 
         last_exc: Optional[Exception] = None
+        for path in modern_paths:
+            try:
+                result = self._authorized_request("GET", path, use_rest_prefix=False)
+                if isinstance(result, list):
+                    return result[0] if result else {}
+                if isinstance(result, dict):
+                    items = result.get("instances") or result.get("executions") or []
+                    if isinstance(items, list):
+                        return items[0] if items else result
+                    return result
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {400, 404, 500}:
+                    last_exc = exc
+                    continue
+                raise
+
         for use_prefix in (False, True):
-            for path in paths:
+            for path in t4_paths:
                 try:
                     result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
                     if isinstance(result, list):
                         return result[0] if result else {}
-                    return result if isinstance(result, dict) else {}
+                    if isinstance(result, dict):
+                        items = result.get("instances") or result.get("executions") or []
+                        if isinstance(items, list):
+                            return items[0] if items else result
+                        return result
+                    return {}
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in {400, 404, 500}:
                         last_exc = exc
@@ -557,20 +599,54 @@ class AutomationEdgeClient:
         )
 
     def get_workflow_instances(self, workflow_name: str, limit: int = 10, org_code: str = "") -> list[dict]:
-        """Get recent workflow instances with endpoint fallbacks."""
+        """Get recent workflow instances with modern API and T4 fallback paths."""
         name = str(workflow_name or "").strip()
         if not name:
             raise ValueError("workflow_name is required")
 
+        resolved = self.resolve_cached_workflow_name(name)
+        candidate_names: list[str] = []
+        for candidate in (
+            resolved,
+            name,
+            f"WF_{name}" if not resolved and not name.upper().startswith("WF_") else "",
+        ):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate.lower() not in {item.lower() for item in candidate_names}:
+                candidate_names.append(candidate)
+
         org = (org_code or self.default_org_code or "").strip()
-        paths = []
-        if org:
-            paths.append(f"/{org}/workflows/{name}/instances")
-        paths.append(f"/workflows/{name}/instances")
+        modern_paths = [f"/api/v1/workflows/{candidate}/executions" for candidate in candidate_names]
+        t4_paths = []
+        for candidate in candidate_names:
+            if org:
+                t4_paths.append(f"/{org}/workflows/{candidate}/instances")
+            t4_paths.append(f"/workflows/{candidate}/instances")
 
         last_exc: Optional[Exception] = None
+        for path in modern_paths:
+            try:
+                result = self._authorized_request("GET", path, use_rest_prefix=False)
+                if isinstance(result, list):
+                    return result[: max(limit, 1)]
+                if isinstance(result, dict):
+                    items = (
+                        result.get("instances")
+                        or result.get("executions")
+                        or result.get("data")
+                        or []
+                    )
+                    if isinstance(items, list):
+                        return items[: max(limit, 1)]
+                    return [result]
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {400, 404, 500}:
+                    last_exc = exc
+                    continue
+                raise
+
         for use_prefix in (False, True):
-            for path in paths:
+            for path in t4_paths:
                 try:
                     result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
                     if isinstance(result, list):
@@ -592,14 +668,29 @@ class AutomationEdgeClient:
         if not execution_id:
             raise ValueError("execution_id is required")
 
-        paths = [
+        modern_paths = [f"/api/v1/executions/{execution_id}/logs"]
+        t4_paths = [
             f"/workflowinstances/{execution_id}/logs",
-            f"/{self.default_org_code}/workflowinstances/{execution_id}/logs",
             f"/executions/{execution_id}/logs",
         ]
+        if self.default_org_code:
+            t4_paths.insert(1, f"/{self.default_org_code}/workflowinstances/{execution_id}/logs")
         last_exc: Optional[Exception] = None
+        for path in modern_paths:
+            try:
+                return self._authorized_request(
+                    "GET",
+                    path,
+                    params={"tail": tail},
+                    use_rest_prefix=False,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {400, 404, 500}:
+                    last_exc = exc
+                    continue
+                raise
         for use_prefix in (False, True):
-            for path in paths:
+            for path in t4_paths:
                 try:
                     return self._authorized_request(
                         "GET",
@@ -679,7 +770,63 @@ class AutomationEdgeClient:
         Returns list of agent dicts with 'agentName', 'agentState', 'agentId'.
         """
         org = org_code or self.default_org_code
+        modern_paths = [
+            "/api/v1/agents/status",
+            "/api/v1/agents/resources",
+        ]
+        last_exc: Optional[Exception] = None
+        for path in modern_paths:
+            try:
+                result = self._authorized_request(
+                    "GET",
+                    path,
+                    use_rest_prefix=False,
+                )
+                raw_agents: list[dict] = []
+                if isinstance(result, dict):
+                    raw_agents = result.get("agents") or result.get("data") or []
+                    if not raw_agents:
+                        raw_agents = [result]
+                elif isinstance(result, list):
+                    raw_agents = result
+
+                normalized = []
+                for agent in raw_agents:
+                    if not isinstance(agent, dict):
+                        continue
+                    normalized.append(
+                        {
+                            "agentName": agent.get("agentName")
+                            or agent.get("name")
+                            or agent.get("agent"),
+                            "agentState": str(
+                                agent.get("agentState")
+                                or agent.get("status")
+                                or "UNKNOWN"
+                            ).upper(),
+                            "agentId": agent.get("agentId") or agent.get("id"),
+                            **agent,
+                        }
+                    )
+                if normalized:
+                    logger.info(
+                        "Agent status resolved via modern endpoint %s (%d agent(s)).",
+                        path,
+                        len(normalized),
+                    )
+                    return normalized
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {400, 404, 500}:
+                    last_exc = exc
+                    continue
+                raise
+            except Exception as exc:
+                last_exc = exc
+                continue
+
         if not org:
+            if last_exc:
+                logger.warning("Modern agent status fallback failed: %s", last_exc)
             logger.error("T4: org_code not configured — cannot check agents.")
             return []
 
@@ -1012,3 +1159,14 @@ def get_automationedge_client() -> AutomationEdgeClient:
     if _automationedge_client is None:
         _automationedge_client = AutomationEdgeClient()
     return _automationedge_client
+
+
+def reset_automationedge_client() -> None:
+    """Drop the cached client so new requests pick up updated settings."""
+    global _automationedge_client
+    if _automationedge_client is not None:
+        try:
+            _automationedge_client.close()
+        except Exception:
+            pass
+    _automationedge_client = None

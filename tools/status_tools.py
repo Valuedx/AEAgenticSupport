@@ -36,39 +36,95 @@ def check_workflow_status(workflow_name: str) -> dict:
     }
 
 
-def list_recent_failures(hours: int = 24, limit: int = 20) -> dict:
+def _parse_timestamp(value):
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            return None
+    return None
+
+
+def list_recent_failures(
+    hours: int = 24,
+    limit: int = 20,
+    workflow_name: str = "",
+) -> dict:
     client = get_ae_client()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(hours, 1))
+    workflow_name = str(workflow_name or "").strip()
+
+    data = []
+    last_error = ""
+
+    if workflow_name:
+        try:
+            data = client.get_workflow_instances(
+                workflow_name,
+                limit=max(limit * 3, 20),
+            )
+        except Exception as exc:
+            last_error = str(exc)
+
+    if not data:
+        try:
+            resp = client.request(
+                "GET",
+                "/api/v1/failures/recent",
+                use_rest_prefix=False,
+            )
+            if isinstance(resp, dict):
+                data = (
+                    resp.get("failures")
+                    or resp.get("executions")
+                    or resp.get("data")
+                    or []
+                )
+            elif isinstance(resp, list):
+                data = resp
+        except Exception as exc:
+            last_error = str(exc)
 
     # T4-compatible fallbacks for workflow instances listing.
     candidates = [
         ("POST", "/workflowinstances", True),
-        ("POST", f"/{client.default_org_code}/workflowinstances", True),
         ("GET", "/workflowinstances", True),
-        ("GET", f"/{client.default_org_code}/workflowinstances", True),
         ("POST", "/workflowinstances", False),
         ("GET", "/workflowinstances", False),
     ]
+    client_org = str(getattr(client, "default_org_code", "") or "").strip()
+    if client_org:
+        candidates[1:1] = [
+            ("POST", f"/{client_org}/workflowinstances", True),
+            ("GET", f"/{client_org}/workflowinstances", True),
+        ]
 
-    data = []
-    last_error = ""
-    for method, path, use_rest_prefix in candidates:
-        try:
-            resp = client.request(
-                method,
-                path,
-                params={"offset": 0, "size": max(limit * 3, 20), "order": "desc"},
-                use_rest_prefix=use_rest_prefix,
-            )
-            if isinstance(resp, dict):
-                data = resp.get("data") or resp.get("instances") or resp.get("executions") or []
-            elif isinstance(resp, list):
-                data = resp
-            if isinstance(data, list):
-                break
-        except Exception as exc:
-            last_error = str(exc)
-            continue
+    if not data:
+        for method, path, use_rest_prefix in candidates:
+            try:
+                resp = client.request(
+                    method,
+                    path,
+                    params={"offset": 0, "size": max(limit * 3, 20), "order": "desc"},
+                    use_rest_prefix=use_rest_prefix,
+                )
+                if isinstance(resp, dict):
+                    data = resp.get("data") or resp.get("instances") or resp.get("executions") or []
+                elif isinstance(resp, list):
+                    data = resp
+                if isinstance(data, list):
+                    break
+            except Exception as exc:
+                last_error = str(exc)
+                continue
 
     if not isinstance(data, list):
         data = []
@@ -81,26 +137,27 @@ def list_recent_failures(hours: int = 24, limit: int = 20) -> dict:
         if status not in {"FAILURE", "ERROR", "FAILED"}:
             continue
 
-        ts_ms = item.get("createdDate") or item.get("lastUpdatedDate") or item.get("completedDate")
-        ts = None
-        if isinstance(ts_ms, (int, float)):
-            try:
-                ts = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-            except Exception:
-                ts = None
+        ts = _parse_timestamp(
+            item.get("createdDate")
+            or item.get("lastUpdatedDate")
+            or item.get("completedDate")
+            or item.get("started_at")
+            or item.get("completed_at")
+        )
         if ts and ts < cutoff:
             continue
 
         failures.append(
             {
-                "execution_id": item.get("id") or item.get("automationRequestId"),
+                "execution_id": item.get("id") or item.get("automationRequestId") or item.get("execution_id"),
                 "workflow_name": item.get("workflowName")
+                or item.get("workflow_name")
                 or ((item.get("workflowConfiguration") or {}).get("name")),
                 "status": item.get("status"),
                 "agent_name": item.get("agentName"),
-                "error_message": item.get("errorMessage") or item.get("errorDetails"),
-                "created_date": item.get("createdDate"),
-                "completed_date": item.get("completedDate"),
+                "error_message": item.get("errorMessage") or item.get("errorDetails") or item.get("error"),
+                "created_date": item.get("createdDate") or item.get("started_at"),
+                "completed_date": item.get("completedDate") or item.get("completed_at"),
             }
         )
         if len(failures) >= limit:
@@ -117,8 +174,33 @@ def list_recent_failures(hours: int = 24, limit: int = 20) -> dict:
 
 
 def get_system_health() -> dict:
-    org = get_ae_client().default_org_code
-    resp = get_ae_client().get(f"/{org}/system/health")
+    client = get_ae_client()
+    org = str(client.default_org_code or "").strip()
+    candidates = []
+    if org:
+        candidates.append((f"/{org}/system/health", False))
+    candidates.extend(
+        [
+            ("/api/v1/system/health", False),
+            ("/system/health", False),
+        ]
+    )
+    if org:
+        candidates.append((f"/{org}/system/health", True))
+    candidates.append(("/system/health", True))
+
+    last_error = None
+    resp = None
+    for path, use_rest_prefix in candidates:
+        try:
+            resp = client.request("GET", path, use_rest_prefix=use_rest_prefix)
+            break
+        except Exception as exc:
+            last_error = exc
+
+    if resp is None:
+        raise last_error or RuntimeError("Could not fetch system health")
+
     agents = resp.get("agents", [])
     online = sum(1 for a in agents if a.get("status") == "online")
     return {
