@@ -1,6 +1,6 @@
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out, configurable embedding dimension, batched DB queries, shared MCP executor, AE path caching, coalesced state writes, capped execution polling. Details in §5.5 below.
 >
-> - **Documentation Update (2026-03-07)**: MCP server still exposes **106 tools** (71 P0 + 35 support-priority P1), while the main-app bridge now catalogs the full set and lazily hydrates long-tail MCP and workflow-backed tools on demand. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
+> - **Documentation Update (2026-03-09)**: MCP server still exposes **106 tools** (71 P0 + 35 support-priority P1). The main-app bridge can now use either the local shared spec registry in co-located mode or a remote MCP server via `list_tools()`/`call_tool()` when `AE_MCP_SERVER_URL` is configured. Long-tail MCP and workflow-backed tools remain lazily hydrated on demand. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
 >   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.

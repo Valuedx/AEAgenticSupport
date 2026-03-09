@@ -21,7 +21,7 @@ Implemented in the current codebase:
 The repo already supports three different tool sources:
 
 - Custom/static tools in `tools/*.py`
-- MCP-backed tools bridged through `tools/mcp_tools.py`, sourced from `mcp_server/tool_specs.py`
+- MCP-backed tools bridged through `tools/mcp_tools.py`, sourced from local `mcp_server/tool_specs.py` in co-located mode or discovered remotely from an MCP server in remote mode
 - AutomationEdge workflow-backed dynamic tools loaded via `tools/registry.py`
 
 This works at moderate scale, but it becomes unstable once the combined catalog reaches hundreds of tools:
@@ -72,7 +72,7 @@ Today the code has the right pieces, but not yet the right separation:
   - Registers custom tools and dynamic workflow tools.
   - Also contains `discover_tools`.
 - `tools/mcp_tools.py`
-  - Bulk-registers bridged MCP handlers into the main registry.
+  - Catalogs MCP tools in the main registry and hydrates selected handlers on demand.
 - `agents/orchestrator.py`
   - Already narrows the visible tool set per turn using RAG plus `discover_tools`.
 - `tools/bootstrap.py`
@@ -186,6 +186,8 @@ Source-specific behavior:
   - Hydrate by binding to the existing Python handler.
 - MCP tool entry:
   - Hydrate by creating the bridge handler only when selected.
+  - In co-located mode, bind to the local shared spec handler.
+  - In remote mode, bind to an MCP client wrapper that executes `call_tool()`.
   - Do not bulk-register every MCP handler globally.
 - AE workflow tool entry:
   - Usually do not create a unique handler.
@@ -406,11 +408,11 @@ Migration note:
 
 Current role:
 
-- Bridges the shared MCP spec catalog into the main registry and hydrates selected MCP handlers on demand.
+- Bridges MCP tool metadata into the main registry and hydrates selected MCP handlers on demand, using either the local shared spec catalog or remote MCP discovery depending on configuration.
 
 Target role:
 
-- Keep using the shared MCP spec registry as the source of truth.
+- Keep using the shared MCP spec registry as the source of truth for co-located mode while remaining compatible with remote MCP discovery for split deployments.
 - Export MCP catalog metadata builder.
 - Export MCP handler hydrator for a selected tool name.
 - Continue avoiding duplicate hand-maintained dispatch metadata.

@@ -1,6 +1,6 @@
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out (4 concurrent searches), configurable embedding dimension, batched workflow catalog queries, shared MCP executor, coalesced state writes, AE path caching, capped execution polling. See §4.2 and `SETUP_GUIDE.md` §10.
 >
-> - **Documentation Update (2026-03-07)**: MCP server still exposes **106 tools** (P0 + P1 support), while the main-app bridge now catalogs the full set and eagerly hydrates only a curated subset; the rest are exposed via RAG and `discover_tools` with lazy runtime hydration. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
+> - **Documentation Update (2026-03-09)**: MCP server still exposes **106 tools** (P0 + P1 support). The main-app bridge now supports both co-located shared-spec mode and remote MCP mode via `AE_MCP_SERVER_URL`, while still eagerly hydrating only a curated subset and exposing the rest through RAG and `discover_tools` with lazy runtime hydration. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
 > - **Tool Ranking Update (2026-03-07)**: `discover_tools` and turn-local tool hydration now share a catalog-aware ranking step that blends retrieval score with source, risk, latency, mutation, direct-callability, and observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is used when available.
 >
