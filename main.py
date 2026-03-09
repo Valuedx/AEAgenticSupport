@@ -37,8 +37,9 @@ def handle_chat_message(message: str, session_id: str = "default",
         Response string to display in chat
     """
     try:
+        log_msg = message[:100] + ("..." if len(message) > 100 else "")
         app_logger.info(
-            f"Message from {user_id} [{user_role}]: {message[:100]}..."
+            f"Message from {user_id} [{user_role}]: {log_msg}"
         )
         response = gateway.process_message(
             conversation_id=session_id,
@@ -47,7 +48,8 @@ def handle_chat_message(message: str, session_id: str = "default",
             user_role=user_role,
             on_progress=on_progress,
         )
-        app_logger.info(f"Response: {response[:100]}...")
+        log_resp = response[:100] + ("..." if len(response) > 100 else "")
+        app_logger.info(f"Response: {log_resp}")
         return response
 
     except Exception as e:

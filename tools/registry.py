@@ -738,6 +738,9 @@ class ToolRegistry:
             self._dynamic_mappings[mapping.tool_name] = asdict(mapping)
             registered += 1
 
+        if skipped > 0:
+            logger.info("Found %s workflows missing 'Agentic Tool' configuration; skipping dynamic tool registration for these.", skipped)
+
         logger.info(
             "AE dynamic tool reload complete: removed=%s registered=%s skipped=%s collisions=%s",
             removed,

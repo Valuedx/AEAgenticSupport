@@ -252,6 +252,15 @@ class Orchestrator:
         if not text:
             return "GENERAL"
 
+        # Fast-path: if the message contains a specific numeric ID (request, execution, etc.)
+        # it is ALWAYS an OPS query — skip RAG and LLM classification.
+        import re
+        if re.search(r"\b(request|req|id|execution|exec|automation)\s*(id|#)?\s*:?\s*\d{4,}\b", text, re.IGNORECASE):
+            return "OPS"
+        # Also match standalone numeric IDs that look like request IDs
+        if re.search(r"\b\d{6,}\b", text):
+            return "OPS"
+
         active_issue = tracker.get_active_issue() if tracker else None
         active_status = active_issue.status.value if active_issue else "none"
 
@@ -276,12 +285,13 @@ class Orchestrator:
         try:
             route = llm_client.chat(
                 (
-                    "Classify this user message for routing.\n"
-                    "Return exactly one token: ACK, SMALLTALK, GENERAL, or OPS.\n"
-                    "ACK = brief acknowledgement or thanks.\n"
-                    "SMALLTALK = greeting/chit-chat without a task.\n"
-                    "GENERAL = non-ops/general question not requiring workflows/tools/SOP.\n"
-                    "OPS = any operations/support/troubleshooting/automation workflow intent.\n"
+                    "Classify this user message for routing into one of four categories.\n"
+                "CRITICAL: YOUR OUTPUT MUST BE EXACTLY ONE WORD: 'ACK', 'SMALLTALK', 'GENERAL', or 'OPS'.\n"
+                "DO NOT provide any explanation, preamble, or punctuation.\n\n"
+                "ACK = brief acknowledgement, thank you, or closing of the conversation.\n"
+                "SMALLTALK = greeting/chit-chat that does not contain a specific task or question.\n"
+                "GENERAL = a general non-technical question that does not require workflows, tools, or SOPs.\n"
+                "OPS = any operations, support, troubleshooting, or automation intent (e.g. asking about status, errors, workflows, or fixes).\n"
                     f"Active issue status: {active_status}\n"
                     f"Tool relevance score (0-1): {best_similarity:.3f}\n"
                     f'User message: "{text}"'
@@ -295,7 +305,9 @@ class Orchestrator:
         except Exception:
             pass
 
-        return "OPS" if best_similarity >= 0.52 else "GENERAL"
+        # Fallback to similarity check if LLM response was ambiguous or failed.
+        # A threshold of 0.01 is more appropriate for RRF/vector search scores in this catalog.
+        return "OPS" if best_similarity >= 0.01 else "GENERAL"
 
     def _build_conversational_response(
         self,
@@ -317,9 +329,10 @@ class Orchestrator:
         try:
             return llm_client.chat(
                 (
-                    "Respond naturally and briefly to the user's general message.\n"
-                    "Do not mention tools, workflows, SOPs, or incidents.\n"
-                    "End with one short line that you can also help with AutomationEdge issues.\n"
+                    "Respond naturally to the user's message.\n"
+                "If the message seems like an operations request, clarify that you can help with that but need a bit more detail.\n"
+                "Do not use internal IDs or technical error codes in this chat phase.\n"
+                "End by reminding the user that you are ready to help with AutomationEdge issues.\n"
                     f"Route: {route}\n"
                     f'User message: "{text}"'
                 ),
@@ -628,6 +641,7 @@ class Orchestrator:
                         )
 
                     messages.append(types.Content(role="model", parts=response_parts))
+                    logger.info("Iter %s: Tool execution turn complete. Appending results to context.", iteration)
 
                     if discovered_names or needs_expansion:
                         expanded = list(active_tool_names) + discovered_names
@@ -647,7 +661,12 @@ class Orchestrator:
                         if p.text
                     ]
                     # If no tool was called and tool relevance is weak, prefer SOP-guided resolution.
-                    if self._should_use_sop_fallback(tool_hits, sop_hits):
+                    # CRITICAL: Only fall back if NO tools have been successfully called in the session.
+                    any_tools_called = any(
+                        getattr(p, 'function_call', None) or getattr(p, 'function_response', None) 
+                        for m in messages for p in m.parts
+                    )
+                    if not any_tools_called and self._should_use_sop_fallback(tool_hits, sop_hits):
                         final_response = self._build_sop_fallback_response(
                             user_message=user_message,
                             sop_hits=sop_hits,
@@ -667,6 +686,8 @@ class Orchestrator:
                     queued = self._drain_queued_messages(state, tracker)
                     if queued:
                         final_response += "\n\n" + queued
+                    
+                    logger.info("Turn successfully completed with final response (len=%s)", len(final_response))
                     return final_response
 
             state.is_agent_working = False
@@ -960,10 +981,14 @@ Rules:
    - search_knowledge_base: semantic search across all KB collections
 9. If none of the above help, call discover_tools to search the full
    catalog by description or category.
+10. **CRITICAL: TECHNICAL PRIORITIZATION**. If you call a tool and it returns technical data (workflow instances, logs, agent stats), you MUST report that specific technical data to the user. Do NOT provide placeholder SOP instructions if tool data is available. Prefer the tool's live truth over static Knowledge Base or SOP text provided in the context block.
+11. **CRITICAL: NUMERIC ID RULE**. If the user provides a specific numeric request ID, execution ID, or automation request ID (e.g. "request id 2501865"), you MUST call `get_execution_status` with that exact ID immediately. Do NOT ask for more information. Do NOT generate troubleshooting steps. Call the tool first, then report results.
 
 Available tool categories: status, logs, file, remediation, dependency,
 config, notification, general, meta.
-You have a subset of tools loaded. Use discover_tools to find others."""
+You have a subset of tools loaded. Use discover_tools to find others.
+FORBIDDEN: Never respond with SOP steps like 'Step 1: Check workflow status...' when the user has given you a specific ID to look up. Call the tool instead.
+"""
 
         persona = ""
         if state.user_role == "business":
@@ -1392,6 +1417,12 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
 
     def _format_rag_context(self, tool_hits, kb_hits, sop_hits, incident_hits=None) -> str:
         sections = []
+        # Feature: Prioritize tools so LLM sees them as the primary action source
+        if tool_hits:
+            tool_text = "\n".join(
+                f"- {h.get('content', '')[:150]}" for h in tool_hits[:5]
+            )
+            sections.append(f"## Relevant Tools\n{tool_text}")
         if kb_hits:
             kb_text = "\n".join(
                 f"- {h.get('content', '')[:200]}" for h in kb_hits[:3]
@@ -1407,11 +1438,6 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
                 f"- {h.get('content', '')[:250]}" for h in incident_hits[:3]
             )
             sections.append(f"## Past Incidents & Resolutions\n{inc_text}")
-        if tool_hits:
-            tool_text = "\n".join(
-                f"- {h.get('content', '')[:150]}" for h in tool_hits[:5]
-            )
-            sections.append(f"## Relevant Tools\n{tool_text}")
         return "\n\n".join(sections) if sections else ""
 
     def _filter_for_persona(self, response: str,
@@ -1591,6 +1617,14 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
                 )
             except Exception:
                 continue
+        if best_tool_similarity < 0.0001:
+            # RAG failed to find any matching tool. 
+            # Only fall back to SOP if we have a moderately high-confidence SOP hit.
+            best_sop_similarity = 0.0
+            for hit in sop_hits or []:
+                best_sop_similarity = max(best_sop_similarity, float(hit.get("rrf_score", hit.get("similarity", 0.0)) or 0.0))
+            return best_sop_similarity > 0.3
+            
         return best_tool_similarity < threshold
 
     def _build_sop_fallback_response(self, user_message: str, sop_hits: list[dict]) -> str:

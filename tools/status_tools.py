@@ -199,6 +199,21 @@ def get_system_health() -> dict:
             last_error = exc
 
     if resp is None:
+        # Fallback for common 403 Forbidden errors if platform-level health is restricted
+        try:
+            agents_info = get_agent_status()
+            if agents_info.get("success"):
+                agents = agents_info.get("agents", [])
+                online = sum(1 for a in agents if a.get("agentState") in ("CONNECTED", "RUNNING"))
+                return {
+                    "status": "limited_health_info",
+                    "agents_online": online,
+                    "agents_offline": len(agents) - online,
+                    "agents": agents,
+                    "warning": "Primary system health API returned 403 Forbidden; showing basic agent monitoring status instead.",
+                }
+        except Exception:
+            pass
         raise last_error or RuntimeError("Could not fetch system health")
 
     agents = resp.get("agents", [])
@@ -504,9 +519,9 @@ tool_registry.register(
     ToolDefinition(
         name="get_execution_status",
         description=(
-            "Get detailed status of a specific workflow execution by ID. "
+            "Get detailed status of a specific workflow execution or numeric request ID (e.g. 2501865). "
             "Checks both global and org-scoped T4 workflowinstances endpoints. "
-            "Use for async tracking after triggering a workflow."
+            "Use this when the user provides a specific investigation target by ID."
         ),
         category="status",
         tier="read_only",
