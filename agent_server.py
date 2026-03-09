@@ -719,17 +719,16 @@ def api_webhooks():
         return jsonify({"error": str(exc)}), 500
 
 
-@app.route("/api/scheduler/status", methods=["GET"])
-def api_scheduler_status():
+@app.route("/api/scheduler/logs", methods=["GET"])
+def api_scheduler_logs():
     try:
         from agents.scheduler import get_scheduler
-        return jsonify(get_scheduler().to_dict())
+        limit = int(request.args.get("limit", 50))
+        return jsonify({"logs": get_scheduler().get_execution_log(limit)})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
 
-@app.route("/api/scheduler/logs", methods=["GET"])
-def api_scheduler_logs():
 
 @app.route("/api/history/search", methods=["GET"])
 def api_history_search():

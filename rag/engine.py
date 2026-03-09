@@ -182,6 +182,7 @@ class PgVectorRAGEngine:
                             Json(doc.get("metadata", {})),
                             collection,
                             emb,
+                            doc["content"],
                         )
                         for doc, emb in zip(documents, embeddings)
                     ]
@@ -280,6 +281,7 @@ class PgVectorRAGEngine:
                 cur.execute(f"""
                     WITH vector_search AS (
                       SELECT id, content, metadata,
+                             1 - (embedding <=> %s::vector) AS similarity,
                              ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector) as rank_vector
                       FROM rag_documents
                       WHERE collection = %s
@@ -297,17 +299,18 @@ class PgVectorRAGEngine:
                         COALESCE(v.id, t.id),
                         COALESCE(v.content, t.content),
                         COALESCE(v.metadata, t.metadata),
-                        (1.0 / ({k} + COALESCE(v.rank_vector, 1000))) + 
-                        (1.0 / ({k} + COALESCE(t.rank_text, 1000))) as rrf_score
+                        ((1.0 / ({k} + COALESCE(v.rank_vector, 1000))) + 
+                         (1.0 / ({k} + COALESCE(t.rank_text, 1000))))::float as rrf_score,
+                        COALESCE(v.similarity, 0.0) as similarity
                     FROM vector_search v
                     FULL OUTER JOIN text_search t ON v.id = t.id
                     ORDER BY rrf_score DESC
                     LIMIT %s;
-                """, (query_emb, collection, query, collection, query, top_k))
+                """, (query_emb, query_emb, collection, query, collection, query, top_k))
                 rows = cur.fetchall()
         
         return [
-            {"id": r[0], "content": r[1], "metadata": r[2], "rrf_score": r[3]}
+            {"id": r[0], "content": r[1], "metadata": r[2], "rrf_score": r[3], "similarity": r[4]}
             for r in rows
         ]
 

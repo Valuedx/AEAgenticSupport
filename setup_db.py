@@ -294,9 +294,167 @@ def migrate_from_issue_tracker_state():
     print("Migration complete.")
 
 
+def migrate_v2():
+    """Incremental migration for databases created before the v2 feature set.
+
+    Applies all DDL changes that are missing on an existing deployment:
+      - Adds  summary / is_human_handoff / active_issue_id  columns to
+        conversation_state  (idempotent — uses ADD COLUMN IF NOT EXISTS).
+      - Creates  chat_messages, user_feedback, approval_audit_log,
+        tool_execution_log, workflow_catalog  if they don't exist yet.
+
+    Safe to run multiple times.  Run with:
+        python setup_db.py --migrate-v2
+    """
+    dsn = CONFIG["POSTGRES_DSN"]
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    cur = conn.cursor()
+
+    print("Running v2 migration...")
+
+    # ── 1. conversation_state column additions ──────────────────────────
+    column_migrations = [
+        ("conversation_state", "summary",          "TEXT"),
+        ("conversation_state", "is_human_handoff",  "BOOLEAN DEFAULT FALSE"),
+        ("conversation_state", "active_issue_id",   "VARCHAR(64)"),
+    ]
+    for table, column, col_def in column_migrations:
+        try:
+            cur.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_def};"
+            )
+            print(f"  [OK] {table}.{column} — ensured")
+        except psycopg2.Error as e:
+            print(f"  [WARN] {table}.{column}: {e.pgerror or e}")
+
+    # ── 2. New tables ───────────────────────────────────────────────────
+    new_tables = [
+        # Global message store for cross-session history search
+        (
+            "chat_messages",
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id              SERIAL       PRIMARY KEY,
+                conversation_id VARCHAR(256) NOT NULL,
+                role            VARCHAR(32)  NOT NULL,
+                content         TEXT         NOT NULL,
+                metadata        JSONB        DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ  DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_conv
+                ON chat_messages(conversation_id);
+            """,
+        ),
+        # User feedback tracking
+        (
+            "user_feedback",
+            """
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                id              SERIAL       PRIMARY KEY,
+                conversation_id VARCHAR(256) NOT NULL UNIQUE,
+                user_id         VARCHAR(256),
+                rating          INTEGER      CHECK (rating >= 1 AND rating <= 5),
+                comments        TEXT,
+                metadata        JSONB        DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ  DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_feedback_conv
+                ON user_feedback(conversation_id);
+            """,
+        ),
+        # HITL approval audit log
+        (
+            "approval_audit_log",
+            """
+            CREATE TABLE IF NOT EXISTS approval_audit_log (
+                id              SERIAL       PRIMARY KEY,
+                conversation_id VARCHAR(256) NOT NULL,
+                request_id      VARCHAR(64)  NOT NULL,
+                tool_name       VARCHAR(256) NOT NULL,
+                tool_params     JSONB,
+                requester_role  VARCHAR(32),
+                approver_id     VARCHAR(256),
+                status          VARCHAR(32),
+                tier            VARCHAR(32),
+                summary         TEXT,
+                created_at      TIMESTAMPTZ  DEFAULT NOW(),
+                decided_at      TIMESTAMPTZ
+            );
+            CREATE INDEX IF NOT EXISTS idx_approval_audit_conv
+                ON approval_audit_log(conversation_id);
+            """,
+        ),
+        # Tool execution audit log
+        (
+            "tool_execution_log",
+            """
+            CREATE TABLE IF NOT EXISTS tool_execution_log (
+                id              BIGSERIAL    PRIMARY KEY,
+                conversation_id VARCHAR(256) NOT NULL DEFAULT '',
+                agent_id        VARCHAR(128) NOT NULL DEFAULT 'unmapped',
+                tool_name       VARCHAR(256) NOT NULL,
+                params          JSONB        DEFAULT '{}'::jsonb,
+                result          JSONB        DEFAULT '{}'::jsonb,
+                success         BOOLEAN      NOT NULL DEFAULT FALSE,
+                error_message   TEXT         DEFAULT '',
+                duration_ms     INTEGER,
+                created_at      TIMESTAMPTZ  DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_exec_log_tool
+                ON tool_execution_log(tool_name);
+            CREATE INDEX IF NOT EXISTS idx_tool_exec_log_conv
+                ON tool_execution_log(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_tool_exec_log_created
+                ON tool_execution_log(created_at);
+            """,
+        ),
+        # Workflow catalog cache
+        (
+            "workflow_catalog",
+            """
+            CREATE TABLE IF NOT EXISTS workflow_catalog (
+                workflow_id     VARCHAR(64)  NOT NULL,
+                org_code        VARCHAR(64)  NOT NULL DEFAULT '',
+                workflow_name   VARCHAR(512) NOT NULL,
+                description     TEXT         DEFAULT '',
+                category        VARCHAR(128) DEFAULT '',
+                active          BOOLEAN      DEFAULT TRUE,
+                parameters      JSONB        DEFAULT '[]'::jsonb,
+                raw_data        JSONB        DEFAULT '{}'::jsonb,
+                fetched_at      TIMESTAMPTZ  DEFAULT NOW(),
+                PRIMARY KEY (workflow_id, org_code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workflow_catalog_name
+                ON workflow_catalog(workflow_name);
+            CREATE INDEX IF NOT EXISTS idx_workflow_catalog_active
+                ON workflow_catalog(active);
+            """,
+        ),
+    ]
+
+    for table_name, ddl in new_tables:
+        for statement in ddl.strip().split(";"):
+            stmt = statement.strip()
+            if not stmt:
+                continue
+            try:
+                cur.execute(stmt + ";")
+                if stmt.upper().startswith("CREATE TABLE"):
+                    print(f"  [OK] table {table_name} — ensured")
+            except psycopg2.Error as e:
+                print(f"  [WARN] {table_name}: {e.pgerror or e}")
+
+    cur.close()
+    conn.close()
+    print("v2 migration complete.")
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--migrate":
         migrate_from_issue_tracker_state()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--migrate-v2":
+        migrate_v2()
     else:
         setup_database()

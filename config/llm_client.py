@@ -35,10 +35,13 @@ class VertexAIClient:
         self.default_max_tokens = 4096
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-    def chat(self, prompt: str, system: str = "",
+    def chat(self, prompt: str | list, system: str = "",
              temperature: float = None, max_tokens: int = None) -> str:
-        """Simple text generation with optional system prompt."""
-        contents = [genai_types.Content(role="user", parts=[genai_types.Part(text=prompt)])]
+        """Text generation with optional system prompt. Supports string prompt or list of Content."""
+        if isinstance(prompt, str):
+            contents = [genai_types.Content(role="user", parts=[genai_types.Part(text=prompt)])]
+        else:
+            contents = prompt # Assume list of Content objects
         
         system_instruction = None
         if system:

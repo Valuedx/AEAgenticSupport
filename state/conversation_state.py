@@ -154,6 +154,14 @@ class ConversationState:
         if not self.conversation_id:
             return
         try:
+            # Custom JSON encoder for Decimal
+            import decimal
+            class DecimalEncoder(json.JSONEncoder):
+                def default(self, o):
+                    if isinstance(o, decimal.Decimal):
+                        return float(o)
+                    return super().default(o)
+
             state_data = {
                 "messages": self.messages[-50:],
                 "findings": [asdict(f) for f in self.findings[-20:]],
@@ -164,13 +172,15 @@ class ConversationState:
                 "param_collection": self.param_collection,
                 "preferred_language": self.preferred_language,
             }
+            state_json = json.dumps(state_data, cls=DecimalEncoder)
+
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO conversation_state
                             (conversation_id, user_id, user_role,
                              phase, state_data, summary, is_human_handoff, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, NOW())
                         ON CONFLICT (conversation_id)
                         DO UPDATE SET
                             user_id = EXCLUDED.user_id,
@@ -185,7 +195,7 @@ class ConversationState:
                         self.user_id,
                         self.user_role,
                         self.phase.value,
-                        Json(state_data),
+                        state_json,
                         self.summary,
                         self.is_human_handoff,
                     ))

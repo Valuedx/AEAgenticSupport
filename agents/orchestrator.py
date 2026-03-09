@@ -84,6 +84,7 @@ class Orchestrator:
             if conv_route in {"ACK", "SMALLTALK", "GENERAL"}:
                 response = self._build_conversational_response(
                     user_message=user_message,
+                    state=state,
                     route=conv_route,
                     tracker=tracker,
                 )
@@ -177,7 +178,7 @@ class Orchestrator:
                         + self._process_message(user_message, state, tracker, progress, allowed_categories)
                     )
                 else:
-                    response = self._process_message(user_message, state, tracker, progress, allowed_categories)
+                    response = self._process_message(user_message, state, tracker, progress)
 
             elif classification == MessageClassification.STATUS_CHECK:
                 summary = tracker.get_all_issues_summary()
@@ -231,6 +232,7 @@ class Orchestrator:
                     "GENERAL = non-ops/general question not requiring workflows/tools/SOP.\n"
                     "OPS = any operations/support/troubleshooting/automation workflow intent.\n"
                     f"Active issue status: {active_status}\n"
+                    "IMPORTANT: If there is an active issue, gravitate toward OPS unless it's pure chit-chat.\n"
                     f"Tool relevance score (0-1): {best_similarity:.3f}\n"
                     f'User message: "{text}"'
                 ),
@@ -243,12 +245,17 @@ class Orchestrator:
         except Exception:
             pass
 
-        return "OPS" if best_similarity >= 0.52 else "GENERAL"
+        # Thresholds: Cosine Similarity 0.45+ is strong Ops intent.
+        # If an issue is active, we bias toward OPS to maintain context.
+        if active_issue and best_similarity > 0.3:
+            return "OPS"
+        return "OPS" if best_similarity >= 0.45 else "GENERAL"
 
     def _build_conversational_response(
         self,
         *,
         user_message: str,
+        state: ConversationState,
         route: str,
         tracker: IssueTracker | None = None,
     ) -> str:
@@ -263,17 +270,27 @@ class Orchestrator:
             return "Hi. I can help with AutomationEdge and IT ops issues. Tell me what you need."
 
         try:
+            # If there's an active issue, provide slightly more context in GENERAL responses too.
+            active_info = ""
+            if tracker and tracker.get_active_issue():
+                active = tracker.get_active_issue()
+                active_info = f"\nNote: I am currently tracking issue {active.issue_id}: {active.title}."
+
+            # ── History for Conversational Replies ──
+            messages = self._build_llm_messages(user_message, state, context_block=active_info)
+
             return llm_client.chat(
-                (
-                    "Respond naturally and briefly to the user's general message.\n"
-                    "Do not mention tools, workflows, SOPs, or incidents.\n"
-                    "End with one short line that you can also help with AutomationEdge issues.\n"
-                    f"Route: {route}\n"
-                    f'User message: "{text}"'
+                messages,
+                system=(
+                    "You are the AutomationEdge Operations Support Agent. "
+                    "Respond to the user naturally and helpfully. "
+                    "If they asked 'what understood??' or similar, explain that you are tracking an operations task "
+                    "and summarize what you have done or are waiting for. "
+                    "Avoid very short one-liners unless it's a simple greeting. "
+                    "Always end with a polite offer to help with AutomationEdge issues."
                 ),
-                system="You are a polite, concise assistant.",
-                temperature=0.5,
-                max_tokens=120,
+                temperature=0.4,
+                max_tokens=512,
             ).strip()
         except Exception:
             return (
@@ -348,12 +365,8 @@ class Orchestrator:
             )
             active_tool_names = self._extract_active_tool_names(vertex_tools)
 
-            messages = [
-                types.Content(
-                    role="user",
-                    parts=[types.Part(text=f"{context_block}\n\nUser: {user_message}")],
-                )
-            ]
+            # ── Conversation History (Refactored) ──
+            messages = self._build_llm_messages(user_message, state, context_block)
 
             active_issue = tracker.get_active_issue()
             max_iterations = CONFIG.get("MAX_AGENT_ITERATIONS", 15)
@@ -823,8 +836,28 @@ class Orchestrator:
             
         return response
 
-    @staticmethod
-    def _extract_active_tool_names(vertex_tools: list) -> set[str]:
+    def _build_llm_messages(self, user_message: str, state: ConversationState, context_block: str = "") -> list:
+        """Helper to build a list of Content objects including history and current context."""
+        history_contents = []
+        # Last 10 messages before current
+        for m in state.messages[-11:-1]:
+            role = "model" if m["role"] == "assistant" else "user"
+            history_contents.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part(text=m["content"])]
+                )
+            )
+
+        # Current turn with context
+        text_with_context = f"{context_block}\n\nUser: {user_message}" if context_block else f"User: {user_message}"
+        current_turn = types.Content(
+            role="user",
+            parts=[types.Part(text=text_with_context)],
+        )
+        return history_contents + [current_turn]
+
+    def _extract_active_tool_names(self, vertex_tools: list) -> set[str]:
         """Get the set of tool names currently in the Vertex Tool object."""
         names: set[str] = set()
         for tool_obj in vertex_tools:
@@ -865,27 +898,18 @@ class Orchestrator:
 
     def _build_system_prompt(self, state: ConversationState,
                              tracker: IssueTracker) -> str:
-        base_prompt = """You are an AutomationEdge operations support agent.
-You help investigate and resolve issues with RPA workflows.
+        base_prompt = """You are the AutomationEdge Operations Support Agent.
+Your goal is to provide comprehensive, technical, and helpful assistance for RPA workflow issues.
 
-Rules:
-1. Always verify before acting — never guess based on symptoms alone.
-2. Check input files early — 800+ workflows are file-based.
-3. When multiple failures exist, trace to the upstream root cause.
-4. Adjust detail level based on user role.
-5. Every tool call is audited.
-6. Prefer specific typed tools (check_workflow_status, get_execution_logs,
-   etc.) — they have better validation and cleaner audit trails.
-7. If no typed tool fits, use the general-purpose escape hatches:
-   - call_ae_api: hit any AE REST endpoint directly
-   - query_database: run read-only SQL against the ops database
-   - search_knowledge_base: semantic search across all KB collections
-8. If none of the above help, call discover_tools to search the full
-   catalog by description or category.
+Rules of Engagement:
+1. **Always verify before acting** — Use specialized tools to check current status before suggesting or performing remediation.
+2. **Detailed Responses** — Avoid terse or one-word answers. Explain what you've found, what you've checked, and what the next steps are.
+3. **Context Awareness** — Use the provided conversation history and tool results to maintain continuity.
+4. **Tool Selection** — Prefer specific tools (e.g., `get_workflow_status`) over general ones where possible.
+5. **Discovery** — If you don't see a specific tool for a workflow, use `discover_tools` to search the full catalog.
 
-Available tool categories: status, logs, file, remediation, dependency,
-config, notification, general, meta.
-You have a subset of tools loaded. Use discover_tools to find others."""
+Available tool categories: status, logs, file, remediation, dependency, config, notification, general, meta.
+You have a subset of tools loaded. Use `discover_tools` to find others if needed."""
 
         persona = ""
         if state.user_role == "business":
@@ -1181,6 +1205,7 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         state.phase = ConversationPhase.AWAITING_APPROVAL
         return self.approval_gate.format_approval_prompt(
             self.approval_gate.create_approval_request(
+                state.conversation_id,
                 tool_name,
                 "medium_risk",
                 action_args,

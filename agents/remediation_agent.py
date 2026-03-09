@@ -73,12 +73,11 @@ class RemediationAgent(BaseAgent):
         if not state:
             return AgentResult(response="No state provided", success=False)
 
-        # Execute using restricted categories
+        # Execute with full tool discovery (no restrictive categories)
         response = self._orchestrator.handle_message(
             user_message=user_message,
             state=state,
             on_progress=on_progress,
-            allowed_categories=["remediation", "notification", "config"]
         )
 
         # ── Verification Loop (Feature 6.1) ──

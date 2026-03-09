@@ -127,6 +127,7 @@ CONFIG = {
     "RBAC_ENABLED": os.environ.get("RBAC_ENABLED", "true").lower() == "true",
     "ROLE_RANK": {
         "admin": 100,
+        "technical": 100,
         "dev": 50,
         "support": 10,
         "readonly": 0

@@ -415,13 +415,21 @@ class ToolRegistry:
                     td = self._tools.get(tool_name)
                     if td:
                         md = td.metadata or {}
+                        wf_name = (
+                            md.get("workflow_name")
+                            or md.get("workflowName")
+                            or td.name.removeprefix("tool-")
+                        )
                         results.append(
                             {
                                 "name": td.name,
+                                "workflow_name": wf_name,
                                 "description": td.description,
                                 "category": td.category,
                                 "tier": td.tier,
                                 "source": md.get("source", "static"),
+                                "parameters": md.get("parameters", []),
+                                "similarity": round(hit.get("similarity", 0), 3),
                                 "score": round(hit.get("rrf_score", hit.get("similarity", 0)), 3),
                             }
                         )
@@ -437,10 +445,12 @@ class ToolRegistry:
                             {
                                 "name": tool_name,
                                 "workflow_name": wf_name,
-                                "description": metadata.get("description", ""),
+                                "description": metadata.get("description") or hit.get("content", ""),
                                 "category": metadata.get("category", "automationedge"),
                                 "tier": metadata.get("tier", "medium_risk"),
                                 "source": metadata.get("source", "automationedge"),
+                                "parameters": metadata.get("parameters", []),
+                                "similarity": round(hit.get("similarity", 0), 3),
                                 "score": round(hit.get("rrf_score", hit.get("similarity", 0)), 3),
                                 "registered": False,
                                 "use_tool": "trigger_workflow",
