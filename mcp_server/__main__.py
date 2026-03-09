@@ -51,8 +51,8 @@ def main() -> None:
 
     kwargs: dict = {"transport": args.transport}
     if args.transport in ("sse", "streamable-http"):
-        kwargs["host"] = args.host
-        kwargs["port"] = args.port
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
 
     mcp.run(**kwargs)
 

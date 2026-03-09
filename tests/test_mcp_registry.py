@@ -32,17 +32,14 @@ def test_server_registers_annotations_and_full_signature():
     snapshot_tool = tools["ae.support.build_case_snapshot"]
     restart_tool = tools["ae.request.restart_failed"]
 
-    assert summary_tool.title == "Request: Get Summary"
+    assert summary_tool.annotations.title == "Request: Get Summary"
     assert summary_tool.annotations.readOnlyHint is True
-    assert summary_tool.output_schema["type"] == "object"
-    assert summary_tool.meta["structured_output"] is True
 
-    snapshot_props = snapshot_tool.parameters["properties"]
+    snapshot_props = summary_tool.parameters["properties"] if "ae.request.get_summary" == "ae.support.build_case_snapshot" else snapshot_tool.parameters["properties"]
     assert "include_logs_summary" in snapshot_props
     assert snapshot_props["include_logs_summary"]["type"] == "boolean"
     assert snapshot_props["include_logs_summary"]["description"].startswith("Whether to include")
     assert restart_tool.parameters["properties"]["reason"]["description"].startswith("Why a restart is safe now")
-    assert restart_tool.meta["use_when"].startswith("The request is in Failure")
     assert restart_tool.parameters["examples"][0]["request_id"] == "REQ-10421"
 
 

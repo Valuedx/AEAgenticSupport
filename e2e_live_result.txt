@@ -1,0 +1,15 @@
+python : workflow endpoint GET failed 
+(500). Trying POST.
+At line:1 char:1
++ python -c "
++ ~~~~~~~~~~~
+    + CategoryInfo          : NotSpecifie 
+   d: (workflow endpoi...). Trying POST.  
+  :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeComma 
+   ndError
+ 
+RESPONSE: I couldn?t find a direct automation tool for this request, but here are SOP-based steps to resolve it:
+- Step 1: Check workflow status using check_workflow_status(workflow_name). Note the error message and last execution time.
+- Step 3: If the error mentions a file (FileNotFoundError, FileFormatError), use check_input_file to verify the input file exists and is valid.
+- Step 4: If the error is a timeout or connection error, use get_system_health to check if the AE platform is healthy. Also use c

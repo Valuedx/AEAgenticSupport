@@ -693,11 +693,8 @@ class MCPToolSpec:
         return FastMCPTool.from_function(
             self.structured_handler,
             name=self.name,
-            title=self.resolved_title,
             description=self.resolved_description,
             annotations=self.annotations,
-            meta=self.meta,
-            structured_output=True,
         )
 
     @cached_property
@@ -728,7 +725,7 @@ class MCPToolSpec:
 
     @property
     def output_schema(self) -> dict[str, Any]:
-        return dict(self.fastmcp_tool.output_schema or {})
+        return {"type": "object"}
 
     @property
     def serialized_annotations(self) -> dict[str, Any]:

@@ -1,0 +1,16 @@
+--- Environment Check ---
+Model: gemini-2.0-flash
+MCP Enabled: True
+
+--- LLM Check ---
+LLM Response: Hi there!
+
+SUCCESS: LLM response is healthy.
+
+--- Tool Registration Check ---
+Modules loaded: 8
+Dynamic reload: {'enabled': True, 'removed': 0, 'registered': 0, 'skipped': 0, 'collisions': [], 'total_workflows': 23, 'db_synced': 23, 'rag_indexed': 23}
+
+Total tools registered: 133
+MCP tools found: 0
+NOTICE: No MCP tools found.

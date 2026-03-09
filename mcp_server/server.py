@@ -33,18 +33,13 @@ def _register_tools() -> int:
         mcp.add_tool(
             spec.structured_handler,
             name=spec.name,
-            title=spec.resolved_title,
             description=spec.resolved_description,
             annotations=spec.annotations,
-            meta=spec.meta,
-            structured_output=True,
         )
         registered = mcp._tool_manager._tools.get(spec.name)
         if registered:
             registered.parameters = spec.input_schema
-            registered.meta = spec.meta
             registered.annotations = spec.annotations
-            registered.title = spec.resolved_title
             registered.description = spec.resolved_description
         count += 1
     return count

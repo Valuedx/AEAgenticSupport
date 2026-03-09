@@ -16,6 +16,9 @@ from typing import List
 import numpy as np
 from psycopg2.extras import Json, execute_values
 
+logger = logging.getLogger("ops_agent.rag")
+
+
 try:
     from google import genai
     from google.genai import types as genai_types
@@ -26,8 +29,6 @@ except ImportError:
 from config.db import get_conn, get_readonly_conn
 from config.settings import CONFIG
 from state.app_config import get_runtime_value
-
-logger = logging.getLogger("ops_agent.rag")
 
 _EMBED_BATCH_SIZE = 250  # Vertex AI limit per request
 
@@ -193,6 +194,7 @@ class PgVectorRAGEngine:
                             Json(doc.get("metadata", {})),
                             collection,
                             emb,
+                            doc["content"],
                         )
                         for doc, emb in zip(documents, embeddings)
                     ]

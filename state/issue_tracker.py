@@ -16,9 +16,7 @@ from typing import Optional
 from psycopg2.extras import Json
 
 from config.db import get_conn
-from config.llm_client import llm_client
 from config.settings import CONFIG
-from rag.engine import get_rag_engine
 from state.app_config import get_classification_signal_groups, get_runtime_value
 
 logger = logging.getLogger("ops_agent.issue_tracker")
@@ -363,6 +361,7 @@ Classify as exactly ONE of:
 Reply in format: CLASSIFICATION|issue_id
 If no issue_id applies: CLASSIFICATION|none"""
 
+        from config.llm_client import llm_client
         response = llm_client.chat(
             prompt,
             system="You classify support messages. Reply in the exact format.",
@@ -539,6 +538,7 @@ If no issue_id applies: CLASSIFICATION|none"""
         }
 
         try:
+            from rag.engine import get_rag_engine
             get_rag_engine().index_documents([doc], collection="past_incidents")
             logger.info(f"Synced resolved issue {issue_id} to RAG (past_incidents)")
         except Exception as e:
