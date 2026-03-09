@@ -15,7 +15,7 @@
 > - Fixed tool result success/error propagation across execution paths.
 > - Improved busy-turn intent routing and queued message handling.
 > - Added cross-channel persona propagation (`business` and `technical`) and semantic approval handling.
-> - Validation status: `pytest -q tests` passed (`31 passed`).
+> - Validation status: `pytest -q` passed (`99 passed, 1 skipped`; `tests/test_e2e_api.py` is opt-in via `RUN_E2E=1`).
 >
 # AutomationEdge Agentic Support — Setup Guide
 
@@ -661,13 +661,20 @@ location /api/messages {
 
 ## 8. Verification & Testing
 
-### 8.1 Run unit tests
+### 8.1 Run automated tests
 
 ```bash
-python -m pytest tests/test_scenarios.py -v
+python -m pytest -q
 ```
 
-Expected: All tests pass (conversation state, approval gate, tool registry, templates).
+Expected (default): unit/integration tests pass and E2E is skipped unless explicitly enabled.
+
+To run E2E API checks (`tests/test_e2e_api.py`), start local services first (`agent_server.py` on `:5050` and `tests/mock_ae_api.py` on `:5051`), then:
+
+```powershell
+$env:RUN_E2E="1"
+python -m pytest -q tests/test_e2e_api.py
+```
 
 ### 8.2 Standalone Agent Server
 
@@ -686,7 +693,7 @@ python agent_server.py
 |---|---|---|
 | `GET` | `/` | Serves `webchat.html` — a browser-based chat UI |
 | `GET` | `/health` | Health check (returns `{"status": "ok"}`) |
-| `POST` | `/chat` | Send a message. Body: `{"message": "...", "thread_id": "..."}` (non-streaming) |
+| `POST` | `/chat` | Send a message. Body: `{"message": "...", "session_id": "..."}` (non-streaming) |
 | `POST` | `/chat/stream` | SSE streaming: sends `event: progress` (status text) during investigation, then `event: done` (final response) |
 
 **Webchat:** Open `http://localhost:5050/` in your browser for an interactive chat interface. This is the fastest way to test the agent locally without Teams or AI Studio. When using the streaming endpoint, you will see real-time progress messages (e.g., "Looking into this...", "Checking workflow status...") as italic status text that updates in-place during long investigations.
@@ -839,7 +846,7 @@ Every tool call should be logged:
 | 10 | Extension zip uploaded and Cognibot restarted | AE Admin | ☐ |
 | 11 | Azure Bot registered, Teams channel enabled | DevOps | ☐ |
 | 12 | Teams bot reachable and responding to `hello` | QA | ☐ |
-| 13 | Unit tests passing (`python -m pytest tests/`) | QA | ☐ |
+| 13 | Automated tests passing (`python -m pytest -q`) | QA | ☐ |
 | 14 | All 10 test scenarios verified in Teams | QA | ☐ |
 | 15 | Audit logging verified — all tool calls recorded | Compliance | ☐ |
 | 16 | Escalation notifications reaching Teams/email | DevOps | ☐ |
@@ -1283,4 +1290,3 @@ This ensures:
 
 **Document version:** 3.0
 **Last updated:** 2026-03-04
-

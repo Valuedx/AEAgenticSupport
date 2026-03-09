@@ -251,9 +251,15 @@ class ToolRegistry:
             len(collisions),
         )
 
-        # Sync all fetched workflows to Postgres workflow_catalog AND index embeddings in RAG.
-        # Single call re-uses the already-fetched `workflows` list — no extra API call.
-        sync_result = client.sync_and_index_workflows(workflows)
+        # Best-effort sync/index: keep dynamic tool reload compatible with
+        # test doubles and older clients that may not expose this helper.
+        sync_result: dict = {}
+        sync_fn = getattr(client, "sync_and_index_workflows", None)
+        if callable(sync_fn):
+            try:
+                sync_result = sync_fn(workflows) or {}
+            except Exception as exc:
+                logger.warning("AE workflow sync/index failed (non-fatal): %s", exc)
 
         return {
             "enabled": True,

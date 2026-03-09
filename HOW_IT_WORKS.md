@@ -15,7 +15,7 @@
 > - Fixed tool result success/error propagation across execution paths.
 > - Improved busy-turn intent routing and queued message handling.
 > - Added cross-channel persona propagation (`business` and `technical`) and semantic approval handling.
-> - Validation status: `pytest -q tests` passed (`31 passed`).
+> - Validation status: `pytest -q` passed (`99 passed, 1 skipped`; `tests/test_e2e_api.py` is opt-in via `RUN_E2E=1`).
 >
 ## AutomationEdge Agentic Support — How It Works (Step‑by‑Step)
 
