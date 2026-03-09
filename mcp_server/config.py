@@ -46,7 +46,7 @@ MCP_CONFIG = {
     "AE_TIMEOUT_SECONDS": int(os.environ.get("AE_TIMEOUT_SECONDS", "30")),
     "AE_VERIFY_SSL": _bool(os.environ.get("AE_VERIFY_SSL", "false")),
     "MCP_TRANSPORT": os.environ.get("MCP_TRANSPORT", "stdio"),
-    "MCP_HOST": os.environ.get("MCP_HOST", "0.0.0.0"),
+    "MCP_HOST": os.environ.get("MCP_HOST", "127.0.0.1"),
     "MCP_PORT": int(os.environ.get("MCP_PORT", "8000")),
     "LOG_LEVEL": os.environ.get("LOG_LEVEL", "INFO"),
 }

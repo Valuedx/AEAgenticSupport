@@ -75,6 +75,17 @@ CONFIG = {
     "AE_MCP_TOOLS_ENABLED": os.environ.get(
         "AE_MCP_TOOLS_ENABLED", "false"
     ).lower() in ("1", "true", "yes"),
+    "AE_MCP_SERVER_URL": os.environ.get("AE_MCP_SERVER_URL", "").strip(),
+    "AE_MCP_SERVER_TRANSPORT": os.environ.get(
+        "AE_MCP_SERVER_TRANSPORT", "streamable-http"
+    ).strip(),
+    "AE_MCP_SERVER_HEADERS_JSON": os.environ.get(
+        "AE_MCP_SERVER_HEADERS_JSON", ""
+    ).strip(),
+    "AE_MCP_SERVER_TIMEOUT_SECONDS": os.environ.get(
+        "AE_MCP_SERVER_TIMEOUT_SECONDS",
+        os.environ.get("AE_TIMEOUT_SECONDS", os.environ.get("T4_TIMEOUT_SECONDS", "30")),
+    ),
     "AE_TIMEOUT_SECONDS": int(
         os.environ.get("AE_TIMEOUT_SECONDS", os.environ.get("T4_TIMEOUT_SECONDS", "30"))
     ),

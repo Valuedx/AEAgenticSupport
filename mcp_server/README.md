@@ -2,7 +2,7 @@
 
 Independent [Model Context Protocol](https://modelcontextprotocol.io/) server for AutomationEdge IT Operations support. Exposes **106 tools** (71 P0 + 35 support-priority P1) for investigating, diagnosing, and remediating automation issues via any MCP-compatible client (Cursor, Claude Desktop, etc.).
 
-When these tools are bridged into the main app (`AE_MCP_TOOLS_ENABLED=true`), the app now catalogs the full MCP surface but eagerly hydrates only a curated support subset. The remaining MCP tools stay searchable through RAG and `discover_tools`, then rank alongside custom tools and AE workflow-backed tools using retrieval plus observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is preferred when it exists, before hydrating on demand for the active turn.
+When these tools are bridged into the main app (`AE_MCP_TOOLS_ENABLED=true`), the app now catalogs the full MCP surface but eagerly hydrates only a curated support subset. In co-located mode, it uses the shared local spec registry; when `AE_MCP_SERVER_URL` is set, it discovers tools remotely with `list_tools()` and executes them with `call_tool()`. The remaining MCP tools stay searchable through RAG and `discover_tools`, then rank alongside custom tools and AE workflow-backed tools using retrieval plus observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is preferred when it exists, before hydrating on demand for the active turn.
 
 When the main app bridge is enabled, in-app metadata can now also be tuned through the React control center. Operations owners can override title, description, category, tier, tags, always-available behavior, active status, and allowed-agent routing for the bridged tool catalog without editing the MCP server itself.
 
@@ -12,7 +12,7 @@ Recent MCP SDK features are wired through the registry now:
 - Safety metadata is exposed through MCP `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`).
 - Tool `meta` includes source, category, safety, tier, mutating flag, tags, and structured-output hints.
 - Server registrations use `structured_output=True`, so clients receive `outputSchema` plus structured results instead of only raw JSON text.
-- The standalone MCP server and in-app bridge share the same tool spec registry, eliminating metadata drift.
+- The standalone MCP server and co-located in-app bridge share the same tool spec registry, eliminating metadata drift. Remote bridge mode consumes the same metadata over the MCP protocol.
 
 ## Quick Start
 
@@ -41,11 +41,33 @@ AE_ORG_CODE=your-org-code
 python -m mcp_server
 ```
 
-**HTTP transport** (for remote clients):
+**Streamable HTTP transport** (localhost only by default):
 
 ```bash
-python -m mcp_server --transport streamable-http --port 8000
+python -m mcp_server --transport streamable-http --host 127.0.0.1 --port 8000
 ```
+
+**Streamable HTTP transport** (reachable from other machines):
+
+```bash
+python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+The MCP endpoint URL for HTTP clients is `http://<host>:8000/mcp`.
+
+## Main App Remote Bridge
+
+If the AI Studio/Teams app is running on a different machine than the MCP server, configure the main app like this:
+
+```env
+AE_MCP_TOOLS_ENABLED=true
+AE_MCP_SERVER_URL=http://mcp-host:8000/mcp
+AE_MCP_SERVER_TRANSPORT=streamable-http
+AE_MCP_SERVER_HEADERS_JSON=
+AE_MCP_SERVER_TIMEOUT_SECONDS=30
+```
+
+Leave `AE_MCP_SERVER_URL` blank only when the app and `mcp_server` package are co-located and you want in-process execution instead of network MCP calls.
 
 ## Cursor Integration
 

@@ -1325,7 +1325,7 @@ The project includes an **independent AutomationEdge MCP (Model Context Protocol
 | Component | Purpose |
 |-----------|--------|
 | **`mcp_server/`** | Standalone MCP server (106 tools: P0 + P1 support). Tool definitions now come from a shared spec registry with structured output, MCP annotations, and curated metadata. Run via `python -m mcp_server` for Cursor, Claude Desktop, or any MCP client. |
-| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the same 106 tools are cataloged in the main application from the shared MCP spec registry. A curated support subset is eagerly hydrated; the rest are exposed through RAG/`discover_tools`, ranked against custom and workflow-backed tools using retrieval plus agent-scoped, recency-weighted execution-history signals, and hydrated on demand. |
+| **Main app integration** | When `AE_MCP_TOOLS_ENABLED=true`, the main application catalogs the same 106 tools either from the local shared spec registry (co-located mode) or from a remote MCP server via `list_tools()`/`call_tool()` when `AE_MCP_SERVER_URL` is set. A curated support subset is eagerly hydrated; the rest are exposed through RAG/`discover_tools`, ranked against custom and workflow-backed tools using retrieval plus agent-scoped, recency-weighted execution-history signals, and hydrated on demand. |
 
 - **MCP server only**: Use with Cursor/Claude for support workflows without running the full AI Studio stack.
 - **Main app only**: Use the Flask/Teams agent with existing + dynamic tools (no MCP tools).
@@ -1343,8 +1343,10 @@ The project includes an **independent AutomationEdge MCP (Model Context Protocol
 3. **Run the server**:
    - **stdio** (for Cursor / Claude Desktop):  
      `python -m mcp_server`
-   - **HTTP**:  
-     `python -m mcp_server --transport streamable-http --port 8000`
+   - **Streamable HTTP, local machine only**:  
+     `python -m mcp_server --transport streamable-http --host 127.0.0.1 --port 8000`
+   - **Streamable HTTP, reachable from other machines**:  
+     `python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 8000`
 
 4. **Cursor**: Add to `.cursor/mcp.json` (or global MCP config):
    ```json
@@ -1366,20 +1368,31 @@ The project includes an **independent AutomationEdge MCP (Model Context Protocol
    ```
 
 See `mcp_server/README.md` for the full tool list and more transport options.
+For HTTP clients, the MCP endpoint URL is `http://<host>:8000/mcp`.
 
 ### 13.3 Enabling MCP Tools in the Main Application
 
 To expose the 106 `ae.*` tools (P0 + P1 support; e.g. `ae.request.get_summary`, `ae.support.diagnose_failed_request`, `ae.request.list_recent`, `ae.dependency.run_full_preflight_for_workflow`) to the orchestrator and specialist agents:
 
-1. **Install MCP dependencies** so `mcp_server` is importable:
+1. **Install app dependencies**:
    ```bash
-   pip install -r mcp_server/requirements.txt
+   pip install -r requirements.txt
    ```
 
-2. **Enable the flag** in `.env`:
+2. **Enable the flag** in `.env` and choose local or remote MCP mode:
    ```env
    AE_MCP_TOOLS_ENABLED=true
+
+   # Leave blank for co-located mode: the app imports mcp_server.tool_specs locally.
+   AE_MCP_SERVER_URL=
+
+   # Or point at a remote MCP endpoint when the server runs on another machine.
+   # Example: http://mcp-host:8000/mcp
+   AE_MCP_SERVER_TRANSPORT=streamable-http
+   AE_MCP_SERVER_HEADERS_JSON=
+   AE_MCP_SERVER_TIMEOUT_SECONDS=30
    ```
+   Use `AE_MCP_SERVER_TRANSPORT=sse` only for legacy SSE servers. Streamable HTTP is the current default/recommended transport.
 
 3. **Optional**: keep selected dynamic AE workflow tools directly callable instead of routing them through the generic workflow runner:
    ```env
@@ -1391,11 +1404,11 @@ To expose the 106 `ae.*` tools (P0 + P1 support; e.g. `ae.request.get_summary`, 
    TOOL_FEEDBACK_HALF_LIFE_DAYS=7
    ```
 
-5. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will catalog the 106 MCP tools. A small support-focused subset is hydrated eagerly; the rest appear in the tool catalog and are available via RAG/`discover_tools` with lazy runtime hydration for the current turn. Discovery and turn-local hydration now use the same ranking step across custom tools, MCP tools, and workflow-backed tools, and that ranker incorporates recent tool success/failure history from the existing interaction log. When an agent-specific feedback history exists, it is preferred over the global aggregate. Dynamic AE workflow tools default to generic-runner exposure through `trigger_workflow` unless they are listed in `AE_DYNAMIC_DIRECT_TOOL_NAMES`.
+5. **Restart** the main application (AI Studio Extension process or `agent_server.py`). On startup, the tool registry will catalog the 106 MCP tools. If `AE_MCP_SERVER_URL` is blank, the app hydrates handlers from the local `mcp_server` Python package. If `AE_MCP_SERVER_URL` is set, the app discovers tool metadata from the remote server with `list_tools()` and executes tools remotely with `call_tool()`. A small support-focused subset is hydrated eagerly; the rest appear in the tool catalog and are available via RAG/`discover_tools` with lazy runtime hydration for the current turn. Discovery and turn-local hydration now use the same ranking step across custom tools, MCP tools, and workflow-backed tools, and that ranker incorporates recent tool success/failure history from the existing interaction log. When an agent-specific feedback history exists, it is preferred over the global aggregate. Dynamic AE workflow tools default to generic-runner exposure through `trigger_workflow` unless they are listed in `AE_DYNAMIC_DIRECT_TOOL_NAMES`.
 
 6. **Optional**: Ensure the agent catalog links the new tools to the orchestrator. The default behavior (`ensure_default_agent_links`) merges newly registered tool names into the orchestrator's `linkedTools`; no extra config is required.
 
-If `AE_MCP_TOOLS_ENABLED` is `false` (default), the main app does not load or depend on `mcp_server`.
+If `AE_MCP_TOOLS_ENABLED` is `false` (default), the main app does not load MCP tools. If remote MCP mode is enabled with `AE_MCP_SERVER_URL`, the main app does not need the local `mcp_server` package at runtime.
 
 ### 13.4 Tool Categories in the Main App
 

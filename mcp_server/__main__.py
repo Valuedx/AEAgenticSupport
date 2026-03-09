@@ -4,7 +4,7 @@ Entry point for the AutomationEdge MCP Server.
 Usage:
     python -m mcp_server                     # stdio transport (default)
     python -m mcp_server --transport sse     # SSE transport
-    python -m mcp_server --transport streamable-http  # HTTP transport
+    python -m mcp_server --transport streamable-http  # Streamable HTTP transport
 """
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--host",
-        default=MCP_CONFIG.get("MCP_HOST", "0.0.0.0"),
-        help="Host for HTTP/SSE transport (default: 0.0.0.0)",
+        default=MCP_CONFIG.get("MCP_HOST", "127.0.0.1"),
+        help="Host for HTTP/SSE transport (default: 127.0.0.1)",
     )
     parser.add_argument(
         "--port",
