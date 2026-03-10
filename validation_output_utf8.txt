@@ -1,0 +1,69 @@
+﻿python : workflow endpoint GET failed 
+(500). Trying POST.
+At line:1 char:1
++ python validate_categories.py > 
+validation_output.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecifie 
+   d: (workflow endpoi...). Trying POST.  
+  :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeComma 
+   ndError
+ 
+Could not load workflow details for 8138: 
+Client error '429 ' for url 'https://t4.au
+tomationedge.com/aeengine/rest/OMKAR_PATIL
+_3666/workflows/8138/config'
+For more information check: https://develo
+per.mozilla.org/en-US/docs/Web/HTTP/Status
+/429
+Initializing tooling for comprehensive validation...
+
+--- [CATEGORY: REQUEST] ---
+
+Testing tool: ae.request.list_recent
+Traceback (most recent call last):
+  File "D:\AEAgenticSupport\validate_categ
+ories.py", line 18, in test_tool
+    print(f"\u2705 SUCCESS: {tool_name}")
+  File 
+"D:\Python\Lib\encodings\cp1252.py", line 
+19, in encode
+    return codecs.charmap_encode(input,sel
+f.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't 
+encode character '\u2705' in position 0: 
+character maps to <undefined>
+
+During handling of the above exception, 
+another exception occurred:
+
+Traceback (most recent call last):
+  File "D:\AEAgenticSupport\validate_categ
+ories.py", line 79, in <module>
+    comprehensive_validation()
+  File "D:\AEAgenticSupport\validate_categ
+ories.py", line 36, in 
+comprehensive_validation
+    requests = 
+test_tool("ae.request.list_recent", 
+limit=1)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^
+  File "D:\AEAgenticSupport\validate_categ
+ories.py", line 26, in test_tool
+    print(f"\U0001f4a5 ERROR: {tool_name} 
+raised exception")
+  File 
+"D:\Python\Lib\encodings\cp1252.py", line 
+19, in encode
+    return codecs.charmap_encode(input,sel
+f.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't 
+encode character '\U0001f4a5' in position 
+0: character maps to <undefined>

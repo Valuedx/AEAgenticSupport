@@ -293,7 +293,19 @@ class IssueTracker:
         failure_words = ["fail", "error", "broken", "down", "stuck", "issue"]
         if not any(fw in msg_lower for fw in failure_words):
             return None
-        for issue in self._get_active_issues():
+
+        # Short diagnostic follow-up questions (e.g. "why did this fail?", "can you explain
+        # why this process failed") should NOT be treated as a cascade incident.
+        # They are naturally short, lack specific workflow names, and refer to the
+        # active issue via pronouns ("this", "it"). Let the LLM classifier handle them.
+        word_count = len(msg_lower.split())
+        diagnostic_cues = {"why", "explain", "what", "how", "reason", "cause"}
+        has_diagnostic_intent = bool(set(msg_lower.split()) & diagnostic_cues)
+        active_issues = self._get_active_issues()
+        if word_count <= 15 and has_diagnostic_intent and active_issues:
+            return None
+
+        for issue in active_issues:
             active_wfs = {wf.lower() for wf in issue.workflows_involved}
             mentions_active = any(
                 any(p in msg_lower

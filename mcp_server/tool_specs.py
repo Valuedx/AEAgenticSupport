@@ -97,6 +97,24 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         },
         "extra_tags": ["restart", "recovery", "failed-request"],
     },
+    "ae.request.restart": {
+        "title": "Request: Restart Workflow",
+        "description": "Trigger a restart of an AutomationEdge request using the dedicated restart API (PUT).",
+        "use_when": "You need to restart a request as per specific user instruction or recovery SOP.",
+        "input_examples": [
+            {
+                "request_id": "2501865",
+                "reason": "User requested restart via support console",
+                "requested_by": "ops.l2",
+                "case_id": "INC-4250",
+                "dry_run": True,
+            }
+        ],
+        "parameter_docs": {
+            "reason": "Reason for the restart (passed to the AE API).",
+        },
+        "extra_tags": ["restart", "workflow-restart", "remediation"],
+    },
     "ae.request.terminate_running": {
         "title": "Request: Terminate Running Execution",
         "description": "Terminate a currently running AutomationEdge request that is hung, unsafe, or no longer needed.",
@@ -587,7 +605,7 @@ def _make_structured_handler(handler: Callable[..., Any], tool_name: str) -> Cal
     return _wrapper
 
 
-def _build_annotations(safety: str, title: str) -> ToolAnnotations:
+def _build_annotations(safety: str, title: str, app_category: str = "") -> ToolAnnotations:
     safe = str(safety or "").strip()
     return ToolAnnotations(
         title=title,
@@ -595,6 +613,7 @@ def _build_annotations(safety: str, title: str) -> ToolAnnotations:
         destructiveHint=safe in {"guarded", "privileged"},
         idempotentHint=safe == "safe_read",
         openWorldHint=True,
+        appCategory=app_category,
     )
 
 
@@ -641,7 +660,7 @@ class MCPToolSpec:
 
     @cached_property
     def annotations(self) -> ToolAnnotations:
-        return _build_annotations(self.safety, self.resolved_title)
+        return _build_annotations(self.safety, self.resolved_title, self.app_category)
 
     @cached_property
     def tags(self) -> list[str]:
@@ -773,6 +792,7 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.request.get_failure_message", _req_read.request_get_failure_message, "request_read", "safe_read"),
         _spec("ae.request.build_support_snapshot", _req_read.request_build_support_snapshot, "request_read", "safe_read"),
         _spec("ae.request.list_recent", _req_read.request_list_recent, "request_read", "safe_read"),
+        _spec("ae.request.get_logs", _req_read.request_get_logs, "request_read", "safe_read"),
         _spec("ae.request.get_source_context", _req_read.request_get_source_context, "request_read", "safe_read"),
         _spec("ae.request.get_time_details", _req_read.request_get_time_details, "request_read", "safe_read"),
         _spec("ae.request.get_execution_details", _req_diag.request_get_execution_details, "request_diag", "safe_read"),
@@ -785,6 +805,7 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.request.compare_attempts", _req_diag.request_compare_attempts, "request_diag", "safe_read"),
         _spec("ae.request.export_diagnostic_bundle", _req_diag.request_export_diagnostic_bundle, "request_diag", "safe_read"),
         _spec("ae.request.generate_support_narrative", _req_diag.request_generate_support_narrative, "request_diag", "safe_read"),
+        _spec("ae.request.restart", _req_mutate.request_restart, "request_mutate", "guarded"),
         _spec("ae.request.restart_failed", _req_mutate.request_restart_failed, "request_mutate", "guarded"),
         _spec("ae.request.terminate_running", _req_mutate.request_terminate_running, "request_mutate", "privileged"),
         _spec("ae.request.resubmit_from_failure_point", _req_mutate.request_resubmit_from_failure_point, "request_mutate", "guarded"),

@@ -1013,10 +1013,38 @@ Currently focused issue: {active.issue_id if active else 'None'}
 
 IMPORTANT: Scope your investigation to the currently focused issue."""
 
+        # ── Recent Tool Context (Cross-Turn Memory) ──
+        # Inject the most recent tool findings into the prompt so that when a
+        # follow-up question arrives (e.g. "explain why this failed"), the agent
+        # knows which execution_id or workflow was found moments earlier.
+        tool_context = ""
+        if state.tool_call_log:
+            recent_calls = state.tool_call_log[-3:]
+            interesting_keys = {"execution_id", "workflow_name", "workflow", "request_id", "id", "name"}
+            extracted: dict[str, str] = {}
+            for call in recent_calls:
+                result_data = call.get("result") or {}
+                if isinstance(result_data, dict):
+                    for row in result_data.get("instances", result_data.get("failures", [result_data])):
+                        if not isinstance(row, dict):
+                            continue
+                        for k, v in row.items():
+                            if k.lower() in interesting_keys and v and str(v).strip():
+                                extracted[k.lower()] = str(v).strip()
+            if extracted:
+                ctx_lines = "\n".join(f"  - {k}: {v}" for k, v in extracted.items())
+                tool_context = f"""
+## Recent Tool Findings (from this conversation turn)
+The following technical values were found in the most recent tool calls.
+Use them directly when investigating instead of asking the user to repeat them:
+{ctx_lines}
+CRITICAL: If the user asks to investigate or explain a failure and an execution_id is listed above,
+you MUST call get_execution_logs with that execution_id immediately."""
+
         lang_instr = f"\n## Response Language: {state.preferred_language.upper()}\n"
         lang_instr += f"IMPORTANT: Respond to the user in {state.preferred_language.upper()} only. Keep internal reasoning (if any) or tool outputs as is, but the final text to the user MUST be in {state.preferred_language.upper()}."
 
-        return f"{base_prompt}\n{persona}\n{issue_context}\n{lang_instr}"
+        return f"{base_prompt}\n{persona}\n{issue_context}\n{tool_context}\n{lang_instr}"
 
     def _preflight_workflow_param_collection(
         self,

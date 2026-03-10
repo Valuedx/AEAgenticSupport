@@ -1,0 +1,52 @@
+
+# Practical Deployment Gaps Analysis
+
+This document identifies the missing components required for an enterprise-ready production deployment of the **AE Agentic Support** system, specifically focusing on user identity and referral sources.
+
+## 1. User Identity & Authentication Gaps
+
+### Identity Verification
+- **Current State**: The system accepts [user_id](custom/custom_hooks.py) as a string from the incoming message activity (Teams ID or Web ID).
+- **Gap**: There is no **Identity Provider (IdP) integration** (e.g., OIDC, SAML, or LDAP).
+- **Practical Impact**: A user could potentially spoof another user's ID in the webchat if the gateway isn't protected by a verifiable token (JWT).
+
+### Profile Resolution
+- **Current State**: Users are referred to by raw IDs (e.g., `29:1x...`).
+- **Gap**: Missing a **User Profile Resolver**.
+- **Practical Impact**: The Orchestrator and Diagnostic agents cannot refer to users by name or department, making RCA reports and notifications less human-readable.
+
+## 2. Authorization & Role Management Gaps
+
+### Permission Source of Truth
+- **Current State**: Roles (admin, dev, support) are injected into the session or passed via `channelData`.
+- **Gap**: Integration with an **External Authorization Store** (e.g., Active Directory Groups, AE User Roles).
+- **Practical Impact**: Roles must be manually updated in the extension or server config instead of following the organization's existing RBAC policy.
+
+### User-to-AE Binding
+- **Current State**: All actions are performed via a single technical service account (`AE_API_KEY`).
+- **Gap**: **User Impersonation / On-Behalf-Of (OBO) flow**.
+- **Practical Impact**: Audit logs inside the AutomationEdge platform show the *Agent* performed the fix, not the *Approver*. For compliance, the Teams user should be mapped to an AE platform user.
+
+## 3. Operational Implementation Gaps
+
+### Dynamic Roster Management
+- **Current State**: The [roster.py](custom/helpers/roster.py) file is a hardcoded list of IDs and shifts.
+- **Gap**: **Dynamic On-Shift Integration** (e.g., PagerDuty, Opsgenie, or Jira Service Management).
+- **Practical Impact**: Approvals may be routed to users who are on leave or off-shift unless the code is manually updated and redeployed.
+
+### Multi-Tenancy Routing
+- **Current State**: `AE_ORG_CODE` is a global configuration setting.
+- **Gap**: **Tenant Mapping Layer**.
+- **Practical Impact**: If the bot serves multiple customers or isolated business units, it cannot currently "refer" the user to the correct organization instance without a mapping between their email/domain and the `ORG_CODE`.
+
+## 4. Security & Compliance Gaps
+
+### PII Masking Source
+- **Current State**: Basic pattern-based masking exists in some logs.
+- **Gap**: **Centralized Data Loss Prevention (DLP) referral**.
+- **Practical Impact**: Sensitive user data within logs (like filenames or folder paths) might leak into the LLM context without a robust, enterprise-wide DLP check.
+
+---
+
+> [!IMPORTANT]
+> To move to "Production Grade," the first priority should be replacing the static [roster.py](custom/helpers/roster.py) with a database-backed store and implementing a JWT-based authentication layer for the [agent_server.py](agent_server.py).

@@ -47,13 +47,16 @@ def test_server_registers_annotations_and_full_signature():
 def test_main_app_bridge_preserves_mcp_metadata_and_optional_args():
     registry = ToolRegistry()
     original_flag = CONFIG.get("AE_MCP_TOOLS_ENABLED", False)
+    original_url = CONFIG.get("AE_MCP_SERVER_URL", "")
     CONFIG["AE_MCP_TOOLS_ENABLED"] = True
+    CONFIG["AE_MCP_SERVER_URL"] = ""
 
     try:
         with patch.object(mcp_tools, "tool_registry", registry):
             mcp_tools._register_mcp_tools()
     finally:
         CONFIG["AE_MCP_TOOLS_ENABLED"] = original_flag
+        CONFIG["AE_MCP_SERVER_URL"] = original_url
 
     tool = registry.get_tool("ae.support.build_case_snapshot")
 

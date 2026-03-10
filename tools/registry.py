@@ -682,6 +682,18 @@ class ToolRegistry:
             if not wf_id:
                 continue
             try:
+                # OPTIMIZATION (T4): If list data (Catalogue) already has enough info, skip the explicit detail probe.
+                # T4 Catalogue lists often contain the parameters and config blocks needed for tool mapping.
+                # We check for 'parameters' (normalized) and common agentic config top-level keys.
+                has_params = bool(wf.get("parameters") or wf.get("params"))
+                has_config = any(
+                    str(k).lower() in {"agentictoolconfiguration", "agenticaitoolconfiguration", "tooldetails"}
+                    for k in wf.keys()
+                )
+                if has_params and has_config:
+                    details_by_workflow[wf_name] = wf
+                    continue
+
                 details = client.get_workflow_details(wf_id)
                 if wf_name:
                     details_by_workflow[wf_name] = details
@@ -880,10 +892,15 @@ class ToolRegistry:
             if query and query.strip():
                 rag_hits = get_rag_engine().search_tools(query, top_k=max(top_k * 3, top_k))
 
+            # Special handling for 'automationedge' category used by orchestrator preflight
+            search_categories = [category] if category else None
+            if category == "automationedge":
+                search_categories = ["dependency", "status", "logs", "agent", "remediation"]
+
             results = self.rank_tool_candidates(
                 query,
                 rag_hits=rag_hits,
-                allowed_categories=[category] if category else None,
+                allowed_categories=search_categories,
                 top_k=top_k,
                 include_category_fallback=bool(category),
                 feedback_agent_id=_agent_id,

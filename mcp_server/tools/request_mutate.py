@@ -54,6 +54,38 @@ async def request_restart_failed(
     })
 
 
+# ── ae.request.restart ────────────────────────────────────────────────
+
+async def request_restart(
+    request_id: str,
+    reason: str,
+    requested_by: str = "",
+    case_id: str = "",
+    dry_run: bool = False,
+) -> str:
+    """Restart a workflow request (Generic)."""
+    if dry_run:
+        return _safe_json({
+            "dry_run": True,
+            "action": "restart",
+            "request_id": request_id,
+            "reason": reason,
+            "message": f"Would restart request {request_id}. No changes made.",
+        })
+
+    data = get_ae_client().restart_request(request_id, reason=reason)
+    return _safe_json({
+        "success": True,
+        "action": "restart",
+        "request_id": request_id,
+        "message": data.get("message", f"Request [{request_id}] has been restarted"),
+        "reason": reason,
+        "requested_by": requested_by,
+        "case_id": case_id,
+        "raw": data,
+    })
+
+
 # ── ae.request.terminate_running ──────────────────────────────────────
 
 async def request_terminate_running(

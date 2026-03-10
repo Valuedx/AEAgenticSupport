@@ -312,6 +312,29 @@ async def request_list_awaiting_input(
     return _safe_json({"results": items, "count": len(items)})
 
 
+# ── ae.request.get_logs ───────────────────────────────────────────────
+
+async def request_get_logs(request_id: str, tail: int = 100) -> str:
+    """Retrieve raw execution logs for a request (tail)."""
+    client = get_ae_client()
+    data = client.get_request_logs(request_id, tail=tail)
+    
+    # Handle the fact that get_request_logs now returns a list of lines/dicts
+    log_lines = []
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict):
+                log_lines.append(entry.get("message") or entry.get("details") or str(entry))
+            else:
+                log_lines.append(str(entry))
+    
+    return _safe_json({
+        "request_id": request_id,
+        "logs": log_lines,
+        "count": len(log_lines),
+    })
+
+
 # ── ae.request.get_input_parameters ──────────────────────────────────
 
 async def request_get_input_parameters(

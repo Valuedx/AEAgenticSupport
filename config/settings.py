@@ -53,7 +53,7 @@ CONFIG = {
     "AE_REST_BASE_PATH": _derived_rest_path,
     "AE_AUTH_ENDPOINT": os.environ.get("AE_AUTH_ENDPOINT", "/authenticate"),
     "AE_EXECUTE_ENDPOINT": os.environ.get("AE_EXECUTE_ENDPOINT", "/execute"),
-    "AE_WORKFLOWS_ENDPOINT": os.environ.get("AE_WORKFLOWS_ENDPOINT", "/workflows"),
+    "AE_WORKFLOWS_ENDPOINT": os.environ.get("AE_WORKFLOWS_ENDPOINT", "/workflows/catalogue"),
     "AE_WORKFLOWS_METHOD": os.environ.get("AE_WORKFLOWS_METHOD", "GET"),
     "AE_WORKFLOW_DETAILS_ENDPOINT": os.environ.get(
         "AE_WORKFLOW_DETAILS_ENDPOINT", "/{org_code}/workflows/{workflow_identifier}/config"

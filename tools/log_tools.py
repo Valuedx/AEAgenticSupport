@@ -12,6 +12,37 @@ logger = logging.getLogger("ops_agent.tools.logs")
 
 def get_execution_logs(execution_id: str, tail: int = 100) -> dict:
     resp = get_ae_client().get_execution_logs(execution_id=execution_id, tail=tail)
+    
+    # Handle ZIP content for T4 fallback
+    if resp.get("is_zip") and resp.get("log_zip_content"):
+        import io
+        import zipfile
+        import gzip
+        try:
+            with zipfile.ZipFile(io.BytesIO(resp["log_zip_content"])) as z:
+                all_logs = []
+                for name in z.namelist():
+                    if name.lower().endswith(".gz"):
+                        with z.open(name) as fz:
+                            with gzip.GzipFile(fileobj=fz) as f:
+                                content = f.read().decode("utf-8", errors="ignore")
+                                all_logs.extend(content.splitlines()[-tail:])
+                    elif name.lower().endswith(".log"):
+                        with z.open(name) as f:
+                            content = f.read().decode("utf-8", errors="ignore")
+                            all_logs.extend(content.splitlines()[-tail:])
+                
+                return {
+                    "execution_id": execution_id,
+                    "workflow_name": resp.get("workflow_name", ""),
+                    "logs": all_logs,
+                    "log_count": len(all_logs),
+                    "note": f"Extracted from T4 debug logs ({len(z.namelist())} files)"
+                }
+        except Exception as exc:
+            logger.error("Failed to extract ZIP logs: %s", exc)
+            return {"execution_id": execution_id, "error": f"Log extraction failed: {exc}", "logs": []}
+
     logs = resp.get("logs", [])
     return {
         "execution_id": execution_id,

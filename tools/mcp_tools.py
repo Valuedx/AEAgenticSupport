@@ -13,6 +13,7 @@ import concurrent.futures
 import inspect
 import json
 import logging
+from datetime import timedelta
 from typing import Any, Callable
 
 from config.settings import CONFIG
@@ -76,16 +77,16 @@ def _parse_remote_mcp_headers() -> dict[str, str]:
     return headers
 
 
-def _get_remote_mcp_timeout_seconds() -> float:
+def _get_remote_mcp_timeout_seconds() -> timedelta:
     raw_timeout = CONFIG.get(
         "AE_MCP_SERVER_TIMEOUT_SECONDS",
         CONFIG.get("AE_TIMEOUT_SECONDS", 30),
     )
     try:
-        return float(raw_timeout or 30)
+        return timedelta(seconds=float(raw_timeout or 30))
     except (TypeError, ValueError):
         logger.warning("Invalid AE_MCP_SERVER_TIMEOUT_SECONDS=%r; defaulting to 30", raw_timeout)
-        return 30.0
+        return timedelta(seconds=30)
 
 
 def _serialize_annotations(annotations: Any) -> dict[str, Any]:
@@ -99,7 +100,7 @@ def _serialize_annotations(annotations: Any) -> dict[str, Any]:
 
 
 def _get_remote_tool_meta(remote_tool: Any) -> dict[str, Any]:
-    meta = getattr(remote_tool, "meta", None)
+    meta = getattr(remote_tool, "_meta", None) or getattr(remote_tool, "meta", None)
     return dict(meta or {})
 
 
@@ -111,6 +112,9 @@ def _derive_remote_tool_tier(meta: dict[str, Any], annotations: dict[str, Any]) 
         return "read_only"
     if annotations.get("destructiveHint") is True:
         return "high_risk"
+    # Safety heuristic based on annotations
+    if annotations.get("idempotentHint") is True:
+        return "read_only"
     return "low_risk"
 
 
@@ -123,6 +127,31 @@ def _derive_remote_tool_safety(meta: dict[str, Any], annotations: dict[str, Any]
     if annotations.get("destructiveHint") is True:
         return "guarded"
     return ""
+
+
+def _derive_remote_tool_category(meta: dict[str, Any], tool_name: str, annotations: dict[str, Any]) -> str:
+    # 1. Check explicit meta from server
+    explicit = str(meta.get("app_category", "") or meta.get("category", "") or "").strip()
+    if explicit:
+        return explicit
+
+    # 2. Check for hints in annotations (passed via remote bridge)
+    hint = str(annotations.get("appCategory", "") or "").strip()
+    if hint:
+        return hint
+
+    # 3. Fallback: Systematic prefix inference for AutomationEdge tools
+    parts = tool_name.split(".")
+    if len(parts) >= 2 and parts[0] == "ae":
+        prefix = parts[1]
+        if prefix in ("workflow", "schedule", "permission", "user"):
+            return "dependency"
+        if prefix in ("request", "agent", "task", "credential", "platform", "result"):
+            return "status"
+        if prefix == "support":
+            return "logs"
+
+    return "status"
 
 
 def _coerce_input_examples(raw_examples: Any) -> list[dict[str, Any]]:
@@ -362,6 +391,7 @@ def _register_remote_mcp_tools() -> None:
     for remote_tool in remote_tools:
         meta = _get_remote_tool_meta(remote_tool)
         annotations = _serialize_annotations(getattr(remote_tool, "annotations", None))
+        category = _derive_remote_tool_category(meta, remote_tool.name, annotations)
         tier = _derive_remote_tool_tier(meta, annotations)
         safety = _derive_remote_tool_safety(meta, annotations)
         always_available = bool(meta.get("always_available", False))
@@ -377,7 +407,7 @@ def _register_remote_mcp_tools() -> None:
         definition = ToolDefinition(
             name=remote_tool.name,
             description=str(getattr(remote_tool, "description", "") or f"Remote MCP tool {remote_tool.name}"),
-            category=str(meta.get("app_category", "status") or "status"),
+            category=category,
             tier=tier,
             parameters=dict(parameters.get("properties", {}) or {}),
             required_params=list(parameters.get("required", []) or []),
@@ -387,7 +417,7 @@ def _register_remote_mcp_tools() -> None:
             input_examples=input_examples,
             metadata={
                 "source": "mcp",
-                "title": str(getattr(remote_tool, "title", "") or remote_tool.name),
+                "title": str(annotations.get("title") or getattr(remote_tool, "title", "") or remote_tool.name),
                 "tags": list(meta.get("tags", []) or []),
                 "mcp_category": str(meta.get("category", "") or ""),
                 "safety": safety,

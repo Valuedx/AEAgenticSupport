@@ -189,7 +189,49 @@ def ae_workflow_details(workflow_identifier):
     return jsonify(wf)
 
 
-# ── Workflow endpoints ──
+# ── Debug Log Flow (T4) ──
+
+DEBUG_LOG_REQUESTS = {}
+
+@mock_app.route("/aeengine/rest/agent/debuglogs", methods=["POST"])
+def ae_request_debug_logs():
+    if not _validate_session():
+        return jsonify({"error": "invalid or missing session token"}), 401
+    
+    data = request.json or {}
+    req_id = random.randint(1000, 9999)
+    DEBUG_LOG_REQUESTS[req_id] = {
+        "id": req_id,
+        "workflowInstanceId": data.get("workflowInstanceId"),
+        "status": "NEW",
+        "logFileLink": None,
+        "poll_count": 0
+    }
+    return jsonify(DEBUG_LOG_REQUESTS[req_id])
+
+@mock_app.route("/aeengine/rest/agent/debuglogs/<int:request_id>", methods=["GET"])
+def ae_get_debug_log_request(request_id):
+    if not _validate_session():
+        return jsonify({"error": "invalid or missing session token"}), 401
+    
+    req = DEBUG_LOG_REQUESTS.get(request_id)
+    if not req:
+        return jsonify({"error": "request not found"}), 404
+    
+    req["poll_count"] += 1
+    if req["poll_count"] >= 2:
+        req["status"] = "COMPLETED"
+        req["logFileLink"] = f"/aeengine/rest/agent/debuglogs/download/{request_id}"
+        
+    return jsonify(req)
+
+@mock_app.route("/aeengine/rest/agent/debuglogs/download/<int:request_id>", methods=["GET"])
+def ae_download_debug_log(request_id):
+    if not _validate_session():
+        return jsonify({"error": "invalid or missing session token"}), 401
+    
+    # Simulate a ZIP response
+    return "MOCK_ZIP_CONTENT", 200, {"Content-Type": "application/zip"}
 
 @mock_app.route("/api/v1/workflows/<name>/status")
 def workflow_status(name):

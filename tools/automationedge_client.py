@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import threading
 from typing import Any, Optional
@@ -132,7 +133,12 @@ class AutomationEdgeClient:
     def _json_or_text(self, response: httpx.Response) -> Any:
         try:
             return response.json()
-        except ValueError:
+        except (ValueError, json.JSONDecodeError):
+            # If not JSON, check if it's binary/ZIP (common for T4 debug logs)
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "zip" in content_type or "octet-stream" in content_type:
+                logger.info("Response is binary/ZIP, returning for manual extraction.")
+                return {"is_zip": True, "log_zip_content": response.content}
             return {"raw": response.text}
 
     def authenticate(self, force: bool = False) -> str:
@@ -200,37 +206,124 @@ class AutomationEdgeClient:
         headers: Optional[dict] = None,
         use_rest_prefix: bool = False,
         retry_on_401: bool = True,
+        silent_on_status: Optional[list[int]] = None,
     ) -> Any:
+        import time
         request_path = self._rest_path(path) if use_rest_prefix else self._normalize_path(path)
         request_headers = self._build_auth_headers(headers)
-        response = self._client.request(
-            method.upper(),
-            request_path,
-            params=params,
-            json=payload,
-            data=data,
-            headers=request_headers,
-        )
+        
+        # Ensure JSON content type for writable methods with payload
+        if method.upper() in ("POST", "PUT") and payload is not None:
+             request_headers.setdefault("Content-Type", "application/json")
 
-        if (
-            response.status_code == 401
-            and retry_on_401
-            and self.use_session_auth
-        ):
-            logger.info("AE returned 401, re-authenticating and retrying once.")
-            self.authenticate(force=True)
-            retry_headers = self._build_auth_headers(headers)
-            response = self._client.request(
-                method.upper(),
-                request_path,
-                params=params,
-                json=payload,
-                data=data,
-                headers=retry_headers,
-            )
+        response = None
+        for attempt in range(2):
+            try:
+                response = self._client.request(
+                    method.upper(),
+                    request_path,
+                    params=params,
+                    json=payload,
+                    data=data,
+                    headers=request_headers,
+                )
 
-        response.raise_for_status()
+                if response.status_code == 401 and retry_on_401 and self.use_session_auth and attempt == 0:
+                    logger.info("AE returned 401, re-authenticating and retrying once.")
+                    self.authenticate(force=True)
+                    request_headers = self._build_auth_headers(headers)
+                    continue
+                
+                if response.status_code == 429 and attempt == 0:
+                    logger.warning("AE returned 429 Too Many Requests for %s. Backing off for 5s.", request_path)
+                    time.sleep(5)
+                    continue
+                    
+                break
+            except httpx.RequestError as exc:
+                if attempt == 0:
+                    logger.warning("Request error for %s (attempt %d): %s. Retrying after 2s.", request_path, attempt+1, exc)
+                    time.sleep(2)
+                    continue
+                raise exc
+
+        if response is None:
+            raise RuntimeError(f"Request to {request_path} failed after all retries.")
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            silent = silent_on_status or []
+            if response.status_code not in silent:
+                try:
+                    error_body = response.text
+                    logger.error("AE API Error %d for %s: %s", response.status_code, request_path, error_body)
+                except Exception:
+                    pass
+            raise exc
+
         return self._json_or_text(response)
+
+    def restart_request(self, execution_id: str, reason: str = "") -> dict:
+        """Restart a workflow instance using the T4 PUT /restart endpoint.
+
+        T4 uses PUT to /restart with the execution_id in the path to resume
+        an instance using its original state.
+        """
+        paths = [
+            f"/{self.default_org_code}/workflowinstances/{execution_id}/restart" if self.default_org_code else None,
+            f"/workflowinstances/{execution_id}/restart",
+        ]
+        paths = [p for p in paths if p]
+        last_exc = None
+        # T4 variability: try with and without /aeengine/rest prefix
+        for use_prefix in (True, False):
+            for path in paths:
+                try:
+                    return self._authorized_request(
+                        "PUT",
+                        path,
+                        payload={"reason": reason},
+                        use_rest_prefix=use_prefix
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    logger.debug(f"Restart attempt failed for {path} (prefix={use_prefix}): {exc}")
+                    continue
+        raise last_exc or RuntimeError(f"Could not restart {execution_id}")
+
+    def terminate_request(self, request_id: str, reason: str = "") -> dict:
+        """Terminate a running instance."""
+        paths = [
+            f"/{self.default_org_code}/workflowinstances/{request_id}/terminate" if self.default_org_code else None,
+            f"/workflowinstances/{request_id}/terminate",
+        ]
+        paths = [p for p in paths if p]
+        last_exc = None
+        for path in paths:
+            try:
+                return self._authorized_request("POST", path, payload={"reason": reason}, use_rest_prefix=True)
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise last_exc or RuntimeError(f"Could not terminate {request_id}")
+
+    def resubmit_request(self, request_id: str, reason: str = "", from_failure_point: bool = True) -> dict:
+        """Resubmit a failed instance (either from failure point or start)."""
+        paths = [
+            f"/{self.default_org_code}/workflowinstances/{request_id}/resubmit" if self.default_org_code else None,
+            f"/workflowinstances/{request_id}/resubmit",
+        ]
+        paths = [p for p in paths if p]
+        payload = {"reason": reason, "fromFailurePoint": from_failure_point}
+        last_exc = None
+        for path in paths:
+            try:
+                return self._authorized_request("POST", path, payload=payload, use_rest_prefix=True)
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise last_exc or RuntimeError(f"Could not resubmit {request_id}")
 
     def request(
         self,
@@ -492,6 +585,7 @@ class AutomationEdgeClient:
                         self.workflow_details_method,
                         path,
                         use_rest_prefix=use_prefix,
+                        silent_on_status=[400, 404, 500],
                     )
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in {400, 404, 500}:
@@ -520,7 +614,11 @@ class AutomationEdgeClient:
         for use_prefix in (False, True):
             for path in paths:
                 try:
-                    result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
+                    result = self._authorized_request(
+                        "GET", path, 
+                        use_rest_prefix=use_prefix,
+                        silent_on_status=[400, 404, 500]
+                    )
                     return result
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in {400, 404, 500}:
@@ -664,46 +762,157 @@ class AutomationEdgeClient:
         raise last_exc or RuntimeError(f"Could not fetch instances for workflow '{workflow_name}'")
 
     def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
-        """Get execution logs by execution id with T4 fallback paths."""
+        """Get execution logs by execution id with T4 fallback paths and debug log flow."""
         if not execution_id:
             raise ValueError("execution_id is required")
 
-        modern_paths = [f"/api/v1/executions/{execution_id}/logs"]
-        t4_paths = [
-            f"/workflowinstances/{execution_id}/logs",
-            f"/executions/{execution_id}/logs",
+        # Phase 1: Try a small set of direct paths to avoid 429 rate limits
+        # Only Accept header is needed for GET logs
+        headers = {"Accept": "*/*"}
+        
+        # We'll try the most likely combinations on T4 and modern AE
+        attempts = [
+            # T4 standard (no prefix)
+            ("GET", f"/workflowinstances/{execution_id}/logs", False),
+            # T4 org-scoped (no prefix)
+            ("GET", f"/{self.default_org_code}/workflowinstances/{execution_id}/logs", False) if self.default_org_code else None,
+            # Modern AE (no prefix)
+            ("GET", f"/api/v1/executions/{execution_id}/logs", False),
+            # T4 standard (with prefix) - common failure point but checked once
+            ("GET", f"/workflowinstances/{execution_id}/logs", True),
         ]
-        if self.default_org_code:
-            t4_paths.insert(1, f"/{self.default_org_code}/workflowinstances/{execution_id}/logs")
+        attempts = [a for a in attempts if a]
+        
         last_exc: Optional[Exception] = None
-        for path in modern_paths:
+        
+        for method, path, use_prefix in attempts:
             try:
+                # Use tail only if explicitly requested and > 0
+                params = {"tail": tail} if tail > 0 else {}
                 return self._authorized_request(
-                    "GET",
+                    method,
                     path,
-                    params={"tail": tail},
-                    use_rest_prefix=False,
+                    params=params,
+                    headers=headers,
+                    use_rest_prefix=use_prefix,
+                    silent_on_status=[400, 404, 429, 500],
                 )
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in {400, 404, 500}:
-                    last_exc = exc
+                last_exc = exc
+                # If we hit 400 (unsupported) or 429 (rate limit), stop Phase 1 early and try Phase 2
+                if exc.response.status_code in (400, 429):
+                    logger.warning(f"Phase 1 path {path} failed with {exc.response.status_code}. Moving to Phase 2.")
+                    break
+                # On 404, just continue to next attempt
+                continue
+            except Exception as exc:
+                last_exc = exc
+                continue
+
+        # Phase 2: T4 Debug Log Flow (Request-Poll-Download)
+        # This is the "fallback of last resort" for T4 where /logs is restricted
+        logger.info(f"Phase 2: Initiating T4 debug log flow for execution {execution_id}")
+        try:
+            # 1. Get execution status for metadata
+            status_data = self.get_execution_status(execution_id)
+            # T4 Date extraction
+            from_date = status_data.get("startTime") or status_data.get("createdDate")
+            to_date = status_data.get("endTime") or status_data.get("lastUpdatedDate")
+            
+            # Start/End dates are required for debug log post
+            if not from_date:
+                # Fallback to current time - 1h if missing (in ms)
+                from_date = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
+            if not to_date:
+                to_date = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+            # 2. Request debug log generation
+            debug_req = self.request_debug_logs(execution_id, from_date, to_date)
+            req_id = debug_req.get("id")
+            if not req_id:
+                 raise RuntimeError(f"T4 debug log request failed: {debug_req}")
+
+            # 3. Poll for logFileLink
+            import time
+            for poll_attempt in range(10): # Max ~90s
+                # T4 can take several seconds to register a debug log request
+                # 10s initial wait avoids AE-1603 (Invalid log request id) on first poll
+                wait = 10 if poll_attempt == 0 else 5
+                time.sleep(wait)
+                 # T4 SUCCESS PATH: /agent/debuglogs/{id} returns the ZIP bytes directly.
+                # _json_or_text encodes this as {"is_zip": True, "log_zip_content": <bytes>}
+                updated = self.get_debug_log_request(str(req_id))
+                if updated.get("is_zip") or updated.get("log_zip_content"):
+                    logger.info(f"T4 debug log request {req_id}: received binary ZIP content directly.")
+                    return updated
+
+                link = updated.get("logFileLink")
+                if link:
+                    logger.info(f"T4 debug log ready via link: {link}")
+                    # 4. Download (use rest prefix False as it's typically an absolute-ish or full path)
+                    return self._authorized_request("GET", link, use_rest_prefix=False)
+                
+                if (updated.get("status") or "").upper() in ("FAILED", "ERROR"):
+                    raise RuntimeError(f"T4 debug log request {req_id} failed on server.")
+                
+                # AE-1603: server hasn't registered the request yet - treat as retryable
+                error_code = str(updated.get("errorCode") or "").strip() if isinstance(updated, dict) else ""
+                if error_code == "AE-1603" and poll_attempt < 5:
+                    logger.info(f"Poll {poll_attempt+1}: AE-1603 received, T4 hasn't registered request yet. Retrying...")
                     continue
-                raise
-        for use_prefix in (False, True):
-            for path in t4_paths:
+                
+                logger.debug(f"T4 debug log request {req_id} still not ready (attempt {poll_attempt+1}), polling again...")
+            
+            raise RuntimeError(f"T4 debug log request {req_id} timed out waiting for link.")
+
+        except Exception as flow_err:
+             logger.error(f"Phase 2 Flow failed for {execution_id}: {flow_err}")
+             # If Phase 2 fails, raise the flow error but keep Phase 1 error as context
+             if last_exc:
+                 raise flow_err from last_exc
+             raise flow_err
+
+    def request_debug_logs(self, execution_id: str, from_date: Any = None, to_date: Any = None) -> dict:
+        """Request T4 agent debug logs for a workflow instance."""
+        try:
+            val = int(execution_id)
+        except (ValueError, TypeError):
+            val = execution_id
+
+        payload = {
+            "workflowInstanceId": val,
+            "fromDate": from_date,
+            "toDate": to_date,
+        }
+        return self._authorized_request(
+            "POST",
+            "/agent/debuglogs",
+            payload=payload,
+            use_rest_prefix=True
+        )
+
+    def get_debug_log_request(self, request_id: str) -> dict:
+        """Get status of a T4 debug log request.
+        
+        Returns the response dict. Returns error dict on AE-1603 (request not yet available)
+        so the poll loop can retry gracefully without raising.
+        """
+        try:
+            return self._authorized_request(
+                "GET",
+                f"/agent/debuglogs/{request_id}",
+                use_rest_prefix=True
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 500:
                 try:
-                    return self._authorized_request(
-                        "GET",
-                        path,
-                        params={"tail": tail},
-                        use_rest_prefix=use_prefix,
-                    )
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code in {400, 404, 500}:
-                        last_exc = exc
-                        continue
-                    raise
-        raise last_exc or RuntimeError(f"Could not fetch logs for execution {execution_id}")
+                    err_body = exc.response.json()
+                    if str(err_body.get("errorCode", "")).strip() == "AE-1603":
+                        # T4 hasn't registered the request yet - return as retryable dict
+                        return {"errorCode": "AE-1603", "status": "PENDING", "id": request_id}
+                except Exception:
+                    pass
+            raise
 
     def poll_execution_status(
         self,

@@ -217,11 +217,56 @@ class AEClient:
         return self._extract_list(raw)
 
     def get_request_logs(self, request_id: str, tail: int = 200) -> Any:
-        return self._try_paths("GET", [
-            f"/{self.org}/workflowinstances/{request_id}/logs",
-            f"/workflowinstances/{request_id}/logs",
-            f"/executions/{request_id}/logs",
-        ], params={"tail": tail})
+        try:
+            return self._try_paths("GET", [
+                f"/{self.org}/workflowinstances/{request_id}/logs",
+                f"/workflowinstances/{request_id}/logs",
+                f"/executions/{request_id}/logs",
+            ], params={"tail": tail})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400:
+                logger.info("Standard logs 400, trying agent/debuglogs fallback for %s", request_id)
+                try:
+                    # 1. Trigger
+                    self.post("/agent/debuglogs", params={"workflowInstanceId": request_id})
+                    
+                    # 2. Poll (simplified for MCP)
+                    import time
+                    for _ in range(5):
+                        time.sleep(2)
+                        logs_resp = self.get("/agent/debuglogs")
+                        if isinstance(logs_resp, list):
+                            match = next((l for l in logs_resp if str(l.get("workflowInstanceId")) == str(request_id)), None)
+                            if match and match.get("status") == "COMPLETE":
+                                log_id = match.get("id")
+                                # 3. Download
+                                dl_resp = self._http.request("GET", self._rest(f"/agent/debuglogs/{log_id}"), headers=self._headers())
+                                dl_resp.raise_for_status()
+                                
+                                # 4. Decompress ZIP + GZIP
+                                import io
+                                import zipfile
+                                import gzip
+                                try:
+                                    with zipfile.ZipFile(io.BytesIO(dl_resp.content)) as z:
+                                        all_lines = []
+                                        for name in z.namelist():
+                                            if name.lower().endswith(".gz"):
+                                                with z.open(name) as fz:
+                                                    with gzip.GzipFile(fileobj=fz) as f:
+                                                        text = f.read().decode("utf-8", errors="ignore")
+                                                        # Wrap lines in dicts for tool compatibility
+                                                        all_lines.extend([{"message": line.strip(), "details": line.strip()} for line in text.splitlines()[-tail:]])
+                                            elif name.lower().endswith(".log"):
+                                                with z.open(name) as f:
+                                                    text = f.read().decode("utf-8", errors="ignore")
+                                                    all_lines.extend([{"message": line.strip(), "details": line.strip()} for line in text.splitlines()[-tail:]])
+                                        return all_lines
+                                except Exception as zip_exc:
+                                    logger.warning("MCP log ZIP extraction failed: %s", zip_exc)
+                except Exception as fb_exc:
+                    logger.warning("agent/debuglogs fallback failed: %s", fb_exc)
+            raise
 
     def get_request_audit(self, request_id: str) -> Any:
         return self._try_paths("GET", [
@@ -240,9 +285,16 @@ class AEClient:
         ])
 
     def restart_request(self, request_id: str, reason: str = "") -> dict:
-        return self._try_paths("POST", [
-            f"/{self.org}/workflowinstances/{request_id}/restart",
+        """Restart a workflow instance.
+
+        T4 confirmed: uses PUT on the global (no-org-prefix) path.
+        Ref: PUT /aeengine/rest/workflowinstances/{id}/restart -> 200 OK
+        """
+        return self._try_paths("PUT", [
+            # Global path — T4 confirmed this works with PUT
             f"/workflowinstances/{request_id}/restart",
+            # Org-scoped fallback
+            f"/{self.org}/workflowinstances/{request_id}/restart",
         ], json_body={"reason": reason})
 
     def terminate_request(self, request_id: str, reason: str = "") -> dict:
@@ -337,7 +389,7 @@ class AEClient:
         ], json_body={"agentId": agent_id, "reason": reason})
 
     def update_workflow_permissions(self, workflow_id: str, permissions: dict, reason: str = "") -> dict:
-        return self._try_paths("PUT", [
+        return self._try_paths("POST", [
             f"/{self.org}/workflows/{workflow_id}/permissions",
             f"/workflows/{workflow_id}/permissions",
         ], json_body={**permissions, "reason": reason})

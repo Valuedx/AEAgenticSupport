@@ -71,6 +71,7 @@ def list_recent_failures(
                 workflow_name,
                 limit=max(limit * 3, 20),
             )
+            last_error = ""
         except Exception as exc:
             last_error = str(exc)
 
@@ -90,6 +91,7 @@ def list_recent_failures(
                 )
             elif isinstance(resp, list):
                 data = resp
+            last_error = ""
         except Exception as exc:
             last_error = str(exc)
 
@@ -121,6 +123,7 @@ def list_recent_failures(
                 elif isinstance(resp, list):
                     data = resp
                 if isinstance(data, list):
+                    last_error = ""
                     break
             except Exception as exc:
                 last_error = str(exc)

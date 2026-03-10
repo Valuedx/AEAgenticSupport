@@ -13,9 +13,14 @@ from tools.registry import tool_registry
 logger = logging.getLogger("ops_agent.tools.remediation")
 
 
-def restart_execution(workflow_name: str, execution_id: str,
-                      from_checkpoint: bool = True) -> dict:
-    if workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
+def restart_execution(execution_id: str,
+                      workflow_name: str = "Unknown",
+                      from_checkpoint: bool = True,
+                      reason: str = "Restarted by support agent",
+                      requested_by: str = None,
+                      case_id: str = None,
+                      dry_run: bool = False) -> dict:
+    if workflow_name != "Unknown" and workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
         return {
             "success": False,
             "error": (
@@ -23,20 +28,94 @@ def restart_execution(workflow_name: str, execution_id: str,
                 f"restarted automatically. Escalate to the operations team."
             ),
         }
-    resp = get_ae_client().post(
-        f"/api/v1/executions/{execution_id}/restart",
-        payload={
+    
+    if dry_run:
+        return {
+            "success": True,
+            "message": f"[DRY RUN] Would restart request {execution_id}",
+            "dry_run": True
+        }
+
+    client = get_ae_client()
+    
+    # 1. Resolve workflow name (internal use/protection only)
+    if not workflow_name or workflow_name == "Unknown":
+        try:
+            status = client.get_execution_status(execution_id)
+            workflow_name = status.get("workflowName") or "Unknown"
+            logger.info(f"Resolved workflow name for {execution_id}: {workflow_name}")
+        except Exception as e:
+            logger.warning(f"Could not resolve workflow name for {execution_id}: {e}")
+
+    # 2. Check Protection
+    if workflow_name != "Unknown" and workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
+        return {
+            "success": False,
+            "error": (
+                f"Workflow '{workflow_name}' is protected and cannot be "
+                f"restarted automatically. Escalate to the operations team."
+            ),
+        }
+
+    # 3. Call updated restart_request (uses PUT /restart)
+    try:
+        resp = client.restart_request(execution_id, reason=reason)
+        
+        # Check for T4 success property
+        if not resp.get("success", True):
+            error_msg = resp.get("errorMessage") or resp.get("message") or "T4 returned failure."
+            return {
+                "success": False,
+                "error": f"Restart failed: {error_msg}",
+                "raw": resp
+            }
+            
+        return {
+            "success": True,
+            "message": resp.get("message") or f"Request {execution_id} has been restarted",
+            "execution_id": execution_id,
             "workflow_name": workflow_name,
-            "from_checkpoint": from_checkpoint,
-        },
-    )
-    return {
-        "success": True,
-        "new_execution_id": resp.get("new_execution_id"),
-        "workflow_name": workflow_name,
-        "restarted_from": "checkpoint" if from_checkpoint else "beginning",
-        "status": resp.get("status"),
-    }
+            "raw": resp
+        }
+    except Exception as e:
+        logger.error(f"Restart failed for {execution_id}: {e}")
+        return {
+            "success": False,
+            "error": f"Restart failed: {str(e)}",
+            "hint": "Ensure the execution is in a failed state. For terminal states, try 'resubmit_execution' instead."
+        }
+
+
+def resubmit_execution(execution_id: str,
+                       from_failure_point: bool = True,
+                       reason: str = "Resubmitted by support agent") -> dict:
+    """Resubmit a failed execution as a NEW run.
+
+    This is DIFFERENT from restart_execution:
+    - restart_execution: resumes the SAME execution (PUT /restart)
+    - resubmit_execution: creates a NEW execution (POST /resubmit)
+
+    Use from_failure_point=True to resubmit from the last failure step,
+    or from_failure_point=False to resubmit from the very beginning.
+    """
+    try:
+        resp = get_ae_client().resubmit_request(
+            execution_id, reason=reason, from_failure_point=from_failure_point
+        )
+        mode = "from failure point" if from_failure_point else "from start"
+        return {
+            "success": True,
+            "message": resp.get("message") or f"Request {execution_id} has been resubmitted ({mode})",
+            "execution_id": execution_id,
+            "from_failure_point": from_failure_point,
+            "raw": resp
+        }
+    except Exception as e:
+        logger.error(f"Resubmit failed for {execution_id}: {e}")
+        return {
+            "success": False,
+            "error": f"Resubmit failed: {str(e)}"
+        }
 
 
 def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
@@ -253,28 +332,76 @@ tool_registry.register(
     ToolDefinition(
         name="restart_execution",
         description=(
-            "Restart a failed workflow execution, optionally from the "
-            "last checkpoint to avoid re-processing completed steps."
+            "Restart a failed workflow execution or request. "
+            "Pass the execution_id (request id) to trigger the restart. "
+            "Use this for ANY request to 'restart', 'retry', or 'run again'."
         ),
         category="remediation",
         tier="low_risk",
         parameters={
-            "workflow_name": {
-                "type": "string",
-                "description": "Workflow name",
-            },
             "execution_id": {
                 "type": "string",
-                "description": "Failed execution ID",
+                "description": "Failed execution ID (request id)",
+            },
+            "workflow_name": {
+                "type": "string",
+                "description": "Workflow name (optional if execution_id is known)",
             },
             "from_checkpoint": {
                 "type": "boolean",
                 "description": "Resume from checkpoint (default true)",
             },
+            "reason": {
+                "type": "string",
+                "description": "Reason for restart",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "Simulate restart without executing",
+            },
         },
-        required_params=["workflow_name", "execution_id"],
+        required_params=["execution_id"],
     ),
     restart_execution,
+)
+
+tool_registry.register(
+    ToolDefinition(
+        name="resubmit_execution",
+        description=(
+            "Resubmit a failed execution as a NEW run. "
+            "DIFFERENT from restart_execution: restart resumes the SAME execution; "
+            "resubmit creates a NEW execution. "
+            "Use when: user says 'resubmit', 'run again from scratch', or 'create new run'. "
+            "Use from_failure_point=True to retry from where it failed, "
+            "or from_failure_point=False to start fresh from the beginning."
+        ),
+        category="remediation",
+        tier="low_risk",
+        parameters={
+            "execution_id": {
+                "type": "string",
+                "description": "The failed execution ID (request id) to resubmit",
+            },
+            "from_failure_point": {
+                "type": "boolean",
+                "description": "If true, resubmit from the last failure step. If false, resubmit from start. Default: true",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Reason for resubmitting",
+            },
+        },
+        required_params=["execution_id"],
+        use_when=(
+            "User explicitly asks to 'resubmit', 'run again from scratch', or when "
+            "restart fails and a fresh execution is needed."
+        ),
+        avoid_when=(
+            "User says 'restart' — use restart_execution instead."
+        ),
+    ),
+    resubmit_execution,
 )
 
 tool_registry.register(

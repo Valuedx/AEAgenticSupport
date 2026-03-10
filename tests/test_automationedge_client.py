@@ -98,6 +98,32 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertEqual(calls["auth"], 2)
         client.close()
 
+    def test_authorized_request_handles_429_backoff(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            path = request.url.path
+            calls.append(path)
+            
+            if path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            
+            if len([p for p in calls if "/test" in p]) == 1:
+                return httpx.Response(429, json={"error": "Rate limit exceeded"})
+            return httpx.Response(200, json={"status": "success"})
+
+        client = self._client_with_transport(handler)
+        
+        with patch("time.sleep") as mock_sleep:
+            # Use _authorized_request directly to test backoff
+            result = client._authorized_request("GET", "/test")
+            self.assertEqual(result["status"], "success")
+            # Should have called /authenticate once and /test twice
+            test_calls = [p for p in calls if "/test" in p]
+            self.assertEqual(len(test_calls), 2)
+            mock_sleep.assert_called_once_with(5)
+        client.close()
+
     def test_execute_workflow_payload_contract(self):
         captured = {"payload": None, "header": ""}
 
@@ -256,6 +282,59 @@ class TestAutomationEdgeClient(unittest.TestCase):
 
         self.assertEqual(result["execution_id"], "EX-0042")
         self.assertEqual(result["logs"][0]["level"], "ERROR")
+        client.close()
+
+    def test_get_execution_logs_t4_fallback_flow(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            path = request.url.path
+            calls.append((request.method, path))
+            
+            if path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            
+            # Phase 1: Fail direct paths with 400 (unsupported) or 429 (rate limit)
+            if "/logs" in path and not ("debuglogs" in path or "download" in path):
+                return httpx.Response(400, json={"error": "Not supported on T4 directly"})
+            
+            # Implementation calls get_execution_status first in Phase 2
+            if path.endswith("/workflowinstances/2506738"):
+                return httpx.Response(200, json={
+                    "status": "Complete",
+                    "startTime": 1000,
+                    "endTime": 2000
+                })
+            
+            # Step 2: Request debug logs (POST /agent/debuglogs)
+            if path.endswith("/agent/debuglogs") and request.method == "POST":
+                return httpx.Response(200, json={"id": 1248})
+            
+            # Step 3: Poll status (GET /agent/debuglogs/{id})
+            if path.endswith("/agent/debuglogs/1248"):
+                poll_count = sum(1 for c in calls if c[1].endswith("/agent/debuglogs/1248"))
+                if poll_count < 2:
+                    return httpx.Response(200, json={"id": 1248, "logFileLink": None, "status": "IN_PROGRESS"})
+                return httpx.Response(200, json={"id": 1248, "logFileLink": "/download/1248.zip", "status": "COMPLETED"})
+            
+            # Step 4: Download (GET /download/1248.zip)
+            if path.endswith("/download/1248.zip"):
+                return httpx.Response(200, content=b"ZIP_DATA", headers={"Content-Type": "application/zip"})
+                
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+        
+        with patch("time.sleep"): # Speed up the test
+            result = client.get_execution_logs("2506738")
+            
+        self.assertTrue(result.get("is_zip"))
+        self.assertEqual(result.get("log_zip_content"), b"ZIP_DATA")
+        
+        # Verify flow sequence
+        method_paths = [c[1] for c in calls]
+        self.assertTrue(any(p.endswith("/agent/debuglogs") for p in method_paths))
+        self.assertTrue(any(p.endswith("/download/1248.zip") for p in method_paths))
         client.close()
 
 

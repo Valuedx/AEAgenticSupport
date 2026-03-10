@@ -1,0 +1,107 @@
+NAME,TITLE,CATEGORY,TIER,PARAMS
+ae.agent.clear_stale_rdp_session,Agent: Clear Stale RDP Session,remediation,high_risk,5
+ae.agent.collect_diagnostics,Agent: Collect Diagnostics,status,read_only,1
+ae.agent.get_assigned_workflows,Agent: Get Assigned Workflows,status,read_only,1
+ae.agent.get_connectivity_state,Agent: Get Connectivity State,status,read_only,1
+ae.agent.get_current_load,Agent: Get Current Load,status,read_only,1
+ae.agent.get_details,Agent: Get Details,status,read_only,1
+ae.agent.get_last_heartbeat,Agent: Get Last Heartbeat,status,read_only,1
+ae.agent.get_rdp_session_state,Agent: Get Rdp Session State,status,read_only,1
+ae.agent.get_recent_failures,Agent: Get Recent Failures,status,read_only,2
+ae.agent.get_running_requests,Agent: Get Running Requests,status,read_only,2
+ae.agent.get_status,Agent: Get Status,status,read_only,1
+ae.agent.list_running,Agent: List Running,status,read_only,0
+ae.agent.list_stopped,Agent: List Stopped,status,read_only,0
+ae.agent.list_unknown,Agent: List Unknown,status,read_only,0
+ae.agent.restart_service,Agent: Restart Agent Service,remediation,high_risk,5
+ae.credential_pool.diagnose_retry_state,Credential Pool: Diagnose Retry State,status,read_only,2
+ae.credential_pool.get_availability,Credential Pool: Get Availability,status,read_only,1
+ae.credential_pool.get_waiting_requests,Credential Pool: Get Waiting Requests,status,read_only,1
+ae.credential_pool.validate_for_workflow,Credential Pool: Validate For Workflow,status,read_only,2
+ae.dependency.check_input_file_exists,Dependency: Check Input File Exists,dependency,read_only,3
+ae.dependency.check_output_folder_writable,Dependency: Check Output Folder Writable,dependency,read_only,2
+ae.dependency.run_full_preflight_for_workflow,Dependency: Run Full Preflight For Workflow,dependency,read_only,2
+ae.permission.explain_user_access_issue,Permission: Explain User Access Issue,dependency,read_only,2
+ae.permission.get_workflow_permissions,Permission: Get Workflow Permissions,dependency,read_only,1
+ae.platform.get_license_status,Platform: Get License Status,status,read_only,1
+ae.platform.get_queue_depth,Platform: Get Queue Depth,status,read_only,1
+ae.request.add_support_comment,Request: Add Support Comment,remediation,low_risk,5
+ae.request.build_support_snapshot,Request: Build Support Snapshot,status,read_only,1
+ae.request.cancel_new_or_retry,Request: Cancel Queued Or Retrying Request,remediation,high_risk,5
+ae.request.compare_attempts,Request: Compare Attempts,logs,read_only,1
+ae.request.export_diagnostic_bundle,Request: Export Diagnostic Bundle,logs,read_only,1
+ae.request.generate_support_narrative,Request: Generate Support Narrative,logs,read_only,1
+ae.request.get_audit_logs,Request: Get Audit Logs,logs,read_only,1
+ae.request.get_by_id,Request: Get By Id,status,read_only,1
+ae.request.get_execution_details,Request: Get Execution Details,logs,read_only,1
+ae.request.get_failure_message,Request: Get Failure Message,status,read_only,1
+ae.request.get_input_parameters,Request: Get Input Parameters,status,read_only,2
+ae.request.get_last_error_step,Request: Get Last Error Step,logs,read_only,1
+ae.request.get_last_successful_step,Request: Get Last Successful Step,logs,read_only,1
+ae.request.get_live_progress,Request: Get Live Progress,logs,read_only,1
+ae.request.get_manual_intervention_context,Request: Get Manual Intervention Context,logs,read_only,1
+ae.request.get_source_context,Request: Get Source Context,status,read_only,1
+ae.request.get_status,Request: Get Status,status,read_only,1
+ae.request.get_step_logs,Request: Get Step Logs,logs,read_only,1
+ae.request.get_summary,Request: Get Summary,status,read_only,1
+ae.request.get_time_details,Request: Get Time Details,status,read_only,1
+ae.request.list_awaiting_input,Request: List Awaiting Input,status,read_only,2
+ae.request.list_by_status,Request: List By Status,status,read_only,3
+ae.request.list_failed_recently,Request: List Failed Recently,status,read_only,3
+ae.request.list_for_user,Request: List For User,status,read_only,2
+ae.request.list_for_workflow,Request: List For Workflow,status,read_only,3
+ae.request.list_recent,Request: List Recent,status,read_only,3
+ae.request.list_retrying,Request: List Retrying,status,read_only,3
+ae.request.list_stuck,Request: List Stuck,status,read_only,4
+ae.request.raise_manual_handoff,Request: Raise Manual Handoff,remediation,low_risk,5
+ae.request.restart_failed,Request: Restart Failed Run,remediation,high_risk,5
+ae.request.resubmit_from_failure_point,Request: Resume From Failure Point,remediation,high_risk,5
+ae.request.resubmit_from_start,Request: Resubmit From Start,remediation,high_risk,5
+ae.request.search,Request: Search,status,read_only,6
+ae.request.tag_case_reference,Request: Link Support Case,remediation,low_risk,4
+ae.request.terminate_running,Request: Terminate Running Execution,remediation,high_risk,5
+ae.result.get_failure_category,Result: Get Failure Category,status,read_only,1
+ae.schedule.diagnose_not_triggered,Schedule: Diagnose Not Triggered,dependency,read_only,1
+ae.schedule.disable,Schedule: Disable Schedule,remediation,high_risk,5
+ae.schedule.enable,Schedule: Re-enable Schedule,remediation,high_risk,5
+ae.schedule.get_details,Schedule: Get Details,dependency,read_only,1
+ae.schedule.get_last_runs,Schedule: Get Last Runs,dependency,read_only,2
+ae.schedule.get_missed_runs,Schedule: Get Missed Runs,dependency,read_only,2
+ae.schedule.get_next_runs,Schedule: Get Next Runs,dependency,read_only,1
+ae.schedule.get_recent_schedule_generated_requests,Schedule: Get Recent Schedule Generated Requests,dependency,read_only,2
+ae.schedule.list_for_workflow,Schedule: List For Workflow,dependency,read_only,1
+ae.schedule.run_now,Schedule: Trigger Run Now,remediation,high_risk,5
+ae.support.build_case_snapshot,Support: Build Escalation Snapshot,status,read_only,2
+ae.support.diagnose_agent_unavailable,Support: Diagnose Agent Unavailable,status,read_only,1
+ae.support.diagnose_awaiting_input,Support: Diagnose Awaiting Input,status,read_only,1
+ae.support.diagnose_failed_request,Support: Diagnose Failed Request,status,read_only,1
+ae.support.diagnose_no_output_file,Support: Diagnose Missing Output,status,read_only,1
+ae.support.diagnose_rdp_blocked_workflow,Support: Diagnose RDP-Blocked Workflow,status,read_only,1
+ae.support.diagnose_retry_due_to_credentials,Support: Diagnose Credential Retry,status,read_only,1
+ae.support.diagnose_schedule_not_triggered,Support: Diagnose Schedule Trigger Failure,status,read_only,1
+ae.support.diagnose_stuck_running_request,Support: Diagnose Stuck Running Request,status,read_only,1
+ae.support.diagnose_user_cannot_find_workflow,Support: Diagnose Workflow Access Issue,status,read_only,2
+ae.support.prepare_human_handoff_note,Support: Prepare Human Handoff Note,status,read_only,1
+ae.task.cancel_admin,Task: Cancel Task As Admin,status,high_risk,5
+ae.task.explain_awaiting_input,Task: Explain Awaiting Input,status,read_only,1
+ae.task.get_assignees,Task: Get Assignees,status,read_only,1
+ae.task.get_overdue,Task: Get Overdue,status,read_only,1
+ae.task.get_request_context,Task: Get Request Context,status,read_only,1
+ae.task.list_blocking_requests,Task: List Blocking Requests,status,read_only,2
+ae.task.reassign,Task: Reassign Task,status,high_risk,6
+ae.task.search_pending,Task: Search Pending,status,read_only,2
+ae.user.get_accessible_workflows,User: Get Accessible Workflows,dependency,read_only,1
+ae.workflow.assign_to_agent,Workflow: Reassign Workflow To Agent,remediation,high_risk,6
+ae.workflow.disable,Workflow: Disable Workflow,remediation,high_risk,5
+ae.workflow.enable,Workflow: Re-enable Disabled Workflow,remediation,high_risk,5
+ae.workflow.get_assignment_targets,Workflow: Get Assignment Targets,dependency,read_only,1
+ae.workflow.get_by_id,Workflow: Get By Id,dependency,read_only,1
+ae.workflow.get_details,Workflow: Get Details,dependency,read_only,1
+ae.workflow.get_flags,Workflow: Get Flags,dependency,read_only,1
+ae.workflow.get_permissions,Workflow: Get Permissions,dependency,read_only,1
+ae.workflow.get_recent_failure_stats,Workflow: Get Recent Failure Stats,dependency,read_only,2
+ae.workflow.get_runtime_parameters,Workflow: Get Runtime Parameters,dependency,read_only,1
+ae.workflow.list_for_user,Workflow: List For User,dependency,read_only,1
+ae.workflow.rollback_version,Workflow: Roll Back Workflow Version,remediation,high_risk,6
+ae.workflow.search,Workflow: Search,dependency,read_only,3
+ae.workflow.update_permissions,Workflow: Update Permissions,remediation,high_risk,6
