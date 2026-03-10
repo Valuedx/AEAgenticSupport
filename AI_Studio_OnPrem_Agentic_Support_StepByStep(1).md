@@ -1,3 +1,6 @@
+> **Documentation Update (2026-03-10)**  
+> Blueprint aligned with implementation: Section 4.1 — full Case model + IssueLink; Section 5.2 — `cleanup_old_messages`; Section 7 — hybrid RAG, Option C (bridge to rag/engine), `rag_search_kb`/`rag_search_past_incidents`; Section 10 — `make_approval_card`; Section 12 — AGENTIC vs PLAN-EXECUTE mode, `Case.objects.create` without redundant fields; Section 14 — env vars (USE_AGENTIC_MODE, RECURRENCE_ESCALATION_THRESHOLD, RBAC_ENABLED, GOOGLE_CLOUD_LOCATION, EMBEDDING_MODEL), webhook endpoints; Section 15 — DocumentProcessor, PII masking, approval card; Section 16 — configurable recurrence threshold, user_type/channelData in hooks, DB addition simplified to reference 4.1/5.2.
+>
 > **Documentation Update (2026-03-06)**  
 > Patch release notes:
 > - **Multi-Agent Orchestration (Feature 2.1)**: Refactored existing monolithic orchestrator into a Multi-Agent Supervisor system. Added `DiagnosticAgent` and `RemediationAgent` specialists with A2A delegation protocol.
@@ -99,6 +102,7 @@ custom/
     tools_rest.py
     roster.py
     teams.py
+    issue_classifier.py
 
   functions/
     python/
@@ -164,6 +168,12 @@ class Case(models.Model):
     latest_plan_json = models.JSONField(default=dict, blank=True)
     plan_version = models.IntegerField(default=0)
 
+    error_signatures = models.JSONField(default=list, blank=True)
+    workflows_involved = models.JSONField(default=list, blank=True)
+    recurrence_count = models.IntegerField(default=0)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_summary = models.TextField(null=True, blank=True)
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(default=timezone.now)
 
@@ -185,6 +195,27 @@ class Approval(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=["case_id", "status"])]
+
+
+class IssueLink(models.Model):
+    """Links related cases (e.g., cascade failures). Bidirectional."""
+    case_id_1 = models.CharField(max_length=64)
+    case_id_2 = models.CharField(max_length=64)
+    link_type = models.CharField(max_length=32)  # CASCADE / RELATED / RECURRENCE
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        unique_together = ("case_id_1", "case_id_2")
+        indexes = [
+            models.Index(fields=["case_id_1"]),
+            models.Index(fields=["case_id_2"]),
+        ]
+
+    @classmethod
+    def get_linked_cases(cls, case_id: str):
+        """Query both directions for all links involving this case."""
+        from django.db.models import Q
+        return cls.objects.filter(Q(case_id_1=case_id) | Q(case_id_2=case_id))
 ```
 
 ### 4.2 Migrations directory
@@ -192,7 +223,7 @@ class Approval(models.Model):
 The project now uses a proper Django `custom/migrations/` directory instead of a single `migrations.py` stub. This directory contains:
 
 - `__init__.py` — marks the directory as a Python package (required by Django)
-- `0001_initial.py` — auto-generated migration that creates the `ProcessedMessage`, `ConversationState`, `Case`, `Approval`, and `IssueLink` tables defined in `models.py`
+- `0001_initial.py` — migration that creates the `ProcessedMessage`, `ConversationState`, `Case`, `Approval`, and `IssueLink` tables and indexes defined in `models.py`
 
 To generate or update migrations after changing models:
 
@@ -233,6 +264,8 @@ def pg_advisory_lock(thread_id: str):
 
 **custom/helpers/db.py**
 ```python
+from datetime import timedelta
+from django.utils import timezone as tz
 from custom.models import ProcessedMessage
 
 def is_duplicate_message(thread_id: str, teams_message_id: str) -> bool:
@@ -240,6 +273,12 @@ def is_duplicate_message(thread_id: str, teams_message_id: str) -> bool:
 
 def mark_message_processed(thread_id: str, teams_message_id: str):
     ProcessedMessage.objects.create(thread_id=thread_id, teams_message_id=teams_message_id)
+
+def cleanup_old_messages(days: int = 30):
+    """Prune dedup records older than N days to prevent table bloat."""
+    cutoff = tz.now() - timedelta(days=days)
+    deleted, _ = ProcessedMessage.objects.filter(processed_at__lt=cutoff).delete()
+    return deleted
 ```
 
 ---
@@ -281,7 +320,7 @@ class RestToolClient:
 
 ## 7) RAG retrieval (PostgreSQL + pgvector)
 
-The RAG layer uses **PostgreSQL + pgvector** for vector similarity search and **Vertex AI** (Gemini) for embeddings and generation. If your deployment uses AI Studio's built-in KM, you can keep the REST stubs; otherwise, implement direct pgvector access.
+The RAG layer uses **PostgreSQL + pgvector** for vector similarity search and **Vertex AI** for embeddings and generation. The standalone implementation uses **hybrid search** (pgvector semantic + `tsvector` keyword + Reciprocal Rank Fusion) when the pgvector extension is available, and a numpy fallback when it is not. If your deployment uses AI Studio's built-in KM, you can keep the REST stubs; otherwise, implement direct pgvector access or use the standalone engine.
 
 **Option A: REST stubs (if using AI Studio KM or a separate RAG service)**
 
@@ -336,9 +375,18 @@ def rag_search_sop(client, query: str, top_k: int = 6) -> list:
 
 def rag_search_tools(client, query: str, top_k: int = 8) -> list:
     return rag_search(query, "tools", top_k)
+
+def rag_search_kb(client, query: str, top_k: int = 5) -> list:
+    return rag_search(query, "kb", top_k)
+
+def rag_search_past_incidents(client, query: str, top_k: int = 3) -> list:
+    return rag_search(query, "past_incidents", top_k)
 ```
 
-The `/rag/sop/search` and `/rag/tools/search` endpoints (if using Option A) should be backed by pgvector or AI Studio KM search.
+**Option C: Bridge to standalone RAG engine (implemented)**  
+When the Extension runs in the same process as the standalone agent, `custom/helpers/rag.py` can call `rag.engine.get_rag_engine()` and use `search_sops`, `search_tools`, `search_kb`, and `search_past_incidents`, which support hybrid search (vector + keyword + RRF) and configurable embedding model/location via `EMBEDDING_MODEL` and `GOOGLE_CLOUD_LOCATION`.
+
+The `/rag/sop/search`, `/rag/tools/search`, `/rag/kb/search`, and `/rag/incidents/search` endpoints (if using Option A) should be backed by pgvector or AI Studio KM search.
 
 ---
 
@@ -346,7 +394,8 @@ The `/rag/sop/search` and `/rag/tools/search` endpoints (if using Option A) shou
 
 **custom/helpers/policy.py**
 ```python
-from typing import Dict, Any, Tuple
+from __future__ import annotations
+from typing import Any, Dict, Tuple
 
 SAFE_AUTORUN_CAPABILITIES = {
     "CAP_TICKET_UPDATE",
@@ -380,6 +429,9 @@ def classify_step(step: Dict[str, Any]) -> Tuple[str, bool]:
 from datetime import datetime, time
 from typing import List, Dict
 
+# Replace with your roster (DB or config); see section 14.
+TECH_ROSTER: List[Dict] = []
+
 def is_on_shift(now_local: datetime, shift: Dict) -> bool:
     s_h, s_m = map(int, shift["start"].split(":"))
     e_h, e_m = map(int, shift["end"].split(":"))
@@ -390,7 +442,9 @@ def is_on_shift(now_local: datetime, shift: Dict) -> bool:
         return start <= t <= end
     return t >= start or t <= end  # overnight
 
-def pick_onshift_techs(roster: List[Dict], now_local: datetime) -> List[str]:
+def pick_onshift_techs(roster: List[Dict] = None, now_local: datetime = None) -> List[str]:
+    roster = roster or TECH_ROSTER
+    now_local = now_local or datetime.now()
     onshift = []
     for r in roster:
         if is_on_shift(now_local, r["shift"]):
@@ -398,17 +452,39 @@ def pick_onshift_techs(roster: List[Dict], now_local: datetime) -> List[str]:
     return onshift[:5]
 ```
 
+Both arguments are optional; defaults are the module-level `TECH_ROSTER` and `datetime.now()`.
+
 ---
 
 ## 10) Teams reply helper
 
 **custom/helpers/teams.py**
 ```python
+from typing import Optional, List
+
 def make_text_reply(text: str) -> dict:
     return {"type": "message", "text": text}
-```
 
-(If you want adaptive cards for approval, replace with a card payload.)
+def make_approval_card(case_id: str, action_summary: str,
+                       reviewers: Optional[List[str]] = None,
+                       plan_version: Optional[int] = None) -> dict:
+    """Adaptive Card for approval requests. Replace with real Adaptive Card JSON if Teams supports it."""
+    reviewer_text = (
+        f"Authorized reviewers: {', '.join(reviewers)}"
+        if reviewers else "Any authorized team member can respond"
+    )
+    version_text = f" (v{plan_version})" if plan_version else ""
+    return {
+        "type": "message",
+        "text": (
+            f"**Approval Required**\n\n"
+            f"Action: {action_summary}\n"
+            f"Case: {case_id}{version_text}\n"
+            f"{reviewer_text}\n\n"
+            f"Reply **APPROVE** to proceed or **REJECT** to cancel."
+        ),
+    }
+```
 
 ---
 
@@ -416,7 +492,7 @@ def make_text_reply(text: str) -> dict:
 
 This is the “brainstem”: lock + dedupe + smalltalk gate + support handling.
 
-> **Contract note:** The AI Studio Cognibot hook must be an **async method** inside a class that extends `ChatbotHooks`. The method signature is `async def api_messages_hook(request, activity)`. Use `from __future__ import annotations` and `asgiref.sync.sync_to_async` to bridge Django ORM calls.
+> **Contract note:** The AI Studio Cognibot hook must be an **async static method** inside a class that extends `ChatbotHooks`. The method signature is `async def api_messages_hook(request, activity)`. Use `from __future__ import annotations` and `asgiref.sync.sync_to_async` to bridge Django ORM calls.
 
 **custom/custom_hooks.py**
 ```python
@@ -488,6 +564,13 @@ class CustomChatbotHooks(ChatbotHooks):
 
 ## 12) Planner + Executor in one function (with approval gate)
 
+The support agent runs in two modes (controlled by `USE_AGENTIC_MODE`, default `true`):
+
+- **AGENTIC MODE**: Delegates to the standalone `MessageGateway` / orchestrator for full LLM-powered investigation, RAG tool selection, and approval flow; then syncs key state back to the Django Case model.
+- **PLAN-EXECUTE MODE**: Builds a deterministic plan via RAG (sop + tool search), then executes steps sequentially with approval gates and REST tool calls.
+
+In both modes: when the Extension uses the standalone RAG engine (Option C), ensure the Cognibot runtime has the engine’s dependencies (e.g. `google-genai` for Vertex embeddings) if they are not already in `extra_requirements.txt`.
+
 **custom/functions/python/support_agent.py**
 ```python
 import uuid
@@ -524,9 +607,6 @@ def _get_or_create_case(thread_id: str) -> Case:
         planner_state_json={},
         latest_plan_json={},
         plan_version=0,
-        error_signatures=[],
-        workflows_involved=[],
-        recurrence_count=0,
         created_at=timezone.now(),
         updated_at=timezone.now(),
     )
@@ -706,15 +786,21 @@ def handle_support_turn(thread_id: str, teams_message_id: str, user_text: str, r
 2) Replace REST endpoints:
    - `/tools/ticket/*`
    - `/tools/ae/*`
-   - `/rag/*` (or use direct pgvector access — see section 7 Option B)
+   - `/rag/*` (or use direct pgvector access — see section 7 Option B/C)
    - `/llm/classify` (for issue classifier LLM fallback)
-3) Replace `TECH_ROSTER` with your real roster (DB table or config).
+3) Replace `TECH_ROSTER` with your real roster (DB table or config). Roster entries may include `teams_user_id`, `shift` (start/end/timezone), and `skills`.
 4) Tune `SAFE_AUTORUN_CAPABILITIES` allowlist.
 5) Set environment variables:
-   - `POSTGRES_DSN` — PostgreSQL connection string (must have pgvector extension)
+   - `POSTGRES_DSN` — PostgreSQL connection string (must have pgvector extension for hybrid RAG)
    - `GOOGLE_CLOUD_PROJECT` — GCP project for Vertex AI
+   - `GOOGLE_CLOUD_LOCATION` — e.g. `us-central1` (embedding/LLM region)
    - `GOOGLE_APPLICATION_CREDENTIALS` — path to service account JSON
-   - `TOOL_BASE_URL` and `TOOL_AUTH_TOKEN` — for REST tool gateway
+   - `TOOL_BASE_URL` and `TOOL_AUTH_TOKEN` — for REST tool gateway (default base `http://localhost:9999` in support_agent)
+   - `USE_AGENTIC_MODE` — `true` (default) to delegate to standalone orchestrator; `false` for plan-execute only
+   - `RECURRENCE_ESCALATION_THRESHOLD` — recurrence count at which to auto-escalate to L2 (default `3`)
+   - `RBAC_ENABLED` — enable RBAC-based approval gates in standalone agent (default `true`)
+   - `EMBEDDING_MODEL` — Vertex AI embedding model (e.g. `text-embedding-004`)
+6) **Standalone server webhooks** (when using proactive monitoring): `POST /api/webhooks` and `POST /api/webhooks/event` for inbound events; `GET /api/webhooks/log` (admin) for event log.
 
 ---
 
@@ -728,6 +814,34 @@ def handle_support_turn(thread_id: str, teams_message_id: str, user_text: str, r
 - ~~**RAG-filtered tool selection**~~ — **implemented**: when catalog >30 tools, RAG filters which tools are sent to the LLM; `discover_tools` meta-tool lets the LLM search for more mid-conversation
 - **General escape-hatch tools** — **implemented**: `call_ae_api`, `query_database`, `search_knowledge_base` in `tools/general_tools.py` are always available for fallback when no typed tool fits; LLM prefers typed tools for validation/audit, falls back to general when needed (see SETUP_GUIDE section 11.3)
 - **Progress streaming** — **implemented**: When `AGENT_PROGRESS_ENABLED=true`, the agent sends real-time status messages (e.g., "Checking workflow status...") during long investigations. In Teams, these appear as proactive messages via Bot Framework; in webchat, they display as in-place updating italic text. See SETUP_GUIDE section 11.4.
+- **Document processor** — **implemented**: `rag/document_processor.py` (DocumentProcessor) handles PDF (with table extraction via pdfplumber), Markdown, and JSON for RAG indexing; supports chunk_size/chunk_overlap and semantic chunking.
+- **PII masking in logs** — **implemented**: `config/logging_setup.py` uses a JSON formatter that masks emails, IPs, and secret/key values in log messages and exception text.
+- **Approval card helper** — **implemented**: `custom/helpers/teams.py` exposes `make_approval_card(case_id, action_summary, reviewers, plan_version)` for approval request messages; can be replaced with full Adaptive Card JSON for Teams.
+
+### Implementation details (reference)
+
+These behaviours are in the codebase but not repeated in the step-by-step code samples:
+
+- **MessageGateway (when agentic mode is used)**  
+  The standalone gateway classifies incoming messages while the agent is busy: **CANCEL** (e.g. "stop", "cancel") stops work and clears the turn; **INTERRUPT** (e.g. "urgent", "P1") pauses and queues the message for immediate handling; **ADDITIVE** and **NEW_REQUEST** queue the message and return a short acknowledgment. **APPROVAL** is routed straight into the approval flow. See `gateway/message_gateway.py` and `MessageIntent`.
+
+- **Progress callback**  
+  When progress is enabled, status text is **role-based** (business vs technical wording) and **throttled** by a minimum interval (default 3 seconds, configurable via control center `progressMinIntervalSeconds`). Tool names are mapped to human-readable phrases in `gateway/progress.py`.
+
+- **support_agent (plan-execute)**  
+  On tool failure during execution, the implementation appends a short **error signature** to `case.error_signatures`, assigns the ticket to L2, and sets case to `WAITING_ON_TEAM`. **workflows_involved** is updated from RAG hit metadata in `_build_plan_with_rag`. **Ticket creation** (`_ensure_ticket`) is non-fatal: on failure it logs and continues. When approval is required, the reply uses **make_approval_card** and returns its `text` field.
+
+- **support_agent (agentic)**  
+  **user_type** (business/technical) from the activity is passed to `MessageGateway.get_or_create_session` and `process_message` for persona and response tone. After the gateway returns, **\_sync_state_from_gateway** updates the Django Case with phase, `affected_workflows`, and `pending_action`/`pending_action_summary`. When the case is `WAITING_APPROVAL`, `authorized_users` from the pending Approval is merged into the session’s `pending_action` for RBAC in the standalone orchestrator.
+
+- **Roster**  
+  `pick_onshift_techs(roster=None, now_local=None)` — both arguments are optional; defaults are `TECH_ROSTER` and `datetime.now()`.
+
+- **main.py**  
+  `handle_chat_message(..., on_progress=...)` accepts an optional **on_progress** callback for streaming status. In development, set **SHOW_ERROR_HINT** (env) to `true` to include a short error hint in the user-facing message when an unhandled exception occurs.
+
+- **Standalone server (agent_server.py)**  
+  Besides `/chat`, `/health`, and webhooks, the server exposes: **/chat/stream** (SSE progress), **/api/admin/bootstrap**, **/api/admin/config**, **/api/ui-config/chat** and **/api/ui-config/docs**, **/api/aistudio/conversations** and **/api/aistudio/conversations/&lt;id&gt;/activities** (Direct Line proxy so the browser does not need the secret), **/api/tools** and tool config/test/sync, **/api/agents** CRUD and **/api/agents/&lt;id&gt;/interactions**, **/api/sops** and **/api/docs/catalog**, **/api/multi-agents**, **/api/history/search** and **/api/history/conversations**. Admin endpoints require **AGENT_ADMIN_TOKEN** (header or Bearer). See `agent_server.py` docstring and SETUP_GUIDE for full lists.
 
 ---
 
@@ -759,54 +873,7 @@ Add a classification step in `custom_hooks.py` **before** calling `handle_suppor
 
 ### Database Addition
 
-Add to `custom/models.py`:
-
-```python
-class IssueLink(models.Model):
-    """Links related cases (e.g., cascade failures). Bidirectional."""
-    case_id_1 = models.CharField(max_length=64)
-    case_id_2 = models.CharField(max_length=64)
-    link_type = models.CharField(max_length=32)  # CASCADE / RELATED / RECURRENCE
-    created_at = models.DateTimeField(default=timezone.now)
-
-    class Meta:
-        unique_together = ("case_id_1", "case_id_2")
-        indexes = [
-            models.Index(fields=["case_id_1"]),
-            models.Index(fields=["case_id_2"]),
-        ]
-
-    @classmethod
-    def get_linked_cases(cls, case_id: str):
-        """Query both directions for all links involving this case."""
-        from django.db.models import Q
-        return cls.objects.filter(Q(case_id_1=case_id) | Q(case_id_2=case_id))
-```
-
-Also add these fields to the existing `Case` model:
-
-```python
-# Add to Case model
-error_signatures = models.JSONField(default=list, blank=True)
-workflows_involved = models.JSONField(default=list, blank=True)
-recurrence_count = models.IntegerField(default=0)
-resolved_at = models.DateTimeField(null=True, blank=True)
-resolution_summary = models.TextField(null=True, blank=True)
-```
-
-Add a periodic cleanup task for the `ProcessedMessage` table:
-
-```python
-# Add to custom/helpers/db.py
-from django.utils import timezone as tz
-from datetime import timedelta
-
-def cleanup_old_messages(days: int = 30):
-    """Prune dedup records older than N days to prevent table bloat."""
-    cutoff = tz.now() - timedelta(days=days)
-    deleted, _ = ProcessedMessage.objects.filter(processed_at__lt=cutoff).delete()
-    return deleted
-```
+Ensure `custom/models.py` includes the `IssueLink` model and the Case fields `error_signatures`, `workflows_involved`, `recurrence_count`, `resolved_at`, and `resolution_summary` as shown in **section 4.1**. The migration `0001_initial.py` creates all of these. Use `cleanup_old_messages(days)` from **section 5.2** in a periodic task to prune old `ProcessedMessage` records.
 
 ### Issue Classifier Helper
 
@@ -1065,12 +1132,15 @@ def link_cases(case_id_1: str, case_id_2: str, link_type: str = "RELATED"):
 
 def should_escalate_recurrence(case: Case) -> bool:
     """Returns True if the case has recurred too many times."""
-    return case.recurrence_count >= RECURRENCE_ESCALATION_THRESHOLD
+    threshold = int(
+        os.environ.get("RECURRENCE_ESCALATION_THRESHOLD", "3")
+    )  # in implementation: get_runtime_value("RECURRENCE_ESCALATION_THRESHOLD", "3")
+    return case.recurrence_count >= threshold
 ```
 
 ### Updated Router Hook
 
-**This replaces section 11's `api_messages_hook` entirely.** The new version adds issue classification, empty message guard, approval authorization, resolution lifecycle, recurrence escalation, and uses the **async class-based hook pattern** required by AI Studio.
+**This replaces section 11's `api_messages_hook` entirely.** The new version adds issue classification, empty message guard, approval authorization (only requested reviewers can approve/reject), resolution lifecycle, recurrence escalation, and uses the **async class-based hook pattern** required by AI Studio (hooks are async static methods). Activity is normalised with `_activity_to_dict`; **user_type** (`business` or `technical`) can be taken from `channelData.user_role` and propagated for persona and semantic approval handling.
 
 ```python
 # custom/custom_hooks.py — FULL REPLACEMENT of section 11
