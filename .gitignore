@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 *.egg
+*.pyc
+*.pyd
+.pytest_cache/
 
 # Environment
 .env
@@ -18,10 +21,29 @@ venv/
 .idea/
 *.swp
 *.swo
+*.sublime-*
 
-# Logs
+# Logs & debug output
 logs/
 *.log
+
+# Test / debug artifacts
+*.output.txt
+*_output*.txt
+e2e_*.txt
+smoke_*.txt
+debug_*.txt
+diag_output.txt
+spec_diag.txt
+model_test_results.txt
+
+# Scratch / one-off scripts
+check_*.py
+code_ref.py
+diag_specs.py
+list_status_tools.py
+verify_fix.py
+deployment_gaps_analysis.md.resolved
 
 # OS
 Thumbs.db
@@ -33,7 +55,3 @@ Thumbs.db
 
 # AI Studio Local
 AI_Studio_Local/
-
-# Misc
-*.pyc
-*.pyd
