@@ -37,11 +37,17 @@ def check_workflow_status(workflow_name: str) -> dict:
 
 
 def _parse_timestamp(value):
-    if isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
-        except Exception:
-            return None
+    if value is None:
+        return None
+    try:
+        val = float(value)
+        # Handle milliseconds (13 digits) vs seconds
+        if val > 10000000000:
+            val /= 1000.0
+        return datetime.fromtimestamp(val, tz=timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        pass
+
     if isinstance(value, str) and value.strip():
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -81,6 +87,7 @@ def list_recent_failures(
                 "GET",
                 "/api/v1/failures/recent",
                 use_rest_prefix=False,
+                silent_on_status=[400, 403, 404],
             )
             if isinstance(resp, dict):
                 data = (
@@ -117,6 +124,7 @@ def list_recent_failures(
                     path,
                     params={"offset": 0, "size": max(limit * 3, 20), "order": "desc"},
                     use_rest_prefix=use_rest_prefix,
+                    silent_on_status=[400, 403, 404],
                 )
                 if isinstance(resp, dict):
                     data = resp.get("data") or resp.get("instances") or resp.get("executions") or []
@@ -181,6 +189,7 @@ def get_system_health() -> dict:
     org = str(client.default_org_code or "").strip()
     candidates = []
     if org:
+        candidates.append((f"/tenants/{org}/system/health", False))
         candidates.append((f"/{org}/system/health", False))
     candidates.extend(
         [
@@ -189,6 +198,7 @@ def get_system_health() -> dict:
         ]
     )
     if org:
+        candidates.append((f"/tenants/{org}/system/health", True))
         candidates.append((f"/{org}/system/health", True))
     candidates.append(("/system/health", True))
 
@@ -196,7 +206,9 @@ def get_system_health() -> dict:
     resp = None
     for path, use_rest_prefix in candidates:
         try:
-            resp = client.request("GET", path, use_rest_prefix=use_rest_prefix)
+            resp = client.request(
+                "GET", path, use_rest_prefix=use_rest_prefix, silent_on_status=[400, 403, 404]
+            )
             break
         except Exception as exc:
             last_error = exc
@@ -640,4 +652,44 @@ tool_registry.register(
         required_params=[],
     ),
     get_agent_status,
+)
+
+
+
+def list_workflows(limit: int = 100) -> dict:
+    """List all available AutomationEdge workflows."""
+    try:
+        from tools.base import get_ae_client
+        client = get_ae_client()
+        workflows = client.list_workflows(page_size=limit)
+        items = []
+        for w in workflows:
+            items.append({
+                "workflow_id": w.get("workflowId") or w.get("id"),
+                "workflow_name": w.get("workflowName") or w.get("name"),
+                "description": w.get("description"),
+                "active": w.get("active", True),
+            })
+        return {"workflows": items, "count": len(items)}
+    except Exception as exc:
+        logger.error("list_workflows failed: %s", exc)
+        return {"error": str(exc), "workflows": [], "count": 0}
+
+
+tool_registry.register(
+    ToolDefinition(
+        name="ae.workflow.list",
+        description="List all available AutomationEdge workflows.",
+        category="dependency",
+        tier="read_only",
+        parameters={
+            "limit": {
+                "type": "integer",
+                "description": "Max number of workflows to return",
+                "default": 100,
+            }
+        },
+        required_params=[],
+    ),
+    list_workflows,
 )

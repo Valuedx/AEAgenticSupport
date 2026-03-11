@@ -78,11 +78,42 @@ def restart_execution(execution_id: str,
             "raw": resp
         }
     except Exception as e:
+        err_str = str(e)
+        # AE-2624: T4 restart limit reached (max 10 restarts per instance)
+        # Automatically fall back to resubmit which creates a fresh execution
+        if "AE-2624" in err_str or "maximum limit of 10 restarts" in err_str.lower():
+            logger.warning(
+                f"AE-2624 restart limit reached for {execution_id}. "
+                f"Automatically falling back to resubmit_execution."
+            )
+            try:
+                resubmit_resp = resubmit_execution(
+                    execution_id=execution_id,
+                    from_failure_point=True,
+                    reason=f"{reason} (auto-resubmit: restart limit AE-2624 reached)"
+                )
+                return {
+                    **resubmit_resp,
+                    "restart_limit_reached": True,
+                    "fallback": "resubmit",
+                    "hint": (
+                        "The restart limit (10) for this execution was reached. "
+                        "The system automatically resubmitted it as a new execution instead."
+                    ),
+                }
+            except Exception as resubmit_err:
+                return {
+                    "success": False,
+                    "error": f"Restart limit reached (AE-2624) and resubmit also failed: {resubmit_err}",
+                    "hint": "The restart limit of 10 has been reached and resubmit also failed. Please manually trigger a new execution from the AutomationEdge UI.",
+                    "restart_limit_reached": True,
+                }
+
         logger.error(f"Restart failed for {execution_id}: {e}")
         return {
             "success": False,
-            "error": f"Restart failed: {str(e)}",
-            "hint": "Ensure the execution is in a failed state. For terminal states, try 'resubmit_execution' instead."
+            "error": f"Restart failed: {err_str}",
+            "hint": "Ensure the execution is in a failed state. For terminal states, try 'resubmit_execution' instead.",
         }
 
 
@@ -326,6 +357,28 @@ def disable_workflow(workflow_name: str, reason: str = "") -> dict:
     }
 
 
+def disable_schedule(schedule_id: str, reason: str = "") -> dict:
+    """Disable or pause a schedule. Use when asked 'How can I pause or disable this schedule?'."""
+    resp = get_ae_client().disable_schedule(schedule_id, reason=reason)
+    return {
+        "success": True,
+        "schedule_id": schedule_id,
+        "message": resp.get("message") or f"Schedule {schedule_id} disabled successfully",
+        "raw": resp
+    }
+
+
+def enable_schedule(schedule_id: str, reason: str = "") -> dict:
+    """Enable or resume a schedule. Use when asked 'How do I resume or enable this schedule?'."""
+    resp = get_ae_client().enable_schedule(schedule_id, reason=reason)
+    return {
+        "success": True,
+        "schedule_id": schedule_id,
+        "message": resp.get("message") or f"Schedule {schedule_id} enabled successfully",
+        "raw": resp
+    }
+
+
 # ── Register remediation tools ──
 
 tool_registry.register(
@@ -337,7 +390,7 @@ tool_registry.register(
             "Use this for ANY request to 'restart', 'retry', or 'run again'."
         ),
         category="remediation",
-        tier="low_risk",
+        tier="medium_risk",
         parameters={
             "execution_id": {
                 "type": "string",
@@ -377,7 +430,7 @@ tool_registry.register(
             "or from_failure_point=False to start fresh from the beginning."
         ),
         category="remediation",
-        tier="low_risk",
+        tier="medium_risk",
         parameters={
             "execution_id": {
                 "type": "string",
@@ -514,3 +567,33 @@ tool_registry.register(
     ),
     disable_workflow,
 )
+
+# tool_registry.register(
+#     ToolDefinition(
+#         name="ae.schedule.disable",
+#         description="Disable or pause a schedule. Use when asked 'How can I pause or disable this schedule?'. Needs a schedule_id.",
+#         category="remediation",
+#         tier="high_risk",
+#         parameters={
+#             "schedule_id": {"type": "string", "description": "Schedule ID to disable"},
+#             "reason": {"type": "string", "description": "Reason for disabling", "optional": True},
+#         },
+#         required_params=["schedule_id"],
+#     ),
+#     disable_schedule,
+# )
+
+# tool_registry.register(
+#     ToolDefinition(
+#         name="ae.schedule.enable",
+#         description="Enable or resume a schedule. Use when asked 'How do I resume or enable this schedule?'. Needs a schedule_id.",
+#         category="remediation",
+#         tier="high_risk",
+#         parameters={
+#             "schedule_id": {"type": "string", "description": "Schedule ID to enable"},
+#             "reason": {"type": "string", "description": "Reason for enabling", "optional": True},
+#         },
+#         required_params=["schedule_id"],
+#     ),
+#     enable_schedule,
+# )

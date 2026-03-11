@@ -316,6 +316,8 @@ def _register_local_mcp_tools() -> None:
 
     for spec in specs:
         hydration_mode = "eager" if spec.always_available else "lazy"
+        # Collect all tags from spec (base + extra_tags from curated override)
+        all_spec_tags = list(spec.tags)  # spec.tags already merges base + extra_tags
         definition = ToolDefinition(
             name=spec.name,
             description=spec.resolved_description,
@@ -330,13 +332,13 @@ def _register_local_mcp_tools() -> None:
             metadata={
                 "source": "mcp",
                 "title": spec.resolved_title,
-                "tags": spec.tags,
+                "tags": all_spec_tags,
                 "mcp_category": spec.mcp_category,
                 "safety": spec.safety,
                 "hydration_mode": hydration_mode,
                 "latency_class": spec.latency_class,
                 "annotations": spec.serialized_annotations,
-                "mcp_meta": spec.meta,
+                "mcp_meta": spec.meta,          # full meta including use_when, extra_tags
                 "output_schema": spec.output_schema,
                 "structured_output": True,
                 "mcp_connection_mode": "local",

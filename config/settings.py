@@ -110,6 +110,7 @@ CONFIG = {
     "TOOL_AUTH_TOKEN": os.environ.get("TOOL_AUTH_TOKEN", ""),
     "COGNIBOT_BASE_URL": os.environ.get("COGNIBOT_BASE_URL", "http://localhost:3978"),
     "COGNIBOT_DIRECTLINE_SECRET": os.environ.get("COGNIBOT_DIRECTLINE_SECRET", ""),
+    "COGNIBOT_TIMEOUT_SECONDS": int(os.environ.get("COGNIBOT_TIMEOUT_SECONDS", "60")),
 
     # Agent behaviour limits
     "MAX_AGENT_ITERATIONS": int(os.environ.get("MAX_AGENT_ITERATIONS", "15")),
@@ -167,6 +168,7 @@ CONFIG = {
     "ROLE_RANK": {
         "admin": 100,
         "dev": 50,
+        "technical": 50,
         "support": 10,
         "readonly": 0
     },

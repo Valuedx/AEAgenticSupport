@@ -90,6 +90,10 @@ class MessageGateway:
         self, conversation_id: str,
         user_id: str = "",
         user_role: str = "technical",
+        user_name: str = "",
+        user_email: str = "",
+        user_team: str = "",
+        user_metadata: dict | None = None,
     ) -> ConversationState:
         with self._session_guard:
             if conversation_id not in self._sessions:
@@ -98,6 +102,13 @@ class MessageGateway:
                     state.user_id = user_id
                 if user_role:
                     state.user_role = user_role
+                
+                # Update with current details if provided
+                if user_name: state.user_name = user_name
+                if user_email: state.user_email = user_email
+                if user_team: state.user_team = user_team
+                if user_metadata: state.user_metadata.update(user_metadata)
+                
                 self._sessions[conversation_id] = state
                 self._locks[conversation_id] = threading.Lock()
             return self._sessions[conversation_id]
@@ -105,6 +116,8 @@ class MessageGateway:
     def process_message(
         self, conversation_id: str, user_message: str,
         user_id: str = "", user_role: str = "technical",
+        user_name: str = "", user_email: str = "",
+        user_team: str = "", user_metadata: dict | None = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
@@ -122,7 +135,7 @@ class MessageGateway:
             return "It looks like your message was empty. How can I help?"
 
         state = self.get_or_create_session(
-            conversation_id, user_id, user_role
+            conversation_id, user_id, user_role, user_name, user_email, user_team, user_metadata
         )
         lock = self._locks[conversation_id]
 

@@ -889,13 +889,27 @@ class ToolRegistry:
             results: list[dict] = []
             rag_hits = []
 
+            logger.info(
+                "discover_tools called: query=%r category=%r top_k=%s",
+                query, category, top_k,
+            )
+
             if query and query.strip():
                 rag_hits = get_rag_engine().search_tools(query, top_k=max(top_k * 3, top_k))
+                logger.info(
+                    "discover_tools RAG search returned %d hits for query=%r",
+                    len(rag_hits), query,
+                )
 
             # Special handling for 'automationedge' category used by orchestrator preflight
             search_categories = [category] if category else None
             if category == "automationedge":
                 search_categories = ["dependency", "status", "logs", "agent", "remediation"]
+
+            logger.info(
+                "discover_tools filtering by categories: %s",
+                search_categories,
+            )
 
             results = self.rank_tool_candidates(
                 query,
@@ -908,6 +922,11 @@ class ToolRegistry:
 
             if not results:
                 cats = sorted({entry.definition.category for entry in self._catalog.values()})
+                logger.warning(
+                    "discover_tools found NO matching tools for query=%r category=%r. "
+                    "Available categories: %s",
+                    query, category, cats,
+                )
                 return {
                     "tools": [],
                     "total_catalog_size": len(self._catalog),
@@ -915,6 +934,11 @@ class ToolRegistry:
                     "hint": "No matching tools found. Try a different query or browse by category.",
                 }
 
+            result_summary = [(r["name"], round(r.get("score", 0.0), 3)) for r in results[:top_k]]
+            logger.info(
+                "discover_tools returning %d tools for query=%r: %s",
+                len(result_summary), query, result_summary,
+            )
             return {"tools": results[:top_k], "total_catalog_size": len(self._catalog)}
 
         meta_def = ToolDefinition(

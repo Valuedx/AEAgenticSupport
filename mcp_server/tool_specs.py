@@ -53,6 +53,10 @@ _ALWAYS_AVAILABLE_MCP_TOOLS = {
     "ae.request.get_live_progress",
     "ae.agent.get_status",
     "ae.agent.get_details",
+    "ae.agent.get_current_load",
+    "ae.schedule.list_all",
+    "ae.schedule.disable",
+    "ae.schedule.enable",
 }
 
 _TAG_STOPWORDS = {"ae", "get", "list", "by", "for", "to", "and", "or"}
@@ -356,22 +360,6 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         ],
         "extra_tags": ["rdp", "desktop-automation", "session-recovery"],
     },
-    "ae.schedule.enable": {
-        "title": "Schedule: Re-enable Schedule",
-        "description": "Re-enable a schedule so it can create future workflow executions again.",
-        "use_when": "The schedule was intentionally paused and the triggering condition is now safe again.",
-        "avoid_when": "The workflow or its dependencies are still unstable and automated triggering should remain suspended.",
-        "input_examples": [
-            {
-                "schedule_id": "SCH-2001",
-                "reason": "Downstream file drop restored; resume hourly schedule",
-                "requested_by": "ops.l2",
-                "case_id": "INC-4340",
-                "dry_run": True,
-            }
-        ],
-        "extra_tags": ["schedule-enable", "resume-trigger"],
-    },
     "ae.schedule.run_now": {
         "title": "Schedule: Trigger Run Now",
         "description": "Trigger a schedule immediately outside its normal next-run time.",
@@ -389,20 +377,42 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         "extra_tags": ["run-now", "catch-up", "schedule-trigger"],
     },
     "ae.schedule.disable": {
-        "title": "Schedule: Disable Schedule",
-        "description": "Disable a schedule to stop it from creating new workflow executions.",
-        "use_when": "Repeated automated triggers are causing avoidable failures or downstream impact during an incident.",
+        "title": "Schedule: Disable/Pause Schedule",
+        "description": "Disable, pause, stop, or halt an AutomationEdge schedule. Use this when the user says 'pause the schedule', 'stop the trigger', 'disable runs', or 'halt automation' for a specific schedule_id.",
+        "use_when": "The user wants to temporarily or permanently stop automated runs (e.g., 'pause schedule 1024' or 'disable the License_bot trigger').",
         "avoid_when": "Only a single queued request is problematic and the broader schedule is still healthy.",
         "input_examples": [
             {
-                "schedule_id": "SCH-2001",
+                "schedule_id": "1024",
                 "reason": "Prevent repeated batch failures until upstream feed is fixed",
                 "requested_by": "ops.l2",
                 "case_id": "INC-4345",
                 "dry_run": True,
             }
         ],
-        "extra_tags": ["schedule-disable", "incident-containment"],
+        "extra_tags": ["schedule-disable", "pause-schedule", "stop-trigger", "stop-schedule", "halt-runs", "deactivate-trigger"],
+    },
+    "ae.schedule.enable": {
+        "title": "Schedule: Enable/Resume Schedule",
+        "description": "Enable, resume, start, or restart an AutomationEdge schedule. Use this when the user says 'resume the schedule', 'start the trigger', 're-enable runs', or 'unpause automation' for a specific schedule_id.",
+        "use_when": "The user wants to allow a previously disabled or paused schedule to start triggering runs again (e.g., 'resume schedule 1024' or 'start the License_bot trigger').",
+        "avoid_when": "The workflow or its dependencies are still unstable and automated triggering should remain suspended.",
+        "input_examples": [
+            {
+                "schedule_id": "1024",
+                "reason": "Downstream file drop restored; resume hourly schedule",
+                "requested_by": "ops.l2",
+                "case_id": "INC-4340",
+                "dry_run": True,
+            }
+        ],
+        "extra_tags": ["schedule-enable", "resume-schedule", "start-trigger", "start-schedule", "resume-runs", "reactivate-trigger"],
+    },
+    "ae.schedule.list_all": {
+        "title": "Schedule: List All Schedules",
+        "description": "List all schedules across all workflows. Use this to find the correct schedule_id.",
+        "use_when": "The user wants to see schedules or before enabling/disabling if the ID is unknown.",
+        "extra_tags": ["list-schedules", "find-schedule", "global-schedules"],
     },
     "ae.task.cancel_admin": {
         "title": "Task: Cancel Task As Admin",
@@ -815,6 +825,7 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.request.tag_case_reference", _req_mutate.request_tag_case_reference, "request_mutate", "safe_mutation"),
         _spec("ae.request.raise_manual_handoff", _req_mutate.request_raise_manual_handoff, "request_mutate", "safe_mutation"),
         _spec("ae.workflow.search", _wf.workflow_search, "workflow_read", "safe_read"),
+        _spec("ae.workflow.list", _wf.workflow_list, "workflow_read", "safe_read"),
         _spec("ae.workflow.list_for_user", _wf.workflow_list_for_user, "workflow_read", "safe_read"),
         _spec("ae.workflow.get_details", _wf.workflow_get_details, "workflow_read", "safe_read"),
         _spec("ae.workflow.get_runtime_parameters", _wf.workflow_get_runtime_parameters, "workflow_read", "safe_read"),
@@ -843,6 +854,7 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.agent.collect_diagnostics", _agent.agent_collect_diagnostics, "agent_read", "safe_read"),
         _spec("ae.agent.restart_service", _agent.agent_restart_service, "agent_mutate", "privileged"),
         _spec("ae.agent.clear_stale_rdp_session", _agent.agent_clear_stale_rdp_session, "agent_mutate", "privileged"),
+        _spec("ae.schedule.list_all", _sched.schedule_list_all, "schedule_read", "safe_read"),
         _spec("ae.schedule.list_for_workflow", _sched.schedule_list_for_workflow, "schedule_read", "safe_read"),
         _spec("ae.schedule.get_details", _sched.schedule_get_details, "schedule_read", "safe_read"),
         _spec("ae.schedule.get_missed_runs", _sched.schedule_get_missed_runs, "schedule_read", "safe_read"),

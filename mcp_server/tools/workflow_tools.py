@@ -19,6 +19,21 @@ def _safe_json(obj: Any) -> str:
         return str(obj)
 
 
+async def workflow_list(limit: int = 100) -> str:
+    """List all available workflows."""
+    results = get_ae_client().search_workflows(limit=limit)
+    items = []
+    for w in results:
+        items.append({
+            "workflow_id": w.get("workflowId") or w.get("id"),
+            "workflow_name": w.get("workflowName") or w.get("name"),
+            "description": w.get("description"),
+            "category": w.get("category"),
+            "active": w.get("active", True),
+        })
+    return _safe_json({"workflows": items, "count": len(items)})
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  workflow_read
 # ═══════════════════════════════════════════════════════════════════════

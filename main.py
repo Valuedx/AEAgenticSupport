@@ -22,16 +22,24 @@ app_logger.debug("Tool bootstrap summary: %s", tooling_summary)
 def handle_chat_message(message: str, session_id: str = "default",
                         user_id: str = "",
                         user_role: str = "technical",
+                        user_name: str = "",
+                        user_email: str = "",
+                        user_team: str = "",
+                        user_metadata: dict | None = None,
                         on_progress=None) -> str:
     """
     Called by AE AI Studio for each incoming chat message.
 
     Parameters:
-        message:    The user's chat message
-        session_id: Unique conversation/session identifier
-        user_id:    Authenticated user ID from AE
-        user_role:  "business" or "technical" (from AE user profile)
-        on_progress: optional ``fn(status_text)`` for streaming progress
+        message:        The user's chat message
+        session_id:     Unique conversation/session identifier
+        user_id:        Authenticated user ID from AE
+        user_role:      "business" or "technical" (from AE user profile)
+        user_name:      Real name of the user
+        user_email:     Email address of the user
+        user_team:      Team/Department of the user
+        user_metadata:  Additional arbitrary user data
+        on_progress:    optional ``fn(status_text)`` for streaming progress
 
     Returns:
         Response string to display in chat
@@ -39,13 +47,17 @@ def handle_chat_message(message: str, session_id: str = "default",
     try:
         log_msg = message[:100] + ("..." if len(message) > 100 else "")
         app_logger.info(
-            f"Message from {user_id} [{user_role}]: {log_msg}"
+            f"Message from {user_id} (Name: {user_name}, Email: {user_email}, Team: {user_team}) [{user_role}]: {log_msg}"
         )
         response = gateway.process_message(
             conversation_id=session_id,
             user_message=message,
             user_id=user_id,
             user_role=user_role,
+            user_name=user_name,
+            user_email=user_email,
+            user_team=user_team,
+            user_metadata=user_metadata,
             on_progress=on_progress,
         )
         log_resp = response[:100] + ("..." if len(response) > 100 else "")

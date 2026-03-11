@@ -69,8 +69,11 @@ async def agent_get_status(agent_id: str) -> str:
         aid = a.get("agentId") or a.get("id") or ""
         aname = a.get("agentName") or a.get("name") or ""
         if str(aid) == agent_id or aname == agent_id:
+            logger.info("Matched agent %s (ID: %s) by name or ID", aname, aid)
             match = a
             break
+    
+    logger.info("Search loop finished. match=%s", match is not None)
 
     if not match:
         try:

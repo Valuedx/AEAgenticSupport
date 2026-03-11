@@ -28,6 +28,8 @@ class AEClient:
         self.default_user = MCP_CONFIG["AE_DEFAULT_USERID"]
         self.timeout = MCP_CONFIG["AE_TIMEOUT_SECONDS"]
         self.verify_ssl = MCP_CONFIG["AE_VERIFY_SSL"]
+        
+        logger.info("AEClient initialized: base_url=%s, rest_base=%s, org=%s", self.base_url, self.rest_base, self.org)
 
         self._api_key = MCP_CONFIG["AE_API_KEY"]
         self._username = MCP_CONFIG["AE_USERNAME"]
@@ -118,6 +120,8 @@ class AEClient:
         retry_401: bool = True,
     ) -> Any:
         url = self._rest(path) if use_rest else (path if path.startswith("/") else f"/{path}")
+        full_url = f"{self.base_url}{url}"
+        logger.info("AE Request: %s %s (use_rest=%s)", method, full_url, use_rest)
         resp = self._http.request(
             method, url, params=params, json=json_body, headers=self._headers()
         )
@@ -180,6 +184,7 @@ class AEClient:
         for use_rest in (True, False):
             for path_idx, path in enumerate(paths):
                 try:
+                    logger.info("Trying endpoint: %s (use_rest=%s, method=%s)", path, use_rest, method)
                     out = self._request(
                         method, path, params=params, json_body=json_body, use_rest=use_rest
                     )
@@ -187,7 +192,8 @@ class AEClient:
                         self._path_cache[cache_key] = (path_idx, use_rest)
                     return out
                 except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code in {400, 404, 405, 500}:
+                    logger.info("Endpoint failed: %s (status=%d)", path, exc.response.status_code)
+                    if exc.response.status_code in {400, 403, 404, 405, 500}:
                         last_exc = exc
                         continue
                     raise
@@ -441,21 +447,51 @@ class AEClient:
         ])
 
     def search_schedules(self, workflow_id: str = "", filters: Optional[dict] = None) -> list[dict]:
-        params: dict[str, Any] = {"offset": 0, "size": 100}
+        params: dict[str, Any] = {"offset": 0, "size": 100, "order": "desc"}
+        body: dict[str, Any] = {}
+        
         if workflow_id:
-            params["workflowId"] = workflow_id
+            # T4 often expects workflowId in the JSON body for POST /schedules
+            try:
+                body["workflowId"] = int(workflow_id)
+            except (ValueError, TypeError):
+                body["workflowId"] = workflow_id
+                
         if filters:
-            params.update(filters)
-        raw = self._try_paths("GET", [
+            # Merge filters into body primarily for POST, but keep some in params for GET fallbacks
+            body.update(filters)
+            if "offset" in filters: params["offset"] = filters["offset"]
+            if "size" in filters: params["size"] = filters["size"]
+            
+        # T4 confirmed working: POST /tenants/{org}/workflows/schedules
+        # Fallbacks for other AE versions.
+        raw = self._try_paths("POST", [
+            f"/tenants/{self.org}/workflows/schedules",
             f"/{self.org}/schedules",
             "/schedules",
-        ], params=params)
-        return self._extract_list(raw, keys=("schedules", "items", "data"))
+        ], params=params, json_body=body)
+        return self._extract_list(raw, keys=("data", "schedules", "items"))
 
     def disable_schedule(self, schedule_id: str, reason: str = "") -> dict:
-        return self._try_paths("POST", [
+        return self._try_paths("PUT", [
+            f"/tenants/{self.org}/workflows/schedules/{schedule_id}/disable",
             f"/{self.org}/schedules/{schedule_id}/disable",
             f"/schedules/{schedule_id}/disable",
+        ], json_body={"reason": reason}) or self._try_paths("POST", [
+            f"/tenants/{self.org}/workflows/schedules/{schedule_id}/disable",
+            f"/{self.org}/schedules/{schedule_id}/disable",
+            f"/schedules/{schedule_id}/disable",
+        ], json_body={"reason": reason})
+
+    def enable_schedule(self, schedule_id: str, reason: str = "") -> dict:
+        return self._try_paths("PUT", [
+            f"/tenants/{self.org}/workflows/schedules/{schedule_id}/enable",
+            f"/{self.org}/schedules/{schedule_id}/enable",
+            f"/schedules/{schedule_id}/enable",
+        ], json_body={"reason": reason}) or self._try_paths("POST", [
+            f"/tenants/{self.org}/workflows/schedules/{schedule_id}/enable",
+            f"/{self.org}/schedules/{schedule_id}/enable",
+            f"/schedules/{schedule_id}/enable",
         ], json_body={"reason": reason})
 
     def get_tasks(self, filters: Optional[dict] = None) -> list[dict]:

@@ -73,12 +73,9 @@ class Issue:
         self.updated_at = datetime.now().isoformat()
 
     def to_summary(self) -> str:
+        workflow_info = f" | Workflows: {', '.join(self.workflows_involved)}" if self.workflows_involved else ""
         return (
-            f"[{self.issue_id}] {self.title} | Status: {self.status.value} | "
-            f"Workflows: {', '.join(self.workflows_involved)} | "
-            f"Error: {', '.join(self.error_signatures[:2])} | "
-            f"Recurrences: {self.recurrence_count} | "
-            f"Created: {self.created_at}"
+            f"[{self.issue_id}] {self.title} | Status: {self.status.value}{workflow_info}"
         )
 
     def to_dict(self) -> dict:
@@ -579,6 +576,7 @@ If no issue_id applies: CLASSIFICATION|none"""
                 logger.info(f"Issue {issue.issue_id} marked stale")
 
     def get_all_issues_summary(self) -> str:
-        if not self.issues:
-            return "No issues tracked in this session."
-        return "\n".join(i.to_summary() for i in self.issues.values())
+        active = [i for i in self.issues.values() if i.status != IssueStatus.RESOLVED and i.status != IssueStatus.STALE]
+        if not active:
+            return "No active issues."
+        return "\n".join(i.to_summary() for i in active)

@@ -23,12 +23,41 @@ def _safe_json(obj: Any) -> str:
 def _ts_to_iso(ts: Any) -> str | None:
     if ts is None:
         return None
-    if isinstance(ts, (int, float)):
-        try:
-            return datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
-        except Exception:
-            return str(ts)
-    return str(ts)
+    try:
+        # Handle string-encoded timestamps or direct numbers
+        val = float(ts)
+        # T4 often returns high-precision milliseconds (13 digits)
+        if val > 10000000000:
+            val /= 1000.0
+        return datetime.fromtimestamp(val, tz=timezone.utc).isoformat().split('.')[0] + 'Z'
+    except (ValueError, TypeError, OverflowError):
+        return str(ts)
+
+
+async def schedule_list_all(limit: int = 100) -> str:
+    """List all schedules across all workflows. Use this to find a schedule_id before enabling or disabling."""
+    results = get_ae_client().search_schedules(filters={"size": limit})
+    items = []
+    for s in results:
+        sched_obj = s.get("schedule", {}) or {}
+        exec_obj = sched_obj.get("execution", {}) or {}
+        
+        items.append({
+            "schedule_id": s.get("id") or s.get("scheduleId"),
+            "schedule_name": s.get("scheduleName") or s.get("name"),
+            "workflow_id": s.get("workflowId"),
+            "workflow_name": s.get("workflowName") or s.get("automationRequest", {}).get("workflowName"),
+            "enabled": s.get("active") if s.get("active") is not None else s.get("enabled"),
+            "cron": sched_obj.get("customCronExpression") or s.get("cron") or s.get("cronExpression"),
+            "start_time": exec_obj.get("startTime"),
+            "next_run": _ts_to_iso(s.get("nextRun") or s.get("nextRunTime") or s.get("startDatetime")),
+            "last_run": _ts_to_iso(s.get("lastRun") or s.get("lastRunTime") or s.get("lastUpdatedDate")),
+        })
+    return _safe_json({
+        "schedules": items, 
+        "count": len(items),
+        "hint": "To pause or disable a schedule, use 'ae.schedule.disable(schedule_id=\"ID\", reason=\"...\")'. To resume, use 'ae.schedule.enable(schedule_id=\"ID\", reason=\"...\")'."
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -36,19 +65,23 @@ def _ts_to_iso(ts: Any) -> str | None:
 # ═══════════════════════════════════════════════════════════════════════
 
 async def schedule_list_for_workflow(workflow_id: str) -> str:
-    """Get schedules linked to a workflow."""
+    """Get schedules linked to a workflow. Use this to find a schedule_id if you know the workflow."""
     results = get_ae_client().search_schedules(workflow_id=workflow_id)
     items = []
     for s in results:
+        sched_obj = s.get("schedule", {}) or {}
+        exec_obj = sched_obj.get("execution", {}) or {}
+        
         items.append({
-            "schedule_id": s.get("scheduleId") or s.get("id"),
+            "schedule_id": s.get("id") or s.get("scheduleId"),
             "schedule_name": s.get("scheduleName") or s.get("name"),
             "workflow_id": s.get("workflowId"),
-            "workflow_name": s.get("workflowName"),
-            "enabled": s.get("enabled") or s.get("active"),
-            "cron": s.get("cron") or s.get("cronExpression"),
-            "next_run": s.get("nextRun") or s.get("nextRunTime"),
-            "last_run": s.get("lastRun") or s.get("lastRunTime"),
+            "workflow_name": s.get("workflowName") or s.get("automationRequest", {}).get("workflowName"),
+            "enabled": s.get("active") if s.get("active") is not None else s.get("enabled"),
+            "cron": sched_obj.get("customCronExpression") or s.get("cron") or s.get("cronExpression"),
+            "start_time": exec_obj.get("startTime"),
+            "next_run": _ts_to_iso(s.get("nextRun") or s.get("nextRunTime") or s.get("startDatetime")),
+            "last_run": _ts_to_iso(s.get("lastRun") or s.get("lastRunTime") or s.get("lastUpdatedDate")),
         })
     return _safe_json({"workflow_id": workflow_id, "schedules": items, "count": len(items)})
 
@@ -211,12 +244,14 @@ async def schedule_diagnose_not_triggered(schedule_id: str) -> str:
 
 async def schedule_disable(
     schedule_id: str,
-    reason: str,
+    reason: str = "",
     requested_by: str = "",
     case_id: str = "",
     dry_run: bool = False,
 ) -> str:
-    """Disable a schedule. Guarded operation."""
+    """Pause or disable a schedule. Guaded operation. 
+    Use this when asked "How can I pause or disable this schedule?".
+    Requires a schedule_id. If not known, list schedules first."""
     if dry_run:
         return _safe_json({
             "dry_run": True,
@@ -261,12 +296,14 @@ async def schedule_get_last_runs(schedule_id: str, limit: int = 10) -> str:
 
 async def schedule_enable(
     schedule_id: str,
-    reason: str,
+    reason: str = "",
     requested_by: str = "",
     case_id: str = "",
     dry_run: bool = False,
 ) -> str:
-    """Enable a schedule. Guarded operation."""
+    """Resume or enable a schedule. Guarded operation.
+    Use this when asked "How do I resume or enable this schedule?".
+    Requires a schedule_id. If not known, list schedules first."""
     if dry_run:
         return _safe_json({"dry_run": True, "action": "enable_schedule", "schedule_id": schedule_id, "reason": reason, "message": f"Would enable schedule {schedule_id}. No changes made."})
     data = get_ae_client().enable_schedule(schedule_id, reason=reason)

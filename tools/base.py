@@ -70,43 +70,106 @@ class ToolDefinition:
         return " ".join(part for part in parts if part)
 
     def to_rag_document(self) -> dict:
-        # Build a rich searchable content string that helps RAG surface this tool
-        param_desc = ", ".join(
-            f"{k} ({v.get('type', 'any')}{'*' if k in self.required_params else ''})"
-            for k, v in (self.parameters or {}).items()
-        )
-        examples = self._format_examples()
+        """Build a maximally rich document for RAG embedding.
+
+        Rules:
+        - Include ALL parameters with their type AND description text.
+        - Collect tags from every metadata location (metadata.tags, mcp_meta.tags,
+          mcp_meta.extra_tags) so synonyms are always embedded.
+        - Fall back to mcp_meta for use_when/avoid_when if not set on the definition.
+        - Include all input examples.
+        """
+        meta = self.metadata or {}
+        mcp_meta = meta.get("mcp_meta", {}) or {}
+
+        # ── Tags: merge from every possible source ──────────────────────────
+        all_tags: list[str] = []
+        for tag_src in [
+            meta.get("tags", []),
+            mcp_meta.get("tags", []),
+            mcp_meta.get("extra_tags", []),
+        ]:
+            if isinstance(tag_src, list):
+                all_tags.extend(str(t) for t in tag_src if t)
+        seen_tags: set[str] = set()
+        unique_tags: list[str] = []
+        for t in all_tags:
+            if t not in seen_tags:
+                seen_tags.add(t)
+                unique_tags.append(t)
+
+        # ── use_when / avoid_when: prefer definition, fallback to mcp_meta ──
+        use_when = self.use_when or str(mcp_meta.get("use_when", "") or "")
+        avoid_when = self.avoid_when or str(mcp_meta.get("avoid_when", "") or "")
+
+        # ── Parameters: full name + type + description + required flag ───────
+        param_lines: list[str] = []
+        for param_name, param_schema in (self.parameters or {}).items():
+            if not isinstance(param_schema, dict):
+                continue
+            p_type = str(param_schema.get("type", "any"))
+            p_desc = str(param_schema.get("description", "") or "").strip()
+            p_enum = param_schema.get("enum", [])
+            p_required = "required" if param_name in self.required_params else "optional"
+            parts = [f"  - {param_name} ({p_type}, {p_required})"]
+            if p_desc:
+                parts.append(f": {p_desc}")
+            if p_enum and isinstance(p_enum, list):
+                parts.append(f" [values: {', '.join(str(v) for v in p_enum[:8])}]")
+            param_lines.append("".join(parts))
+
+        params_block = "\n".join(param_lines) if param_lines else "  none"
+
+        # ── Examples: all of them ────────────────────────────────────────────
+        example_lines: list[str] = []
+        for ex in self.input_examples:
+            try:
+                import json as _json
+                text = _json.dumps(ex, ensure_ascii=False, sort_keys=True)
+                if len(text) > 300:
+                    text = text[:297] + "..."
+                example_lines.append(f"  {text}")
+            except Exception:
+                example_lines.append(f"  {ex}")
+        examples_block = "\n".join(example_lines) if example_lines else "  none"
+
+        title = str(meta.get("title", "") or "").strip()
+
+        content = "\n".join([
+            f"Tool: {self.name}",
+            f"Title: {title or self.name}",
+            f"Category: {self.category}",
+            f"Tier: {self.tier}",
+            f"Safety: {meta.get('safety', '') or 'not specified'}",
+            f"Description: {self.description}",
+            f"Use when: {use_when or 'not specified'}",
+            f"Avoid when: {avoid_when or 'not specified'}",
+            f"Tags / Synonyms: {', '.join(unique_tags) if unique_tags else 'none'}",
+            f"Required parameters: {', '.join(self.required_params) or 'none'}",
+            "Parameters (name, type, required/optional, description):",
+            params_block,
+            "Input examples:",
+            examples_block,
+        ])
+
         return {
             "id": f"tool-{self.name}",
-            "content": (
-                f"Tool: {self.name}\n"
-                f"Title: {self.metadata.get('title', '') or 'none'}\n"
-                f"Category: {self.category}\n"
-                f"Risk tier: {self.tier}\n"
-                f"Safety: {self.metadata.get('safety', '') or 'not specified'}\n"
-                f"Description: {self.description}\n"
-                f"Use when: {self.use_when or 'not specified'}\n"
-                f"Avoid when: {self.avoid_when or 'not specified'}\n"
-                f"Parameters: {param_desc}\n"
-                f"Required: {', '.join(self.required_params) or 'none'}\n"
-                f"Tags: {', '.join(self.metadata.get('tags', [])) or 'none'}\n"
-                f"Examples: {' | '.join(examples) if examples else 'none'}"
-            ),
+            "content": content,
             "metadata": {
                 "tool_name": self.name,
-                "title": self.metadata.get("title", ""),
+                "title": title,
                 "category": self.category,
                 "tier": self.tier,
-                "source": self.metadata.get("source", "static"),
-                "workflow_name": self.metadata.get("workflow_name", ""),
+                "source": meta.get("source", "static"),
+                "workflow_name": meta.get("workflow_name", ""),
                 "always_available": self.always_available,
-                "dynamic": bool(self.metadata.get("dynamic", False)),
-                "tags": self.metadata.get("tags", []),
-                "safety": self.metadata.get("safety", ""),
-                "use_when": self.use_when,
-                "avoid_when": self.avoid_when,
+                "dynamic": bool(meta.get("dynamic", False)),
+                "tags": unique_tags,
+                "safety": meta.get("safety", ""),
+                "use_when": use_when,
+                "avoid_when": avoid_when,
                 "input_examples": self.input_examples[:2],
-                "structured_output": bool(self.metadata.get("structured_output", False)),
+                "structured_output": bool(meta.get("structured_output", False)),
             },
         }
 

@@ -161,23 +161,35 @@ def _cognibot_request(method: str, path: str, payload: dict | None = None) -> tu
             "and COGNIBOT_DIRECTLINE_SECRET."
         )
 
-    response = requests.request(
-        method=method.upper(),
-        url=f"{base_url}/{path.lstrip('/')}",
-        headers={
-            "Authorization": f"Bearer {secret}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=20,
-    )
+    timeout = int(get_runtime_value("COGNIBOT_TIMEOUT_SECONDS", CONFIG.get("COGNIBOT_TIMEOUT_SECONDS", 60)))
+    
     try:
-        data = response.json()
-    except ValueError:
-        data = {"message": response.text.strip()}
-    if not isinstance(data, dict):
-        data = {"data": data}
-    return data, response.status_code
+        response = requests.request(
+            method=method.upper(),
+            url=f"{base_url}/{path.lstrip('/')}",
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+        try:
+            data = response.json()
+            log.debug("AI Studio Response [%d]: %s", response.status_code, data)
+        except ValueError:
+            data = {"message": response.text.strip()}
+            log.debug("AI Studio Raw Response [%d]: %s", response.status_code, response.text[:200])
+        
+        if not isinstance(data, dict):
+            data = {"data": data}
+        return data, response.status_code
+    except requests.exceptions.ReadTimeout:
+        log.error("AI Studio request timed out after %ds for %s", timeout, path)
+        return {
+            "error": "The request to AI Studio timed out.",
+            "message": f"The agent is taking longer than expected ({timeout}s) to process the request. The operation may still be running in the background."
+        }, 504
 
 
 @app.route("/chat", methods=["POST"])
@@ -192,6 +204,10 @@ def chat():
         session_id=data.get("session_id", "webchat-default"),
         user_id=data.get("user_id", "webchat_user"),
         user_role=data.get("user_role", "technical"),
+        user_name=data.get("user_name", ""),
+        user_email=data.get("user_email", ""),
+        user_team=data.get("user_team", ""),
+        user_metadata=data.get("user_metadata", {}),
     )
     return jsonify({"response": response})
 
@@ -219,6 +235,10 @@ def chat_stream():
                 session_id=session_id,
                 user_id=user_id,
                 user_role=user_role,
+                user_name=data.get("user_name", ""),
+                user_email=data.get("user_email", ""),
+                user_team=data.get("user_team", ""),
+                user_metadata=data.get("user_metadata", {}),
                 on_progress=on_progress,
             )
             event_queue.put({"event": "done", "data": final})
@@ -1452,25 +1472,46 @@ def api_metrics():
         return jsonify({"error": str(exc)}), 500
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+def init_backend() -> None:
+    """
+    Initialize backend services (scheduler, session cleanup) without starting
+    the Flask HTTP server.
 
-    # Initialize scheduler with default tasks
+    Call this when you need the agent logic in-process (e.g. from AI Studio /
+    ops_support.py) without running the standalone server.
+    """
+    logging.basicConfig(level=logging.INFO)
     try:
         from agents.scheduler import get_scheduler, setup_default_tasks
         setup_default_tasks()
-        
-        # Register session cleanup task
+
         from state.session_manager import register_cleanup_task
         register_cleanup_task()
-        
+
         if CONFIG.get("ENABLE_PROACTIVE_MONITORING", False):
             get_scheduler().start()
     except Exception as exc:
         log.warning("Scheduler init failed (non-fatal): %s", exc)
 
+
+def main() -> None:
+    """
+    Start the standalone Agent HTTP server.
+
+    This is the primary entry point when running agent_server.py directly.
+    It calls init_backend() first, then launches Flask.
+
+    AI Studio / ops_support.py should NOT call this — import
+    handle_chat_message (or call init_backend()) directly instead.
+    """
+    init_backend()
+
     port = int(os.environ.get("AGENT_SERVER_PORT", 5050))
     print(f"Agent server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    main()
 
 

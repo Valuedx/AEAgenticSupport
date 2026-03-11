@@ -162,6 +162,22 @@ _RUNTIME_SCHEMA_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_workflow_catalog_active
         ON workflow_catalog(active)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS user_registry (
+        user_id         VARCHAR(256) PRIMARY KEY,
+        user_role       VARCHAR(32)  DEFAULT 'technical',
+        user_name       VARCHAR(256),
+        user_email      VARCHAR(256),
+        user_team       VARCHAR(128),
+        metadata        JSONB        DEFAULT '{}'::jsonb,
+        created_at      TIMESTAMPTZ  DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ  DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_user_registry_email
+        ON user_registry(user_email)
+    """,
 )
 
 

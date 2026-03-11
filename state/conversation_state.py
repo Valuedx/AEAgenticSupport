@@ -49,6 +49,10 @@ class ConversationState:
         self.exists_in_store: bool = False
         self.user_id: str = ""
         self.user_role: str = "technical"
+        self.user_name: str = ""
+        self.user_email: str = ""
+        self.user_team: str = ""
+        self.user_metadata: dict = {}
 
         self.phase: ConversationPhase = ConversationPhase.IDLE
         self.messages: list[dict] = []
@@ -149,6 +153,20 @@ class ConversationState:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    # sync user registry first
+                    if self.user_id:
+                        cur.execute("""
+                            INSERT INTO user_registry (user_id, user_role, user_name, user_email, user_team, metadata, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                            ON CONFLICT (user_id) DO UPDATE SET
+                                user_role = EXCLUDED.user_role,
+                                user_name = COALESCE(NULLIF(EXCLUDED.user_name, ''), user_registry.user_name),
+                                user_email = COALESCE(NULLIF(EXCLUDED.user_email, ''), user_registry.user_email),
+                                user_team = COALESCE(NULLIF(EXCLUDED.user_team, ''), user_registry.user_team),
+                                metadata = user_registry.metadata || EXCLUDED.metadata,
+                                updated_at = NOW()
+                        """, (self.user_id, self.user_role, self.user_name, self.user_email, self.user_team, Json(self.user_metadata)))
+
                     # Flush deferred message inserts in one batch
                     if self._pending_message_inserts:
                         for role, content, metadata in self._pending_message_inserts:
@@ -166,6 +184,12 @@ class ConversationState:
                         "pending_action_summary": self.pending_action_summary,
                         "param_collection": self.param_collection,
                         "preferred_language": self.preferred_language,
+                        "user": {
+                            "user_name": self.user_name,
+                            "user_email": self.user_email,
+                            "user_team": self.user_team,
+                            "user_metadata": self.user_metadata,
+                        }
                     }
                     cur.execute("""
                         INSERT INTO conversation_state
@@ -229,6 +253,21 @@ class ConversationState:
                         state.preferred_language = data.get("preferred_language", "en")
                         for f_data in data.get("findings", []):
                             state.findings.append(Finding(**f_data))
+                        
+                        # Load user details from registry
+                        if state.user_id:
+                            cur.execute(
+                                "SELECT user_name, user_email, user_team, metadata, user_role "
+                                "FROM user_registry WHERE user_id = %s",
+                                (state.user_id,),
+                            )
+                            u_row = cur.fetchone()
+                            if u_row:
+                                state.user_name = u_row[0] or ""
+                                state.user_email = u_row[1] or ""
+                                state.user_team = u_row[2] or ""
+                                state.user_metadata = u_row[3] or {}
+                                state.user_role = u_row[4] or state.user_role
         except Exception as e:
             logger.warning(f"Could not load conversation state: {e}")
         return state
@@ -432,3 +471,138 @@ class ConversationState:
                 conn.commit()
         except Exception as e:
             logger.warning(f"Failed to save feedback: {e}")
+
+    # ── Conversational Context (Cross-turn Entity Memory) ────────────────────
+
+    def get_recent_context_summary(self, n_turns: int = 5) -> str:
+        """Build a compact context block from the last N conversation turns.
+
+        Extracts named entities and resolved actions so the LLM can carry
+        forward values (schedule IDs, workflow names, etc.) across issue
+        boundaries without asking the user to repeat themselves.
+
+        Returns a formatted string ready for system-prompt injection.
+        """
+        import re
+
+        # ── Collect last N user/assistant message pairs ─────────────────────
+        recent_messages = [
+            m for m in self.messages
+            if m.get("role") in ("user", "assistant")
+        ][-n_turns * 2:]  # n_turns pairs = 2*n messages
+
+        if not recent_messages:
+            return ""
+
+        # ── Regex patterns for common entity types ──────────────────────────
+        _SCHEDULE_ID = re.compile(r"\bschedule[_\s]?id[:\s#]*(\d{3,})\b", re.IGNORECASE)
+        _EXEC_ID     = re.compile(r"\bexecution[_\s]?id[:\s#]*(\d{4,})\b", re.IGNORECASE)
+        _REQUEST_ID  = re.compile(r"\b(?:request|req)[_\s]?id[:\s#]*(\d{4,})\b", re.IGNORECASE)
+        _STANDALONE_ID = re.compile(r"(?<!\d)(\d{4,6})(?!\d)")
+        _WF_NAME     = re.compile(r"\b([A-Z][a-zA-Z0-9_]{2,}(?:_bot|_wf|_workflow|_job))\b")
+        _ACTION_DONE = re.compile(
+            r"ae\.(schedule|workflow|request|agent)\."
+            r"(disable|enable|run_now|restart|cancel|trigger)",
+            re.IGNORECASE,
+        )
+
+        entities: dict[str, str] = {}
+        resolved_actions: list[str] = []
+
+        # ── Scan message text ────────────────────────────────────────────────
+        for msg in recent_messages:
+            text = str(msg.get("content", "") or "")
+
+            for m in _SCHEDULE_ID.finditer(text):
+                entities.setdefault("schedule_id", m.group(1))
+            for m in _EXEC_ID.finditer(text):
+                entities.setdefault("execution_id", m.group(1))
+            for m in _REQUEST_ID.finditer(text):
+                entities.setdefault("request_id", m.group(1))
+            for m in _WF_NAME.finditer(text):
+                entities.setdefault("workflow_name", m.group(1))
+
+            # Standalone numbers in user messages often are IDs in context
+            if msg.get("role") == "user":
+                for m in _STANDALONE_ID.finditer(text):
+                    val = m.group(1)
+                    # Don't overwrite already-labelled entities
+                    if "schedule_id" not in entities and "id" in text.lower():
+                        entities.setdefault("mentioned_id", val)
+
+        # ── Scan tool call log for resolved actions and values ───────────────
+        for call in self.tool_call_log[-n_turns:]:
+            tool_name = call.get("tool", "")
+            params = call.get("params", {}) or {}
+            success = call.get("success", False)
+
+            # Extract values from params
+            for key, val in params.items():
+                if not val:
+                    continue
+                if "schedule" in key.lower():
+                    entities.setdefault("schedule_id", str(val))
+                elif "workflow" in key.lower() or "name" in key.lower():
+                    entities.setdefault("workflow_name", str(val))
+                elif "execution" in key.lower():
+                    entities.setdefault("execution_id", str(val))
+                elif "request" in key.lower():
+                    entities.setdefault("request_id", str(val))
+
+            # Record successful action tools
+            if success and _ACTION_DONE.search(tool_name):
+                status = "[ok]" if success else "[fail]"
+                resolved_actions.append(f"{tool_name} {status}")
+
+        # ── Also scan result data for workflow/schedule names ────────────────
+        for call in self.tool_call_log[-3:]:
+            result_data = call.get("result") or {}
+            if not isinstance(result_data, dict):
+                continue
+            items = (
+                result_data.get("schedules")
+                or result_data.get("instances")
+                or result_data.get("failures")
+                or [result_data]
+            )
+            for item in (items if isinstance(items, list) else [items]):
+                if not isinstance(item, dict):
+                    continue
+                for k, v in item.items():
+                    if not v:
+                        continue
+                    kl = k.lower()
+                    if "schedule_id" in kl or kl == "id":
+                        entities.setdefault("schedule_id", str(v))
+                    if "name" in kl and len(str(v)) > 2:
+                        entities.setdefault("schedule_name", str(v))
+                    if "workflow" in kl and "name" in kl:
+                        entities.setdefault("workflow_name", str(v))
+
+        if not entities and not resolved_actions:
+            return ""
+
+        # ── Format the context block ─────────────────────────────────────────
+        lines = ["## Recent Conversation Context"]
+        lines.append("Use the following values from earlier in this conversation.")
+        lines.append("Do NOT ask the user to provide them again:\n")
+        for key, val in entities.items():
+            label = key.replace("_", " ").title()
+            lines.append(f"  - {label}: **{val}**")
+        if resolved_actions:
+            lines.append(f"  - Last Actions: {', '.join(resolved_actions[-3:])}")
+
+        # Recent message digest (last 5 turns, compact)
+        lines.append("\n### Last Turns Summary:")
+        for msg in recent_messages[-6:]:
+            role = "User" if msg["role"] == "user" else "Agent"
+            content = str(msg.get("content", ""))[:150].replace("\n", " ")
+            lines.append(f"  [{role}] {content}")
+
+        lines.append(
+            "\nCRITICAL: If the user's current message refers to a schedule, "
+            "workflow, or ID without specifying it explicitly, use the values "
+            "above from recent context. Never ask for an ID already mentioned."
+        )
+        return "\n".join(lines)
+

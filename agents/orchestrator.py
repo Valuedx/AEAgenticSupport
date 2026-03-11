@@ -583,10 +583,18 @@ class Orchestrator:
 
                         if tool_name == "discover_tools":
                             found = (result.data or {}).get("tools", [])
-                            discovered_names.extend(
-                                t["name"] for t in found
-                                if t["name"] not in active_tool_names
+                            found_names = [t["name"] for t in found]
+                            new_names = [n for n in found_names if n not in active_tool_names]
+                            discovered_names.extend(new_names)
+                            logger.info(
+                                "discover_tools result: found=%s new_to_active=%s",
+                                found_names, new_names,
                             )
+                            if not found_names:
+                                logger.warning(
+                                    "discover_tools returned EMPTY results for this query. "
+                                    "LLM may fall back to SOP. Check RAG index and category mapping."
+                                )
 
                         if active_issue:
                             active_issue.touch()
@@ -666,16 +674,41 @@ class Orchestrator:
                         getattr(p, 'function_call', None) or getattr(p, 'function_response', None) 
                         for m in messages for p in m.parts
                     )
-                    if not any_tools_called and self._should_use_sop_fallback(tool_hits, sop_hits):
+                    logger.warning(
+                        "LLM did not call any tool on iteration %s. "
+                        "any_tools_called_in_history=%s active_tools=%s",
+                        iteration,
+                        any_tools_called,
+                        sorted(active_tool_names),
+                    )
+                    use_sop = not any_tools_called and self._should_use_sop_fallback(tool_hits, sop_hits)
+                    if use_sop:
+                        best_tool_sim = max(
+                            (float(h.get("rrf_score", h.get("similarity", 0.0)) or 0.0) for h in (tool_hits or [])),
+                            default=0.0,
+                        )
+                        best_sop_sim = max(
+                            (float(h.get("rrf_score", h.get("similarity", 0.0)) or 0.0) for h in (sop_hits or [])),
+                            default=0.0,
+                        )
+                        logger.warning(
+                            "SOP fallback triggered: best_tool_score=%.4f best_sop_score=%.4f "
+                            "(tool score < 0.52 or < 0.0001 with sop > 0.3). "
+                            "Falling back to SOP guidance instead of tool call.",
+                            best_tool_sim, best_sop_sim,
+                        )
                         final_response = self._build_sop_fallback_response(
                             user_message=user_message,
                             sop_hits=sop_hits,
                         )
                     else:
-                        final_response = "\n".join(text_parts) if text_parts else (
-                            "I've completed my investigation. Let me know if "
-                            "you need anything else."
-                        )
+                        if text_parts:
+                            final_response = "\n".join(text_parts)
+                        else:
+                            final_response = (
+                                "I've completed my investigation. Let me know if "
+                                "you need anything else."
+                            )
                     final_response = self._filter_for_persona(
                         final_response, state
                     )
@@ -896,10 +929,9 @@ class Orchestrator:
                 return role
         return "admin"
 
-    @staticmethod
-    def _format_completion_message(tool_name: str, data: dict) -> str:
-        """Create a clean, human-readable summary of the tool result."""
-        msg = data.get("message") or f"Action {tool_name} completed successfully."
+    def _format_completion_message(self, tool_name: str, data: dict) -> str:
+        """Create a clean, human-readable summary of the tool result with LLM-generated suggestions."""
+        msg = data.get("message") or f"I've successfully completed the {tool_name} action."
         
         details = []
         exec_id = data.get("execution_id") or data.get("request_id")
@@ -914,10 +946,44 @@ class Orchestrator:
         if workflow:
             details.append(f"• **Workflow**: `{workflow}`")
 
-        response = f"**Done!** {msg}\n"
+        response = f"### ✅ Action Completed\n{msg}\n"
         if details:
             response += "\n" + "\n".join(details)
-            
+
+        # Ask the LLM to generate 2 context-aware suggestions for what the user might want to do next.
+        # Uses a lightweight call (max_tokens=80) so it doesn't add significant latency.
+        try:
+            context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {msg[:200]}"
+            raw = llm_client.chat(
+                (
+                    "Based on the following action just completed by an AutomationEdge support agent, "
+                    "suggest exactly 2 brief, actionable next steps the user might want to take. "
+                    "Return ONLY 2 bullet lines starting with '- '. No preamble, no explanation.\n\n"
+                    f"Context: {context_summary}"
+                ),
+                system="You are a concise assistant. Output exactly 2 lines, each starting with '- '.",
+                temperature=0.7,
+                max_tokens=80,
+            )
+            suggestions = [
+                line.strip().lstrip("- ").strip()
+                for line in (raw or "").splitlines()
+                if line.strip().startswith("- ")
+            ][:2]
+        except Exception:
+            suggestions = []
+
+        if suggestions:
+            _labels = [
+                "**Here are a few options:**",
+                "**You might also want to:**",
+                "**Suggested next actions:**",
+                "**Can I help with anything else?**",
+                "**What's your next step?**",
+            ]
+            label = _labels[hash(tool_name) % len(_labels)]
+            response += f"\n\n{label}\n" + "\n".join(f"- {s}" for s in suggestions)
+
         return response
 
     @staticmethod
@@ -982,7 +1048,16 @@ Rules:
 9. If none of the above help, call discover_tools to search the full
    catalog by description or category.
 10. **CRITICAL: TECHNICAL PRIORITIZATION**. If you call a tool and it returns technical data (workflow instances, logs, agent stats), you MUST report that specific technical data to the user. Do NOT provide placeholder SOP instructions if tool data is available. Prefer the tool's live truth over static Knowledge Base or SOP text provided in the context block.
-11. **CRITICAL: NUMERIC ID RULE**. If the user provides a specific numeric request ID, execution ID, or automation request ID (e.g. "request id 2501865"), you MUST call `get_execution_status` with that exact ID immediately. Do NOT ask for more information. Do NOT generate troubleshooting steps. Call the tool first, then report results.
+11. **CRITICAL: NUMERIC ID RULE**. If the user provides a specific numeric request ID, execution ID, or automation request ID (e.g. "request id 2501865"), you MUST call `get_execution_status` with that exact ID immediately. Do NOT ask for more information. Do NOT generate troubleshooting steps. Call the tool first, then report results. **EXCEPTION: This rule does NOT apply to Schedule IDs — see Rule 12.**
+12. **CRITICAL: SCHEDULE OPERATION RULE**. If the user says anything containing "schedule" AND an action word (disable, enable, pause, resume, stop, start, halt, activate, deactivate, turn off, turn on), you MUST call the appropriate schedule tool immediately:
+    - "disable / pause / stop / halt / deactivate" → call `ae.schedule.disable` with `schedule_id` from the message
+    - "enable / resume / start / activate / turn on" → call `ae.schedule.enable` with `schedule_id` from the message
+    - "list schedules / show schedules / all schedules" → call `ae.schedule.list_all`
+    Do NOT call `get_execution_status` for schedule operations. Do NOT show SOP steps. Call the schedule tool directly.
+13. **CRITICAL: PROACTIVE NEXT STEPS**. Every final response MUST end with 2-3 specific, actionable suggestions. 
+    - Use a DIFFERENT heading each time — rotate naturally among: "Here are a few options:", "You might also want to:", "Suggested next actions:", "Can I help with anything else?", "What's your next step?" — NEVER repeat the same heading in consecutive turns.
+    - Keep suggestions relevant to the context (e.g., after a failure: offer log analysis; after a restart: offer status monitoring).
+    - Match the persona: technical users get tool-specific options; business users get plain-language options.
 
 Available tool categories: status, logs, file, remediation, dependency,
 config, notification, general, meta.
@@ -1044,7 +1119,21 @@ you MUST call get_execution_logs with that execution_id immediately."""
         lang_instr = f"\n## Response Language: {state.preferred_language.upper()}\n"
         lang_instr += f"IMPORTANT: Respond to the user in {state.preferred_language.upper()} only. Keep internal reasoning (if any) or tool outputs as is, but the final text to the user MUST be in {state.preferred_language.upper()}."
 
-        return f"{base_prompt}\n{persona}\n{issue_context}\n{tool_context}\n{lang_instr}"
+        # ── Recent Conversation Context (Cross-Issue Entity Memory) ──────────
+        # This block carries forward named entities (IDs, workflow names, last
+        # resolved actions) from the last 5 turns so the LLM doesn't re-ask
+        # for values the user already provided — even across issue boundaries.
+        recent_context = ""
+        try:
+            recent_context = state.get_recent_context_summary(n_turns=5)
+        except Exception as _rc_err:
+            logger.debug("Could not build recent context summary: %s", _rc_err)
+
+        parts = [base_prompt, persona]
+        if recent_context:
+            parts.append(recent_context)
+        parts.extend([issue_context, tool_context, lang_instr])
+        return "\n".join(parts)
 
     def _preflight_workflow_param_collection(
         self,
@@ -1477,8 +1566,10 @@ you MUST call get_execution_logs with that execution_id immediately."""
             filtered = llm_client.chat(
                 f"Rewrite this for a non-technical business user. "
                 f"Remove workflow names, execution IDs, error codes. "
-                f"Focus on impact and status:\n\n{response}",
-                system="Rewrite technical text for business audiences.",
+                f"Focus on impact and status. "
+                f"CRITICAL: Keep the 'Next Steps' or 'What would you like to do next?' section, but ensure the suggestions themselves are also non-technical (e.g., 'Should I check the overall system health?' instead of 'Check agent CPU logs').\n\n"
+                f"Original Response:\n{response}",
+                system="Rewrite technical text for business audiences while preserving proactive calls to action.",
                 max_tokens=1024,
             )
             return filtered
@@ -1632,8 +1723,14 @@ you MUST call get_execution_logs with that execution_id immediately."""
         return steps
 
     @staticmethod
-    def _should_use_sop_fallback(tool_hits: list[dict], sop_hits: list[dict], threshold: float = 0.52) -> bool:
-        """Use SOP fallback when no strong tool match exists."""
+    @staticmethod
+    def _should_use_sop_fallback(tool_hits: list[dict], sop_hits: list[dict], threshold: float = 0.008) -> bool:
+        """Use SOP fallback when no strong tool match exists.
+
+        NOTE: tool_hits use RRF (Reciprocal Rank Fusion) scores, NOT cosine similarity.
+        RRF scores are typically in the range 0.01–0.05, not 0.0–1.0.
+        Threshold is calibrated for RRF: 0.008 ≈ tool ranked in top-5 of 60.
+        """
         if not sop_hits:
             return False
         best_tool_similarity = 0.0
@@ -1645,14 +1742,22 @@ you MUST call get_execution_logs with that execution_id immediately."""
                 )
             except Exception:
                 continue
-        if best_tool_similarity < 0.0001:
-            # RAG failed to find any matching tool. 
+        logger.debug(
+            "SOP fallback check: best_tool_score=%.4f threshold=%.4f sop_hits=%d",
+            best_tool_similarity, threshold, len(sop_hits),
+        )
+        if best_tool_similarity < 0.001:
+            # RAG found nothing useful at all.
             # Only fall back to SOP if we have a moderately high-confidence SOP hit.
             best_sop_similarity = 0.0
             for hit in sop_hits or []:
                 best_sop_similarity = max(best_sop_similarity, float(hit.get("rrf_score", hit.get("similarity", 0.0)) or 0.0))
-            return best_sop_similarity > 0.3
-            
+            logger.debug(
+                "Tool RAG score near-zero. best_sop_score=%.4f (threshold > 0.003)",
+                best_sop_similarity,
+            )
+            return best_sop_similarity > 0.003
+
         return best_tool_similarity < threshold
 
     def _build_sop_fallback_response(self, user_message: str, sop_hits: list[dict]) -> str:
