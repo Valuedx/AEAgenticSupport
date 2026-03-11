@@ -78,11 +78,42 @@ def restart_execution(execution_id: str,
             "raw": resp
         }
     except Exception as e:
+        err_str = str(e)
+        # AE-2624: T4 restart limit reached (max 10 restarts per instance)
+        # Automatically fall back to resubmit which creates a fresh execution
+        if "AE-2624" in err_str or "maximum limit of 10 restarts" in err_str.lower():
+            logger.warning(
+                f"AE-2624 restart limit reached for {execution_id}. "
+                f"Automatically falling back to resubmit_execution."
+            )
+            try:
+                resubmit_resp = resubmit_execution(
+                    execution_id=execution_id,
+                    from_failure_point=True,
+                    reason=f"{reason} (auto-resubmit: restart limit AE-2624 reached)"
+                )
+                return {
+                    **resubmit_resp,
+                    "restart_limit_reached": True,
+                    "fallback": "resubmit",
+                    "hint": (
+                        "The restart limit (10) for this execution was reached. "
+                        "The system automatically resubmitted it as a new execution instead."
+                    ),
+                }
+            except Exception as resubmit_err:
+                return {
+                    "success": False,
+                    "error": f"Restart limit reached (AE-2624) and resubmit also failed: {resubmit_err}",
+                    "hint": "The restart limit of 10 has been reached and resubmit also failed. Please manually trigger a new execution from the AutomationEdge UI.",
+                    "restart_limit_reached": True,
+                }
+
         logger.error(f"Restart failed for {execution_id}: {e}")
         return {
             "success": False,
-            "error": f"Restart failed: {str(e)}",
-            "hint": "Ensure the execution is in a failed state. For terminal states, try 'resubmit_execution' instead."
+            "error": f"Restart failed: {err_str}",
+            "hint": "Ensure the execution is in a failed state. For terminal states, try 'resubmit_execution' instead.",
         }
 
 

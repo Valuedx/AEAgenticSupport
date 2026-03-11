@@ -167,67 +167,108 @@ class RCAAgent(BaseAgent):
 
     def _generate_business_rca(self, findings_text, past_text,
                                affected_wfs, summary, prevention_steps=None):
-        prevention_text = "\n".join(prevention_steps[:3]) if prevention_steps else "Follow standard operating procedures."
+        prevention_text = "\n".join([f"- {s}" for s in (prevention_steps or [])[:3]]) if prevention_steps else "- Follow standard operating procedures.\n- Regular monitoring of workflow health."
+        
         prompt = f"""Generate a Root Cause Analysis for a BUSINESS AUDIENCE.
-Write in plain English. No jargon. Focus on:
-1. What happened (business terms)
-2. Business impact (delays, affected processes)
-3. Why it happened (simplified)
-4. What was done to fix it
-5. How we prevent recurrence
+Write in plain English. No technical jargon. Use the STRICT format below.
 
-Incident: {summary}
-Affected: {', '.join(affected_wfs)}
-Findings:
+### [STRICT TEMPLATE]
+# Executive Summary
+[One paragraph high-level summary]
+
+# What Happened
+*   **Incident Summary:** {summary}
+*   **Workflows Affected:** {', '.join(affected_wfs)}
+[Detailed description of the sequence of events in business terms]
+
+# Business Impact
+[Describe delays, affected processes, or customer impact]
+
+# Underlying Cause
+[Simplified explanation of why the failure occurred]
+
+# Action Taken
+[What was done immediately to resolve the issue]
+
+# Preventive Measures
+{prevention_text}
+[Any additional recommendations to avoid this in the future]
+### [END TEMPLATE]
+
+Investigation Findings:
 {findings_text}
+
 Similar Past Incidents:
 {past_text}
 
-SOP Recommendations:
-{prevention_text}
-
-Format as a clean report with sections. Keep it under 500 words."""
+Keep the total report professional and under 500 words."""
 
         return llm_client.chat(
             prompt,
             system=(
                 "You write clear, non-technical RCA reports for "
-                "business stakeholders in insurance."
+                "business stakeholders. You MUST follow the provided markdown template exactly."
             ),
         )
 
     def _generate_technical_rca(self, findings_text, past_text,
                                 affected_wfs, summary, tool_logs, prevention_steps=None):
-        tool_log_text = json.dumps(tool_logs[-15:], indent=2, default=str)
+        tool_log_text = json.dumps(tool_logs[-20:], indent=2, default=str)
         prevention_text = "\n".join([f"- {s}" for s in (prevention_steps or [])[:5]])
+        if not prevention_text:
+            prevention_text = "- Implement additional error handling guards.\n- Review workflow retry policies."
 
-        prompt = f"""Generate a detailed technical Root Cause Analysis.
-Include:
-1. Incident Summary
-2. Timeline of events (from tool calls and findings)
-3. Root Cause Chain (A caused B caused C)
-4. Impact Analysis (affected workflows, dependencies, data pipelines)
-5. Resolution Steps Taken
-6. Corrective Actions / Prevention
-7. Recommendations
+        prompt = f"""Generate a detailed Technical Root Cause Analysis report.
+You MUST follow the STRICT Markdown format below. Be specific with names and IDs.
 
-Incident: {summary}
-Affected Workflows: {', '.join(affected_wfs)}
+### [STRICT TEMPLATE]
+# RCA Report: {summary}
+
+## 1. Metadata
+*   **Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+*   **Affected Workflows:** {', '.join(affected_wfs)}
+*   **Severity:** [High/Medium/Low based on findings]
+
+## 2. Executive Summary
+[Concise technical overview of the incident and resolution]
+
+## 3. Timeline of Events
+[List sequential steps from detection to resolution with approximate durations if available]
+
+## 4. Root Cause Chain (The "5 Whys")
+[Step-by-step chain: A caused B, which led to C, resulting in failure D]
+
+## 5. Technical Findings
+[Deep dive into logs, error codes, and tool outputs]
+
+## 6. Resolution Steps Taken
+[Detailed technical steps performed to restore service]
+
+## 7. Corrective & Preventive Actions (CAPA)
+{prevention_text}
+[Long-term fixes to address the root cause]
+
+## 8. Recommendations
+[Additional technical improvements suggested]
+### [END TEMPLATE]
+
 Investigation Findings:
 {findings_text}
-Tool Call Log:
+
+Relevant Tool Call Logs:
 {tool_log_text}
-Similar Past Incidents:
+
+Historical Context (Past Incidents):
 {past_text}
 
-SOP Prevention Guidance:
-{prevention_text}
-
-Be specific with workflow names, execution IDs, timestamps, and error details."""
+Instructions:
+- Be technical and precise. 
+- Use Workflow names, Execution IDs, and specific Error Messages from the logs.
+- Ensure the 'Timeline' and 'Root Cause' sections are detailed and logical."""
 
         return llm_client.chat(
             prompt,
-            system="You write detailed technical RCA reports for RPA operations teams.",
+            system="You are an expert RPA Operations Engineer writing a technical RCA. You MUST follow the Markdown template exactly.",
         )
 
     def _index_as_past_incident(self, state, rca_report):

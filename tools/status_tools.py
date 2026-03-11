@@ -81,6 +81,7 @@ def list_recent_failures(
                 "GET",
                 "/api/v1/failures/recent",
                 use_rest_prefix=False,
+                silent_on_status=[404],
             )
             if isinstance(resp, dict):
                 data = (
@@ -196,7 +197,9 @@ def get_system_health() -> dict:
     resp = None
     for path, use_rest_prefix in candidates:
         try:
-            resp = client.request("GET", path, use_rest_prefix=use_rest_prefix)
+            resp = client.request(
+                "GET", path, use_rest_prefix=use_rest_prefix, silent_on_status=[404]
+            )
             break
         except Exception as exc:
             last_error = exc

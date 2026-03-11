@@ -25,6 +25,15 @@ class TestRBAC:
         assert "insufficient" in err
         assert "Minimum role required: dev" in err or "admin" in err
 
+    def test_rbac_check_technical(self):
+        orch = Orchestrator()
+        state = ConversationState()
+        state.user_role = "technical" # Rank 50 (newly added to settings.py)
+        
+        ok, err = orch._check_rbac(state, "high_risk") # Rank 50
+        assert ok is True
+        assert err == ""
+
     def test_min_role_for_tier(self):
         orch = Orchestrator()
         assert orch._get_min_role_for_tier("read_only") == "readonly"

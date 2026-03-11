@@ -269,6 +269,9 @@ class AutomationEdgeClient:
 
         T4 uses PUT to /restart with the execution_id in the path to resume
         an instance using its original state.
+        
+        Raises RestartLimitError (a subclass of RuntimeError) with error code AE-2624
+        when the restart limit of 10 has been reached.
         """
         paths = [
             f"/{self.default_org_code}/workflowinstances/{execution_id}/restart" if self.default_org_code else None,
@@ -276,6 +279,7 @@ class AutomationEdgeClient:
         ]
         paths = [p for p in paths if p]
         last_exc = None
+        ae2624_exc = None
         # T4 variability: try with and without /aeengine/rest prefix
         for use_prefix in (True, False):
             for path in paths:
@@ -286,11 +290,34 @@ class AutomationEdgeClient:
                         payload={"reason": reason},
                         use_rest_prefix=use_prefix
                     )
+                except httpx.HTTPStatusError as exc:
+                    # Detect AE-2624 restart limit reached - remember it specifically
+                    if exc.response.status_code == 500:
+                        try:
+                            err_body = exc.response.json()
+                            if str(err_body.get("errorCode", "")).strip() == "AE-2624":
+                                ae2624_exc = RuntimeError(
+                                    f"AE-2624: {err_body.get('message', 'Maximum restart limit reached for execution ' + str(execution_id))}. "
+                                    f"Consider using resubmit instead."
+                                )
+                                # Continue trying other paths to be thorough, but track this
+                                last_exc = ae2624_exc
+                                continue
+                        except Exception:
+                            pass
+                    last_exc = exc
+                    logger.debug(f"Restart attempt failed for {path} (prefix={use_prefix}): {exc}")
+                    continue
                 except Exception as exc:
                     last_exc = exc
                     logger.debug(f"Restart attempt failed for {path} (prefix={use_prefix}): {exc}")
                     continue
-        raise last_exc or RuntimeError(f"Could not restart {execution_id}")
+        # If we saw AE-2624, surface it clearly (not the last 403)
+        if ae2624_exc and isinstance(ae2624_exc, Exception):
+            raise ae2624_exc
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        raise RuntimeError(f"Could not restart {execution_id}")
 
     def terminate_request(self, request_id: str, reason: str = "") -> dict:
         """Terminate a running instance."""
@@ -306,7 +333,9 @@ class AutomationEdgeClient:
             except Exception as exc:
                 last_exc = exc
                 continue
-        raise last_exc or RuntimeError(f"Could not terminate {request_id}")
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        raise RuntimeError(f"Could not terminate {request_id}")
 
     def resubmit_request(self, request_id: str, reason: str = "", from_failure_point: bool = True) -> dict:
         """Resubmit a failed instance (either from failure point or start)."""
@@ -323,7 +352,9 @@ class AutomationEdgeClient:
             except Exception as exc:
                 last_exc = exc
                 continue
-        raise last_exc or RuntimeError(f"Could not resubmit {request_id}")
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        raise RuntimeError(f"Could not resubmit {request_id}")
 
     def request(
         self,
@@ -335,6 +366,7 @@ class AutomationEdgeClient:
         data: Optional[dict] = None,
         headers: Optional[dict] = None,
         use_rest_prefix: bool = False,
+        silent_on_status: Optional[list[int]] = None,
     ) -> Any:
         return self._authorized_request(
             method,
@@ -344,6 +376,7 @@ class AutomationEdgeClient:
             data=data,
             headers=headers,
             use_rest_prefix=use_rest_prefix,
+            silent_on_status=silent_on_status,
         )
 
     def get(self, path: str, params: Optional[dict] = None) -> Any:
@@ -475,7 +508,7 @@ class AutomationEdgeClient:
                     )
                     continue
                 raise
-        if last_exc:
+        if last_exc and isinstance(last_exc, Exception):
             raise last_exc
         return {}
 
@@ -592,7 +625,9 @@ class AutomationEdgeClient:
                         last_exc = exc
                         continue
                     raise
-        raise last_exc or RuntimeError(f"Could not fetch workflow details for {workflow_identifier}")
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        raise RuntimeError(f"Could not fetch workflow details for {workflow_identifier}")
 
     def get_execution_status(self, execution_id: str) -> dict:
         """Get the status of a specific workflow execution.
@@ -625,7 +660,9 @@ class AutomationEdgeClient:
                         last_exc = exc
                         continue
                     raise
-        raise last_exc or RuntimeError(f"Could not fetch status for execution {execution_id}")
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        raise RuntimeError(f"Could not fetch status for execution {execution_id}")
 
     def get_workflow_latest_instance(self, workflow_name: str, org_code: str = "") -> dict:
         """Get latest workflow instance for a workflow.
@@ -692,7 +729,9 @@ class AutomationEdgeClient:
                         continue
                     raise
 
-        raise last_exc or RuntimeError(
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        raise RuntimeError(
             f"Could not fetch latest instance for workflow '{workflow_name}'"
         )
 
@@ -759,7 +798,9 @@ class AutomationEdgeClient:
                         last_exc = exc
                         continue
                     raise
-        raise last_exc or RuntimeError(f"Could not fetch instances for workflow '{workflow_name}'")
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        raise RuntimeError(f"Could not fetch instances for workflow '{workflow_name}'")
 
     def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
         """Get execution logs by execution id with T4 fallback paths and debug log flow."""
@@ -869,7 +910,9 @@ class AutomationEdgeClient:
              logger.error(f"Phase 2 Flow failed for {execution_id}: {flow_err}")
              # If Phase 2 fails, raise the flow error but keep Phase 1 error as context
              if last_exc:
-                 raise flow_err from last_exc
+                 # Check if last_exc is an actual exception type Pyre likes
+                 if isinstance(last_exc, BaseException):
+                     raise flow_err from last_exc
              raise flow_err
 
     def request_debug_logs(self, execution_id: str, from_date: Any = None, to_date: Any = None) -> dict:

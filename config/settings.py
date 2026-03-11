@@ -167,6 +167,7 @@ CONFIG = {
     "ROLE_RANK": {
         "admin": 100,
         "dev": 50,
+        "technical": 50,
         "support": 10,
         "readonly": 0
     },

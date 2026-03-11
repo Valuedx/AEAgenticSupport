@@ -1452,25 +1452,46 @@ def api_metrics():
         return jsonify({"error": str(exc)}), 500
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+def init_backend() -> None:
+    """
+    Initialize backend services (scheduler, session cleanup) without starting
+    the Flask HTTP server.
 
-    # Initialize scheduler with default tasks
+    Call this when you need the agent logic in-process (e.g. from AI Studio /
+    ops_support.py) without running the standalone server.
+    """
+    logging.basicConfig(level=logging.INFO)
     try:
         from agents.scheduler import get_scheduler, setup_default_tasks
         setup_default_tasks()
-        
-        # Register session cleanup task
+
         from state.session_manager import register_cleanup_task
         register_cleanup_task()
-        
+
         if CONFIG.get("ENABLE_PROACTIVE_MONITORING", False):
             get_scheduler().start()
     except Exception as exc:
         log.warning("Scheduler init failed (non-fatal): %s", exc)
 
+
+def main() -> None:
+    """
+    Start the standalone Agent HTTP server.
+
+    This is the primary entry point when running agent_server.py directly.
+    It calls init_backend() first, then launches Flask.
+
+    AI Studio / ops_support.py should NOT call this — import
+    handle_chat_message (or call init_backend()) directly instead.
+    """
+    init_backend()
+
     port = int(os.environ.get("AGENT_SERVER_PORT", 5050))
     print(f"Agent server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    main()
 
 
