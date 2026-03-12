@@ -10,6 +10,7 @@ import concurrent.futures
 import json
 import logging
 import re
+from datetime import datetime
 
 from google.genai import types
 
@@ -326,17 +327,19 @@ class Orchestrator:
         if route == "SMALLTALK":
             return "Hi. I can help with AutomationEdge and IT ops issues. Tell me what you need."
 
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             return llm_client.chat(
                 (
+                    f"Current Date/Time: {now}\n\n"
                     "Respond naturally to the user's message.\n"
-                "If the message seems like an operations request, clarify that you can help with that but need a bit more detail.\n"
-                "Do not use internal IDs or technical error codes in this chat phase.\n"
-                "End by reminding the user that you are ready to help with AutomationEdge issues.\n"
+                    "If the message seems like an operations request, clarify that you can help with that but need a bit more detail.\n"
+                    "Do not use internal IDs or technical error codes in this chat phase.\n"
+                    "End by reminding the user that you are ready to help with AutomationEdge issues.\n"
                     f"Route: {route}\n"
                     f'User message: "{text}"'
                 ),
-                system="You are a polite, concise assistant.",
+                system="You are a polite, concise assistant. You are aware of the current date and time for greetings.",
                 temperature=0.5,
                 max_tokens=120,
             ).strip()
@@ -1116,6 +1119,9 @@ Use them directly when investigating instead of asking the user to repeat them:
 CRITICAL: If the user asks to investigate or explain a failure and an execution_id is listed above,
 you MUST call get_execution_logs with that execution_id immediately."""
 
+        now = datetime.now().strftime("%Y-%m-%d %p %H:%M")
+        time_context = f"\n## Current Time: {now}\n"
+        
         lang_instr = f"\n## Response Language: {state.preferred_language.upper()}\n"
         lang_instr += f"IMPORTANT: Respond to the user in {state.preferred_language.upper()} only. Keep internal reasoning (if any) or tool outputs as is, but the final text to the user MUST be in {state.preferred_language.upper()}."
 
@@ -1132,7 +1138,7 @@ you MUST call get_execution_logs with that execution_id immediately."""
         parts = [base_prompt, persona]
         if recent_context:
             parts.append(recent_context)
-        parts.extend([issue_context, tool_context, lang_instr])
+        parts.extend([issue_context, tool_context, time_context, lang_instr])
         return "\n".join(parts)
 
     def _preflight_workflow_param_collection(

@@ -429,7 +429,7 @@ class ApprovalGate:
     def _looks_like_new_request(self, message: str) -> bool:
         if " instead" in message:
             return True
-        return any(cue in message for cue in self._NEW_REQUEST_CUES)
+        return any(re.search(rf"\b{re.escape(cue)}\b", message) for cue in self._NEW_REQUEST_CUES)
 
     @staticmethod
     def _has_explicit_alternate_request(message: str) -> bool:

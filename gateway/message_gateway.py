@@ -230,7 +230,7 @@ class MessageGateway:
             return MessageIntent.CANCEL
 
         if state.pending_action and any(
-            cue in msg_lower
+            re.search(rf"\b{re.escape(cue)}\b", msg_lower)
             for cue in (
                 "approve", "approved", "go ahead", "proceed", "yes",
                 "reject", "denied", "deny", "no", "don't do it", "do not",
