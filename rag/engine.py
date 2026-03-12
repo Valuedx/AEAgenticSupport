@@ -30,7 +30,7 @@ from config.db import get_conn, get_readonly_conn
 from config.settings import CONFIG
 from state.app_config import get_runtime_value
 
-_EMBED_BATCH_SIZE = 250  # Vertex AI limit per request
+_EMBED_BATCH_SIZE = 50  # Vertex AI limit is 250 docs OR 20,000 tokens. 50 is safer.
 
 
 def _has_pgvector(conn) -> bool:

@@ -136,10 +136,38 @@ class VertexAIClient:
         return "".join(buf)
 
 
-llm_client = VertexAIClient()
+
+class _LazyLLMClient:
+    """Proxy that defers VertexAIClient construction to first use.
+
+    This prevents credential / env-var errors at import time for scripts
+    (e.g. run_rag_index.py) that import tool modules but never actually
+    invoke the LLM.
+    """
+    _instance: "VertexAIClient | None" = None
+
+    def _get(self) -> "VertexAIClient":
+        if self._instance is None:
+            self._instance = VertexAIClient()
+        return self._instance
+
+    def chat(self, *args, **kwargs):
+        return self._get().chat(*args, **kwargs)
+
+    def chat_with_tools(self, *args, **kwargs):
+        return self._get().chat_with_tools(*args, **kwargs)
+
+    def _record_usage(self, *args, **kwargs):
+        return self._get()._record_usage(*args, **kwargs)
+
+    def _extract_text(self, *args, **kwargs):
+        return self._get()._extract_text(*args, **kwargs)
+
+
+llm_client = _LazyLLMClient()
 
 
 def reset_llm_client() -> VertexAIClient:
     global llm_client
-    llm_client = VertexAIClient()
-    return llm_client
+    llm_client._instance = VertexAIClient()  # type: ignore[union-attr]
+    return llm_client._instance               # type: ignore[return-value]

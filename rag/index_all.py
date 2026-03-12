@@ -21,6 +21,20 @@ logger = logging.getLogger("ops_agent.rag.indexer")
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 processor = DocumentProcessor()
 
+
+def _index_mcp_server_tools_if_available() -> int:
+    """Try to index remote MCP server tools; silently skip if not configured."""
+    try:
+        import sys, os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from run_rag_index import index_mcp_server_tools
+        return index_mcp_server_tools()
+    except Exception as exc:
+        logger.warning("MCP server tool indexing skipped: %s", exc)
+        return 0
+
 def _load_files_from_dir(directory: str) -> list[dict]:
     """Uniformly load and process files using DocumentProcessor."""
     all_chunks = []
@@ -126,6 +140,7 @@ def index_all():
     index_tool_docs()
     index_past_incidents()
     index_t4_workflows()   # T4 workflow catalog → DB + RAG embeddings
+    _index_mcp_server_tools_if_available()  # Live MCP server tools
     logger.info("RAG index build complete.")
 
 
