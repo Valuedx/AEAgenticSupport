@@ -324,28 +324,42 @@ class Orchestrator:
                 return "You're welcome. This issue is resolved. If it comes back, share the details and I'll check."
             return "You're welcome. Share any issue when ready and I'll help."
 
-        if route == "SMALLTALK":
-            return "Hi. I can help with AutomationEdge and IT ops issues. Tell me what you need."
+        # Compute IST (UTC+5:30) time and derive greeting word
+        from datetime import timezone, timedelta
+        _IST = timezone(timedelta(hours=5, minutes=30))
+        _now_ist = datetime.now(_IST)
+        _hour = _now_ist.hour
+        if _hour < 12:
+            _greeting = "Good morning"
+        elif _hour < 17:
+            _greeting = "Good afternoon"
+        elif _hour < 21:
+            _greeting = "Good evening"
+        else:
+            _greeting = "Good night"
+        _now_str = _now_ist.strftime("%A, %d %B %Y  %I:%M %p IST")
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             return llm_client.chat(
                 (
-                    f"Current Date/Time: {now}\n\n"
+                    f"Current Date/Time (IST): {_now_str}\n"
+                    f"Appropriate greeting for this time of day: {_greeting}\n\n"
                     "Respond naturally to the user's message.\n"
-                    "If the message seems like an operations request, clarify that you can help with that but need a bit more detail.\n"
+                    "If this is a greeting or small talk, use the appropriate greeting above naturally — "
+                    "do NOT hardcode a different greeting.\n"
+                    "If the message seems like an operations request, clarify that you can help but need more detail.\n"
                     "Do not use internal IDs or technical error codes in this chat phase.\n"
                     "End by reminding the user that you are ready to help with AutomationEdge issues.\n"
                     f"Route: {route}\n"
                     f'User message: "{text}"'
                 ),
-                system="You are a polite, concise assistant. You are aware of the current date and time for greetings.",
+                system="You are a polite, concise assistant. Always use the provided IST date/time and greeting word — never guess the time of day yourself.",
                 temperature=0.5,
                 max_tokens=120,
             ).strip()
         except Exception:
             return (
-                "Got it. If you need anything else, tell me.\n"
+                f"{_greeting}! If you need anything, share it and I'll help.\n"
                 "I can also help with AutomationEdge issues anytime."
             )
 
@@ -1119,8 +1133,27 @@ Use them directly when investigating instead of asking the user to repeat them:
 CRITICAL: If the user asks to investigate or explain a failure and an execution_id is listed above,
 you MUST call get_execution_logs with that execution_id immediately."""
 
-        now = datetime.now().strftime("%Y-%m-%d %p %H:%M")
-        time_context = f"\n## Current Time: {now}\n"
+        # Build IST (UTC+5:30) datetime and compute the appropriate greeting word
+        from datetime import timezone, timedelta
+        _IST = timezone(timedelta(hours=5, minutes=30))
+        _now_ist = datetime.now(_IST)
+        _hour = _now_ist.hour
+        if _hour < 12:
+            _greeting = "Good morning"
+        elif _hour < 17:
+            _greeting = "Good afternoon"
+        elif _hour < 21:
+            _greeting = "Good evening"
+        else:
+            _greeting = "Good night"
+        _now_str = _now_ist.strftime("%A, %d %B %Y  %I:%M %p IST")
+        time_context = (
+            "\n## Current Date & Time (Indian Standard Time)\n"
+            f"- Date/Time : {_now_str}\n"
+            f"- Greeting  : {_greeting}\n"
+            "Use the greeting above when the context calls for one (e.g. first turn, opening a conversation). "
+            "Do NOT use a different greeting; always derive it from the Date/Time provided above.\n"
+        )
         
         lang_instr = f"\n## Response Language: {state.preferred_language.upper()}\n"
         lang_instr += f"IMPORTANT: Respond to the user in {state.preferred_language.upper()} only. Keep internal reasoning (if any) or tool outputs as is, but the final text to the user MUST be in {state.preferred_language.upper()}."

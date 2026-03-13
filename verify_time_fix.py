@@ -34,15 +34,14 @@ def test_system_prompt():
     
     prompt = orch._build_system_prompt(state, tracker)
     print("--- System Prompt Extract ---")
-    # Look for the time context
-    if "## Current Time:" in prompt:
-        print("SUCCESS: Time context found in system prompt.")
-        # Extract the line
+    # Look for the new IST time context
+    if "## Current Date & Time (Indian Standard Time)" in prompt:
+        print("SUCCESS: IST time context found in system prompt.")
         for line in prompt.splitlines():
-            if "## Current Time:" in line:
-                print(f"Time in prompt: {line}")
+            if any(kw in line for kw in ["Date/Time", "Greeting", "IST"]):
+                print(f"  {line.strip()}")
     else:
-        print("FAILED: Time context NOT found in system prompt.")
+        print("FAILED: IST time context NOT found in system prompt.")
 
 # Test _build_conversational_response
 # (This one actually calls the LLM, so we'll just check if the call is constructed with the time)
@@ -71,10 +70,13 @@ def test_conversational_response_construction():
         
         args, kwargs = mock_chat.call_args
         prompt = args[0]
-        if "Current Date/Time:" in prompt:
-            print("SUCCESS: Time context found in conversational prompt construction.")
+        if "Current Date/Time (IST):" in prompt and "Appropriate greeting" in prompt:
+            print("SUCCESS: IST time + greeting word found in conversational prompt construction.")
+            for line in prompt.splitlines():
+                if any(kw in line for kw in ["IST", "greeting", "Greeting"]):
+                    print(f"  {line.strip()}")
         else:
-            print("FAILED: Time context NOT found in conversational prompt construction.")
+            print("FAILED: IST time or greeting NOT found in conversational prompt construction.")
 
 if __name__ == "__main__":
     test_system_prompt()
