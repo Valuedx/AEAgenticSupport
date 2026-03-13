@@ -28,6 +28,48 @@ The chatbot interface service.
 
 ---
 
+## RAG Indexing / Tool Embedding
+
+Run this **before starting the agent for the first time**, or whenever tools, SOPs, KB articles, or workflows are updated. It embeds all documents into the RAG vector database so the agent can discover and route to the correct tools.
+
+- **Directory**: `D:\AEAgenticSupport`
+- **Script**: `run_rag_index.py`
+
+### Index everything (recommended on first run)
+```bash
+cd D:\AEAgenticSupport
+python run_rag_index.py
+```
+
+### Selective indexing (only re-index what changed)
+```bash
+# Static MCP / registered tools only
+python run_rag_index.py --only tools
+
+# Live MCP server tools only (requires AE_MCP_SERVER_URL in .env)
+python run_rag_index.py --only mcp
+
+# Live T4 AutomationEdge workflows only (requires AE_USERNAME / AE_API_KEY in .env)
+python run_rag_index.py --only t4
+
+# SOPs only
+python run_rag_index.py --only sops
+
+# Knowledge Base articles only
+python run_rag_index.py --only kb
+
+# Past incidents only
+python run_rag_index.py --only incidents
+
+# Everything except T4 live fetch (fast, offline)
+python run_rag_index.py --skip t4
+```
+
+> **Note**: T4 workflow indexing requires `AE_USERNAME` (or `AE_API_KEY`) to be set in `.env`.
+> MCP server tool indexing requires `AE_MCP_SERVER_URL`. If missing, those steps are skipped automatically with a warning.
+
+---
+
 ## Quick Start
 
 You can use the provided `start_servers.bat` script to launch all components in separate terminal windows.
