@@ -28,7 +28,49 @@ The chatbot interface service.
 
 ---
 
+## Database Setup / Migration
+
+Run **once** on first deployment to create all required PostgreSQL tables and extensions.
+
+- **Directory**: `D:\AEAgenticSupport`
+- **Script**: `setup_db.py`
+- **Requires**: `POSTGRES_DSN` set in `.env` and PostgreSQL running
+
+### Create all tables (first-time setup)
+```bash
+cd D:\AEAgenticSupport
+python setup_db.py
+```
+
+This will:
+- Auto-detect if `pgvector` extension is available (uses native vector columns if yes, JSONB fallback if no)
+- Auto-detect the embedding vector dimension from your configured `EMBEDDING_MODEL`
+- Create all tables with `IF NOT EXISTS` — safe to re-run
+
+**Tables created:**
+
+| Table | Purpose |
+|---|---|
+| `rag_documents` | RAG vector store (pgvector or JSONB fallback) |
+| `issue_registry` | Issue tracking per conversation |
+| `conversation_state` | Session persistence, phase, active issue pointer |
+| `chat_messages` | Cross-session message history |
+| `user_feedback` | User rating & comment tracking |
+| `approval_audit_log` | Human-in-the-loop approval audit trail |
+| `tool_execution_log` | Full tool call audit log (params + result) |
+| `workflow_catalog` | T4 workflow cache (avoids repeated API calls) |
+
+### One-time migration (existing deployments only)
+If upgrading from an older version that had the `issue_tracker_state` table:
+```bash
+python setup_db.py --migrate
+```
+This moves `active_issue_id` data into `conversation_state` and drops the old table. Safe to run multiple times.
+
+---
+
 ## RAG Indexing / Tool Embedding
+
 
 Run this **before starting the agent for the first time**, or whenever tools, SOPs, KB articles, or workflows are updated. It embeds all documents into the RAG vector database so the agent can discover and route to the correct tools.
 
