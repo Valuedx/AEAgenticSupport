@@ -54,7 +54,7 @@ class DiagnosticAgent(BaseAgent):
     def can_handle(self, user_message: str, context: dict | None = None, **kwargs) -> float:
         """Score high for investigation-related keywords or if continuing a diagnostic flow."""
         msg = user_message.lower()
-        cues = ["logs", "error", "fail", "check", "status", "why", "debug", "investigate", "where"]
+        cues = ["logs", "error", "fail", "check", "status", "why", "debug", "investigate", "where", "issue"]
         
         # Base scoring on keyword matching
         if any(cue in msg for cue in cues):

@@ -14,6 +14,7 @@ import logging
 from typing import List
 
 import numpy as np
+import tenacity
 from psycopg2.extras import Json, execute_values
 
 logger = logging.getLogger("ops_agent.rag")
@@ -70,6 +71,12 @@ class VertexEmbedder:
                 self._dim = len(sample)
         return self._dim
 
+    @tenacity.retry(
+        retry=tenacity.retry_if_exception_type((Exception)),
+        wait=tenacity.wait_exponential(multiplier=1, min=2, max=10),
+        stop=tenacity.stop_after_attempt(3),
+        reraise=True
+    )
     def embed(self, text: str) -> list[float]:
         try:
             res = self.client.models.embed_content(
@@ -82,6 +89,12 @@ class VertexEmbedder:
             logger.error(f"Embedding failed for '{text[:50]}...': {e}")
             raise
 
+    @tenacity.retry(
+        retry=tenacity.retry_if_exception_type((Exception)),
+        wait=tenacity.wait_exponential(multiplier=1, min=2, max=10),
+        stop=tenacity.stop_after_attempt(3),
+        reraise=True
+    )
     def embed_batch(self, texts: List[str]) -> List[list[float]]:
         all_vectors = []
         for i in range(0, len(texts), _EMBED_BATCH_SIZE):
@@ -262,7 +275,15 @@ class PgVectorRAGEngine:
                          top_k: int,
                          query_embedding: list[float] | None = None,
                          ) -> list[dict]:
-        query_emb = query_embedding or self.embedder.embed(query)
+        if query_embedding is None:
+            try:
+                query_emb = self.embedder.embed(query)
+            except Exception:
+                # Fallback: if embedding fails, return empty list (or could trigger keyword-only search)
+                logger.warning("Embedding failed in _search_pgvector, falling back to keyword-only search if available.")
+                return []
+        else:
+            query_emb = query_embedding
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -284,7 +305,14 @@ class PgVectorRAGEngine:
                        top_k: int,
                        query_embedding: list[float] | None = None,
                        ) -> list[dict]:
-        query_emb = query_embedding or self.embedder.embed(query)
+        if query_embedding is None:
+            try:
+                query_emb = self.embedder.embed(query)
+            except Exception:
+                logger.warning("Embedding failed in _search_hybrid, performing keyword-only search.")
+                query_emb = None # Signal keyword-only search
+        else:
+            query_emb = query_embedding
         # RRF k parameter
         k = 60
         
@@ -295,7 +323,7 @@ class PgVectorRAGEngine:
                       SELECT id, content, metadata,
                              ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector) as rank_vector
                       FROM rag_documents
-                      WHERE collection = %s
+                      WHERE collection = %s AND %s IS NOT NULL
                       LIMIT {top_k * 2}
                     ),
                     text_search AS (
@@ -316,7 +344,7 @@ class PgVectorRAGEngine:
                     FULL OUTER JOIN text_search t ON v.id = t.id
                     ORDER BY rrf_score DESC
                     LIMIT %s;
-                """, (query_emb, collection, query, collection, query, top_k))
+                """, (query_emb, collection, query_emb, query, collection, query, top_k))
                 rows = cur.fetchall()
         
         return [
@@ -344,10 +372,14 @@ class PgVectorRAGEngine:
                        top_k: int,
                        query_embedding: list[float] | None = None,
                        ) -> list[dict]:
-        query_emb = np.array(
-            query_embedding if query_embedding is not None
-            else self.embedder.embed(query)
-        )
+        if query_embedding is not None:
+             query_emb = np.array(query_embedding)
+        else:
+            try:
+                query_emb = np.array(self.embedder.embed(query))
+            except Exception:
+                logger.warning("Embedding failed in _search_numpy, performing keyword-only search.")
+                query_emb = None
         query_words = set(query.lower().split())
         
         with get_conn() as conn:
@@ -368,9 +400,11 @@ class PgVectorRAGEngine:
             doc_emb = np.array(raw_emb)
             
             # Semantic similarity
-            norm_q = np.linalg.norm(query_emb)
-            norm_d = np.linalg.norm(doc_emb)
-            sim = float(np.dot(query_emb, doc_emb) / (norm_q * norm_d)) if norm_q > 0 and norm_d > 0 else 0.0
+            sim = 0.0
+            if query_emb is not None:
+                norm_q = np.linalg.norm(query_emb)
+                norm_d = np.linalg.norm(doc_emb)
+                sim = float(np.dot(query_emb, doc_emb) / (norm_q * norm_d)) if norm_q > 0 and norm_d > 0 else 0.0
             
             # Simple keyword overlap (for non-pgvector fallback)
             doc_words = set(content.lower().split())

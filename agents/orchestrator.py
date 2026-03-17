@@ -82,7 +82,11 @@ class Orchestrator:
                 return response
 
             # Conversational router (LLM-based): ACK/SMALLTALK/GENERAL/OPS.
-            conv_route = self._classify_conversational_route(user_message, tracker)
+            # Skip for specialists (allowed_categories != None) or ongoing investigations.
+            conv_route = "OPS"
+            if allowed_categories is None and state.phase == ConversationPhase.IDLE:
+                conv_route = self._classify_conversational_route(user_message, tracker)
+            
             if conv_route in {"ACK", "SMALLTALK", "GENERAL"}:
                 response = self._build_conversational_response(
                     user_message=user_message,
@@ -255,7 +259,7 @@ class Orchestrator:
 
         # Fast-path: if the message contains IDs, dates, or time ranges, it is OPS.
         import re
-        id_pattern = r"\b(request|req|id|execution|exec|automation|agent)\s*(id|#)?\s*:?\s*\d{4,}\b"
+        id_pattern = r"\b(request|req|id|execution|exec|automation|agent|workflow|status|error|fail|issue)\s*(id|#)?\s*:?\s*\d{0,}\b"
         date_pattern = r"\b(\d{1,4}[-/]\d{1,2}[-/]\d{1,4})\b"
         if re.search(id_pattern, text, re.IGNORECASE) or re.search(date_pattern, text):
             return "OPS"
@@ -412,8 +416,13 @@ class Orchestrator:
                     enriched_query = f"{user_message} (Context: {' '.join(context_parts)})"
                     logger.info(f"RAG enriched query: {enriched_query}")
 
-            query_vec = rag.embed_query(enriched_query)
-            # Run four RAG searches in parallel to reduce tail latency (same inputs/outputs)
+            query_vec = None
+            try:
+                query_vec = rag.embed_query(enriched_query)
+            except Exception as e:
+                logger.warning(f"RAG embedding failed: {e}. Falling back to keyword-only search.")
+
+            # Run four RAG searches in parallel to reduce tail latency
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
                 f_tools = ex.submit(
                     rag.search_tools, enriched_query, 12, query_vec
