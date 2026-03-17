@@ -79,6 +79,8 @@ async def agent_get_status(agent_id: str) -> str:
     if not match:
         try:
             match = get_ae_client().get_agent(agent_id)
+        except Exception:
+            return {"error": f"Agent '{agent_id}' not found"}
     state = (match.get("agentState") or match.get("state") or "UNKNOWN").upper()
     return {
         "agent_id": match.get("agentId") or match.get("id"),
