@@ -1,10 +1,11 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI Studio Webchat â€” AE Agentic Support</title>
+  <title>AI Studio Webchat — AE Agentic Support</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     * {
       box-sizing: border-box;
@@ -82,7 +83,6 @@
       line-height: 1.6;
       font-size: 14px;
       word-wrap: break-word;
-      white-space: pre-wrap;
       animation: fadeIn .25s ease;
     }
 
@@ -116,6 +116,24 @@
       align-self: center;
       font-size: 13px;
     }
+    
+    /* Markdown Styles */
+    .msg.bot h1, .msg.bot h2, .msg.bot h3 { margin: 12px 0 8px; font-weight: 600; line-height: 1.3; }
+    .msg.bot h1 { font-size: 1.25em; }
+    .msg.bot h2 { font-size: 1.15em; }
+    .msg.bot h3 { font-size: 1.05em; }
+    .msg.bot p { margin-bottom: 8px; }
+    .msg.bot ul, .msg.bot ol { margin: 8px 0 8px 20px; }
+    .msg.bot li { margin-bottom: 4px; }
+    .msg.bot code { background: #f3f4f6; padding: 2px 4px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 0.9em; color: #d63384; }
+    .msg.bot pre { background: #1e293b; color: #f8fafc; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 12px 0; font-family: 'Consolas', monospace; font-size: 0.85em; }
+    .msg.bot pre code { background: transparent; padding: 0; color: inherit; font-size: inherit; }
+    .msg.bot table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9em; }
+    .msg.bot th, .msg.bot td { border: 1px solid #e5e7eb; padding: 8px 12px; text-align: left; }
+    .msg.bot th { background: #f9fafb; font-weight: 600; }
+    .msg.bot blockquote { border-left: 4px solid #3b82f6; padding-left: 12px; font-style: italic; color: #4b5563; margin: 12px 0; }
+    .msg.bot a { color: #1565c0; text-decoration: underline; }
+    .msg.bot img { max-width: 100%; border-radius: 8px; margin: 12px 0; }
 
     .msg .label {
       font-size: 11px;
@@ -292,10 +310,10 @@
       technicalWelcomeMessage: 'Connected to AI Studio. Share the workflow, symptom, or request you want investigated.',
       businessWelcomeMessage: 'Connected to AI Studio. Tell me what business issue is blocked and I will guide you in plain language.',
       quickActions: [
-        'Policy_Renewal_Batch workflow is failing',
-        'Check system health',
-        'What workflows are having issues?',
-        'status'
+        'Check system health and agent status',
+        'Which workflows are having issues?',
+        'Analyze the latest workflow failure',
+        'Create a support ticket'
       ],
       aistudioConfigured: true
     };
@@ -325,8 +343,16 @@
         l.textContent = label;
         d.appendChild(l);
       }
-      const t = document.createElement('span');
-      t.textContent = text;
+      const t = document.createElement('div');
+      t.className = 'content';
+      if (cls.includes('bot')) {
+        // Render Markdown for bot messages
+        t.innerHTML = marked.parse(text);
+      } else {
+        // Plain text for user (preserve spaces/newlines)
+        t.textContent = text;
+        t.style.whiteSpace = 'pre-wrap';
+      }
       d.appendChild(t);
       chatArea.appendChild(d);
       chatArea.scrollTop = chatArea.scrollHeight;

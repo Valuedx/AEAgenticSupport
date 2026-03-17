@@ -41,7 +41,7 @@ class RCAAgent(BaseAgent):
             priority=60,
         )
 
-    def can_handle(self, user_message: str, context: dict | None = None) -> float:
+    def can_handle(self, user_message: str, context: dict | None = None, **kwargs) -> float:
         msg = user_message.lower()
         if any(w in msg for w in ("rca", "root cause", "analysis report", "what happened")):
             return 0.9
@@ -263,7 +263,7 @@ Historical Context (Past Incidents):
 
 Instructions:
 - Be technical and precise. 
-- Use Workflow names, Execution IDs, and specific Error Messages from the logs.
+- Use Workflow names, Request IDs, and specific Error Messages from the logs.
 - Ensure the 'Timeline' and 'Root Cause' sections are detailed and logical."""
 
         return llm_client.chat(

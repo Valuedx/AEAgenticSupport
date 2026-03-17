@@ -187,7 +187,7 @@ class BaseAgent(ABC):
         """
         ...
 
-    def can_handle(self, user_message: str, context: dict | None = None) -> float:
+    def can_handle(self, user_message: str, context: dict | None = None, **kwargs) -> float:
         """
         Return a confidence score (0.0–1.0) indicating how relevant this
         agent is for the given message.  Used by the router for scoring.

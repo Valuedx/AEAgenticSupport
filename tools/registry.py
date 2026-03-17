@@ -369,6 +369,7 @@ class ToolRegistry:
                 "entry": entry,
                 "registered": registered,
                 "raw_score": score,
+                "rag_content": hit.get("content", ""),
             }
             retrieval_scores[entry.name] = score
             retrieval_ranks[entry.name] = idx
@@ -408,6 +409,7 @@ class ToolRegistry:
                     candidate.entry,
                     score=candidate.score,
                     registered=bool(record.get("registered", False)),
+                    rag_content=record.get("rag_content", ""),
                 )
             )
         return cards
@@ -563,6 +565,7 @@ class ToolRegistry:
             "input_examples": tool_def.input_examples[:2],
             "hydration_mode": md.get("hydration_mode", "eager"),
             "structured_output": bool(md.get("structured_output", False)),
+            "parameters": tool_def.parameters,
         }
         if score is not None:
             card["score"] = round(score, 3)
@@ -575,6 +578,7 @@ class ToolRegistry:
         *,
         score: float | None = None,
         registered: bool = True,
+        rag_content: str = "",
     ) -> dict:
         card = cls._tool_card(
             entry.to_tool_definition(),
@@ -597,6 +601,26 @@ class ToolRegistry:
                 f"Tool is cataloged but not exposed as a direct LLM function. "
                 f"Use {use_tool} with workflow_name and parameters."
             )
+        
+        # Inject RAG parameter hints if available
+        if rag_content:
+            text = str(rag_content)
+            # Robust case-insensitive extraction of required parameters
+            import re
+            match = re.search(r"Required Parameters:\s*(.+?)(?:\n\n|\n[A-Z][a-z]+:|$)", text, re.IGNORECASE | re.DOTALL)
+            if match:
+                hint_section = match.group(1).strip()
+                if hint_section and hint_section.lower() != "none":
+                    logger.debug("Injected parameter mapping hint for %s", entry.name)
+                    card["description"] += (
+                        f"\n\n[ORCHESTRATOR_MAPPING] Mandatory parameters for this workflow: {hint_section}.\n"
+                        "(INSTRUCTION: Map these from conversation history. Do NOT ask for values already provided. "
+                        "If all are present, move directly to trigger.)"
+                    )
+                    card["parameters_hint"] = hint_section
+            else:
+                 logger.debug("No 'Required Parameters' section found in RAG content for %s", entry.name)
+
         return card
 
     def get_tool_inventory(
@@ -694,6 +718,10 @@ class ToolRegistry:
                     details_by_workflow[wf_name] = wf
                     continue
 
+                # THROTTLING: Add a small delay between detail requests to avoid spiking AE
+                import time
+                time.sleep(0.2)
+                
                 details = client.get_workflow_details(wf_id)
                 if wf_name:
                     details_by_workflow[wf_name] = details
@@ -904,7 +932,7 @@ class ToolRegistry:
             # Special handling for 'automationedge' category used by orchestrator preflight
             search_categories = [category] if category else None
             if category == "automationedge":
-                search_categories = ["dependency", "status", "logs", "agent", "remediation"]
+                search_categories = ["automationedge", "dependency", "status", "logs", "agent", "remediation"]
 
             logger.info(
                 "discover_tools filtering by categories: %s",

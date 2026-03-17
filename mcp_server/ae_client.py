@@ -131,6 +131,11 @@ class AEClient:
                 method, url, params=params, json=json_body, headers=self._headers()
             )
         resp.raise_for_status()
+        
+        content_type = resp.headers.get("Content-Type", "").lower()
+        if "zip" in content_type or "octet-stream" in content_type:
+            return resp.content
+
         try:
             return resp.json()
         except ValueError:
@@ -427,6 +432,25 @@ class AEClient:
             f"/agents/{agent_id}/requests",
         ], params={"size": limit, "status": "Running"})
         return self._extract_list(raw)
+
+    def request_agent_debug_logs(self, agent_uuid: str, from_date: int, to_date: int) -> dict:
+        """Request T4 agent debug logs for a specific agent."""
+        return self.post(
+            "/agent/debuglogs",
+            json_body={
+                "agentInfoDto": {"uuid": agent_uuid},
+                "fromDate": from_date,
+                "toDate": to_date,
+            },
+            use_rest=True
+        )
+
+    def get_agent_debug_logs(self, request_id: str = "") -> Any:
+        """List all or get specific agent debug log request."""
+        path = "/agent/debuglogs"
+        if request_id:
+            path = f"{path}/{request_id}"
+        return self.get(path, use_rest=True)
 
     def restart_agent(self, agent_id: str, reason: str = "") -> dict:
         return self._try_paths("POST", [

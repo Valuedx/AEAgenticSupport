@@ -52,7 +52,7 @@ class RemediationAgent(BaseAgent):
             version="1.0.0",
         )
 
-    def can_handle(self, user_message: str, context: dict | None = None) -> float:
+    def can_handle(self, user_message: str, context: dict | None = None, **kwargs) -> float:
         """Score high for remediation-related keywords."""
         msg = user_message.lower()
         cues = ["restart", "fix", "resolve", "correct", "run", "do it", "execute", "trigger"]

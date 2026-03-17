@@ -102,6 +102,12 @@ class AutomationEdgeClient:
             timeout=self.timeout,
             verify=self.verify_ssl,
         )
+        
+        # Silence httpx INFO logs which clutter the terminal during trial loops
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        
+        # Cache for successful path prefixes to avoid redundant trials in the same session
+        self._successful_paths: dict[str, str] = {}
 
     @property
     def use_session_auth(self) -> bool:
@@ -217,7 +223,8 @@ class AutomationEdgeClient:
              request_headers.setdefault("Content-Type", "application/json")
 
         response = None
-        for attempt in range(2):
+        max_retries = 2  # Total 3 attempts
+        for attempt in range(max_retries + 1):
             try:
                 response = self._client.request(
                     method.upper(),
@@ -228,20 +235,34 @@ class AutomationEdgeClient:
                     headers=request_headers,
                 )
 
-                if response.status_code == 401 and retry_on_401 and self.use_session_auth and attempt == 0:
+                if response.status_code == 401 and retry_on_401 and self.use_session_auth and attempt < max_retries:
                     logger.info("AE returned 401, re-authenticating and retrying once.")
                     self.authenticate(force=True)
                     request_headers = self._build_auth_headers(headers)
                     continue
                 
-                if response.status_code == 429 and attempt == 0:
-                    logger.warning("AE returned 429 Too Many Requests for %s. Backing off for 5s.", request_path)
-                    time.sleep(5)
+                if response.status_code == 429 and attempt < max_retries:
+                    wait_seconds = 5
+                    try:
+                        err_json = response.json()
+                        msg = str(err_json.get("message", ""))
+                        if "try after" in msg.lower():
+                            # Extract number from "Please try after 51 seconds."
+                            words = msg.split()
+                            for i, word in enumerate(words):
+                                if word.lower() == "after":
+                                    wait_seconds = int(words[i+1])
+                                    break
+                    except Exception:
+                        pass
+                        
+                    logger.warning("AE returned 429 Too Many Requests for %s. Backing off for %ds.", request_path, wait_seconds)
+                    time.sleep(wait_seconds)
                     continue
                     
                 break
             except httpx.RequestError as exc:
-                if attempt == 0:
+                if attempt < max_retries:
                     logger.warning("Request error for %s (attempt %d): %s. Retrying after 2s.", request_path, attempt+1, exc)
                     time.sleep(2)
                     continue
@@ -254,12 +275,27 @@ class AutomationEdgeClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             silent = silent_on_status or []
-            if response.status_code not in silent:
-                try:
+            
+            # Extract error body safely
+            try:
+                content_type = response.headers.get("Content-Type", "").lower()
+                is_json = "application/json" in content_type
+                
+                if is_json:
                     error_body = response.text
-                    logger.error("AE API Error %d for %s: %s", response.status_code, request_path, error_body)
-                except Exception:
-                    pass
+                else:
+                    # Truncate non-JSON (likely HTML) bodies to avoid log spam
+                    error_body = response.text[:200]
+                    if len(response.text) > 200:
+                        error_body += "... [truncated]"
+            except Exception:
+                error_body = "<could not read body>"
+
+            if response.status_code in silent:
+                # Log as debug/info for expected/silent trial failures
+                logger.debug("AE API Silent Failure %d for %s: %s", response.status_code, request_path, error_body)
+            else:
+                logger.error("AE API Error %d for %s: %s", response.status_code, request_path, error_body)
             raise exc
 
         return self._json_or_text(response)
@@ -783,7 +819,7 @@ class AutomationEdgeClient:
                 candidate_names.append(candidate)
 
         org = (org_code or self.default_org_code or "").strip()
-        modern_paths = [f"/api/v1/workflows/{candidate}/status" for candidate in candidate_names]
+        modern_paths = [f"/api/v1/workflows/{candidate}/instances" for candidate in candidate_names]
         t4_paths = []
         for candidate in candidate_names:
             if org:
@@ -793,7 +829,11 @@ class AutomationEdgeClient:
         last_exc: Optional[Exception] = None
         for path in modern_paths:
             try:
-                result = self._authorized_request("GET", path, use_rest_prefix=False)
+                result = self._authorized_request(
+                    "GET", path, 
+                    use_rest_prefix=False,
+                    silent_on_status=[400, 404, 500]
+                )
                 if isinstance(result, list):
                     return result[0] if result else {}
                 if isinstance(result, dict):
@@ -810,7 +850,11 @@ class AutomationEdgeClient:
         for use_prefix in (False, True):
             for path in t4_paths:
                 try:
-                    result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
+                    result = self._authorized_request(
+                        "GET", path, 
+                        use_rest_prefix=use_prefix,
+                        silent_on_status=[400, 404, 500]
+                    )
                     if isinstance(result, list):
                         return result[0] if result else {}
                     if isinstance(result, dict):
@@ -831,35 +875,50 @@ class AutomationEdgeClient:
             f"Could not fetch latest instance for workflow '{workflow_name}'"
         )
 
-    def get_workflow_instances(self, workflow_name: str, limit: int = 10, org_code: str = "") -> list[dict]:
-        """Get recent workflow instances with modern API and T4 fallback paths."""
+    def get_workflow_instances(
+        self, 
+        workflow_name: str = "", 
+        limit: int = 100, 
+        org_code: str = "",
+        status_filter: Optional[str] = None
+    ) -> list[dict]:
+        """Get recent workflow instances with modern API and T4 fallback paths.
+        
+        Supports status_filter (e.g. 'Complete', 'Failure') for T4 POST path.
+        If workflow_name is empty, returns global instances/executions for the tenant.
+        """
         name = str(workflow_name or "").strip()
-        if not name:
-            raise ValueError("workflow_name is required")
-
-        resolved = self.resolve_cached_workflow_name(name)
+        
         candidate_names: list[str] = []
-        for candidate in (
-            resolved,
-            name,
-            f"WF_{name}" if not resolved and not name.upper().startswith("WF_") else "",
-        ):
-            candidate = str(candidate or "").strip()
-            if candidate and candidate.lower() not in {item.lower() for item in candidate_names}:
-                candidate_names.append(candidate)
+        if name:
+            resolved = self.resolve_cached_workflow_name(name)
+            for candidate in (
+                resolved,
+                name,
+                f"WF_{name}" if not resolved and not name.upper().startswith("WF_") else "",
+            ):
+                candidate = str(candidate or "").strip()
+                if candidate and candidate.lower() not in {item.lower() for item in candidate_names}:
+                    candidate_names.append(candidate)
 
         org = (org_code or self.default_org_code or "").strip()
         modern_paths = [f"/api/v1/workflows/{candidate}/executions" for candidate in candidate_names]
-        t4_paths = []
-        for candidate in candidate_names:
-            if org:
-                t4_paths.append(f"/{org}/workflows/{candidate}/instances")
-            t4_paths.append(f"/workflows/{candidate}/instances")
-
+        
+        # Phase 1: Try modern endpoints
         last_exc: Optional[Exception] = None
         for path in modern_paths:
             try:
-                result = self._authorized_request("GET", path, use_rest_prefix=False)
+                # Modern API usually takes status in query params if supported
+                params = {"limit": max(limit, 1)}
+                if status_filter:
+                    params["status"] = status_filter
+                
+                result = self._authorized_request(
+                    "GET", path, 
+                    params=params, 
+                    use_rest_prefix=False,
+                    silent_on_status=[400, 404, 500]
+                )
                 if isinstance(result, list):
                     return result[: max(limit, 1)]
                 if isinstance(result, dict):
@@ -878,10 +937,62 @@ class AutomationEdgeClient:
                     continue
                 raise
 
+        # Phase 2: T4 POST /workflowinstances with broad filtering support
+        # This is the most robust way for T4 to get filtered results.
+        t4_path = "/workflowinstances"
         for use_prefix in (False, True):
-            for path in t4_paths:
+            try:
+                # T4 POST payload for filtering
+                payload = {
+                    "offset": 0,
+                    "size": max(limit, 1),
+                    "order": "desc",
+                }
+                # Only add workflowName filter if provided
+                if candidate_names:
+                    payload["workflowName"] = candidate_names[0]
+                elif name:
+                    payload["workflowName"] = name
+                if status_filter:
+                    payload["status"] = status_filter
+
+                result = self._authorized_request(
+                    "POST", t4_path, 
+                    payload=payload, 
+                    use_rest_prefix=use_prefix,
+                    silent_on_status=[400, 404, 500]
+                )
+                items = self._extract_list(result)
+                if items:
+                    return items
+            except Exception as exc:
+                last_exc = exc
+                continue
+            except Exception as exc:
+                last_exc = exc
+                continue
+
+        # Phase 3: T4 GET fallbacks
+        t4_get_paths = []
+        if candidate_names:
+            for candidate in candidate_names:
+                if org:
+                    t4_get_paths.append(f"/{org}/workflows/{candidate}/instances")
+                t4_get_paths.append(f"/workflows/{candidate}/instances")
+        else:
+            # If no workflow name, Phase 3 falls back to a global T4 instances list
+            t4_get_paths.append("/workflowinstances")
+            if org:
+                t4_get_paths.append(f"/{org}/workflowinstances")
+
+        for use_prefix in (False, True):
+            for path in t4_get_paths:
                 try:
-                    result = self._authorized_request("GET", path, use_rest_prefix=use_prefix)
+                    result = self._authorized_request(
+                        "GET", path, 
+                        use_rest_prefix=use_prefix,
+                        silent_on_status=[400, 404, 500]
+                    )
                     if isinstance(result, list):
                         return result[: max(limit, 1)]
                     if isinstance(result, dict):
@@ -896,7 +1007,7 @@ class AutomationEdgeClient:
                     raise
         if last_exc and isinstance(last_exc, Exception):
             raise last_exc
-        raise RuntimeError(f"Could not fetch instances for workflow '{workflow_name}'")
+        raise RuntimeError(f"Could not fetch instances for workflow '{name or 'All Bots'}'")
 
     def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
         """Get execution logs by execution id with T4 fallback paths and debug log flow."""
@@ -1029,6 +1140,29 @@ class AutomationEdgeClient:
             payload=payload,
             use_rest_prefix=True
         )
+
+    def request_agent_debug_logs(self, agent_uuid: str, from_date: int, to_date: int) -> dict:
+        """Request T4 agent debug logs for a specific agent (not limited to a workflow)."""
+        payload = {
+            "agentInfoDto": {"uuid": agent_uuid},
+            "fromDate": from_date,
+            "toDate": to_date,
+        }
+        return self._authorized_request(
+            "POST",
+            "/agent/debuglogs",
+            payload=payload,
+            use_rest_prefix=True
+        )
+
+    def get_agent_debug_logs(self) -> list[dict]:
+        """List all agent debug log requests."""
+        raw = self._authorized_request(
+            "GET",
+            "/agent/debuglogs",
+            use_rest_prefix=True
+        )
+        return self._extract_list(raw)
 
     def get_debug_log_request(self, request_id: str) -> dict:
         """Get status of a T4 debug log request.
@@ -1312,19 +1446,30 @@ class AutomationEdgeClient:
 
                 # Build rich content for semantic search
                 param_parts = []
+                required_names = []
                 for p in params:
                     if isinstance(p, dict):
                         p_name = p.get("name", "")
                         disp = p.get("displayName") or p.get("displayname") or p.get("description")
-                        # Catalogue uses 'optional': false for required
-                        req = p.get("required") or p.get("is_required") or p.get("optional") is False
-                        req_str = "Required" if req else "Optional"
+                        opt = p.get("optional")
+                        is_explicitly_optional = (
+                            opt is True or 
+                            (isinstance(opt, str) and str(opt).strip().lower() in {"true", "1", "yes", "y"}) or
+                            p.get("is_optional") is True or
+                            p.get("required") is False or
+                            p.get("is_required") is False
+                        )
+                        req = not is_explicitly_optional
                         
-                        p_desc = p.get("description") or p.get("helpText") or req_str
+                        req_label = "[MANDATORY]" if req else "[Optional]"
+                        if req and p_name:
+                            required_names.append(p_name)
+                        
+                        p_desc = p.get("description") or p.get("helpText") or ""
                         label = f"{p_name} ({disp})" if disp and disp != p_name else p_name
                         
                         if p_name:
-                            param_parts.append(f"  • {label}: {p_desc}")
+                            param_parts.append(f"  • {req_label} {label}: {p_desc}")
                 
                 param_text = "\n".join(param_parts) if param_parts else "None"
 
@@ -1332,11 +1477,11 @@ class AutomationEdgeClient:
                     f"Workflow Tool: {display_name}\n"
                     f"Technical Name: {wf_name}\n"
                     f"Description: {description}\n"
-                    f"Category: {category}\n"
-                    f"Required Parameters:\n{param_text}\n"
+                    f"Category: {category}\n\n"
+                    f"Required Parameters:\n{param_text}\n\n"
                 )
                 if tags:
-                    content += f"Tags: {', '.join(str(t) for t in tags)}\n"
+                    content += f"Tags: {', '.join(str(t) for t in tags)}\n\n"
 
                 # UNIFIED ID: tool-{tool_name} matches ToolDefinition.to_rag_document()
                 doc_id = f"tool-{display_name}"
@@ -1352,6 +1497,7 @@ class AutomationEdgeClient:
                         "source": "automationedge",
                         "dynamic": True,
                         "active": active,
+                        "required_params": required_names,
                         "tags": tags,
                         "tier": tier,
                         "parameters": params, # STORE PARAMETERS FOR UI DISCOVERY
@@ -1383,6 +1529,34 @@ class AutomationEdgeClient:
         _, params = self.get_cached_workflow_info(workflow_name)
         return params
 
+    def get_required_parameters(self, workflow_name: str) -> list[str]:
+        """Identify which parameters are strictly required based on catalog metadata.
+        
+        Handles various T4/modern AE flags: 'required', 'is_required', 'optional'.
+        """
+        schema = self.get_cached_workflow_parameters(workflow_name)
+        required = []
+        for p in schema:
+            name = p.get("name")
+            if not name:
+                continue
+                
+            # A parameter is REQUIRED unless it is explicitly marked as optional.
+            # We look for 'optional': True, 'is_optional': True, or 'required': False.
+            opt = p.get("optional")
+            is_explicitly_optional = (
+                opt is True or 
+                (isinstance(opt, str) and str(opt).strip().lower() in {"true", "1", "yes", "y"}) or
+                p.get("is_optional") is True or
+                p.get("required") is False or
+                p.get("is_required") is False
+            )
+            
+            if not is_explicitly_optional:
+                required.append(name)
+            
+        return required
+
     def get_cached_workflow_id(self, workflow_name: str) -> str:
         """Fetch workflow_id from local workflow_catalog for a workflow name."""
         wf_id, _ = self.get_cached_workflow_info(workflow_name)
@@ -1390,13 +1564,21 @@ class AutomationEdgeClient:
 
     def get_cached_workflow_info(self, workflow_name: str) -> tuple[str, list[dict]]:
         """Fetch workflow_id and parameters in one query. Returns (workflow_id, parameters)."""
+        name = str(workflow_name or "").strip()
+        if not name:
+            return ("", [])
+
+        # Step 1: Resolve to the actual technical name in the catalog (WF_ prefix, case-insensitive, etc.)
+        resolved = self.resolve_cached_workflow_name(name)
+        lookup_name = resolved if resolved else name
+
         try:
             from config.db import get_conn
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT workflow_id, parameters FROM workflow_catalog WHERE workflow_name = %s",
-                        (workflow_name,),
+                        (lookup_name,),
                     )
                     row = cur.fetchone()
                     if row:
@@ -1494,6 +1676,68 @@ class AutomationEdgeClient:
                     if isinstance(val, list):
                         return [x for x in val if isinstance(x, dict)]
         return []
+
+    def list_agents(self, filters: Optional[dict] = None) -> list[dict]:
+        """List all agents using the monitoring endpoint."""
+        params = {"type": "AGENT", "offset": 0, "size": 200}
+        if filters:
+            params.update(filters)
+        
+        # T4 confirmed: POST /monitoring/agents
+        paths = [
+            f"/{self.default_org_code}/monitoring/agents" if self.default_org_code else None,
+            "/monitoring/agents",
+        ]
+        paths = [p for p in paths if p]
+        
+        last_exc = None
+        for use_prefix in (True, False):
+            for path in paths:
+                try:
+                    raw = self._authorized_request("POST", path, params=params, use_rest_prefix=use_prefix)
+                    return self._extract_list(raw, keys=("data", "agents", "items"))
+                except Exception as e:
+                    last_exc = e
+                    continue
+        return []
+
+    def get_agent(self, agent_id: str) -> dict:
+        """Get details for a specific agent."""
+        paths = [
+            f"/{self.default_org_code}/agents/{agent_id}" if self.default_org_code else None,
+            f"/agents/{agent_id}",
+        ]
+        paths = [p for p in paths if p]
+        
+        for use_prefix in (True, False):
+            for path in paths:
+                try:
+                    return self._authorized_request("GET", path, use_rest_prefix=use_prefix)
+                except:
+                    continue
+        raise RuntimeError(f"Could not fetch agent {agent_id}")
+
+    def request_agent_debug_logs(self, agent_uuid: str, from_date: int, to_date: int) -> dict:
+        """Initiate an agent debug log extraction request."""
+        # T4 confirmed: POST /aeengine/rest/agent/debuglogs
+        return self._authorized_request(
+            "POST",
+            "/agent/debuglogs",
+            payload={
+                "agentInfoDto": {"uuid": agent_uuid},
+                "fromDate": from_date,
+                "toDate": to_date,
+            },
+            use_rest_prefix=True
+        )
+
+    def get_agent_debug_logs(self, request_id: str = "") -> Any:
+        """List or get status of agent debug log requests."""
+        # T4 confirmed: GET /aeengine/rest/agent/debuglogs
+        path = "/agent/debuglogs"
+        if request_id:
+            path = f"{path}/{request_id}"
+        return self._authorized_request("GET", path, use_rest_prefix=True)
 
     def close(self):
         self._client.close()

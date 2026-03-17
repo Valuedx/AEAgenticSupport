@@ -124,10 +124,10 @@ DEFAULT_SECTIONS: dict[str, dict[str, Any]] = {
             "guide you in plain language."
         ),
         "quickActions": [
-            "Policy_Renewal_Batch workflow is failing",
-            "Check system health",
-            "What workflows are having issues?",
-            "status",
+            "Check system health and agent status",
+            "Which workflows are having issues?",
+            "Analyze the latest workflow failure",
+            "Create a support ticket",
         ],
     },
     "operations_policy": {

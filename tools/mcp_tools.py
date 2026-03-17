@@ -236,7 +236,22 @@ async def _with_remote_mcp_session(operation: Callable[[Any], Any]) -> Any:
     transport = _get_remote_mcp_transport()
     client_factory = _get_streamable_http_client() if transport == "streamable-http" else sse_client
 
-    async with client_factory(url, headers=headers or None, timeout=timeout) as streams:
+    # Defensively build kwargs — older MCP library versions do not accept
+    # 'headers' or 'timeout' on streamable_http_client / sse_client.
+    # Inspect the actual signature at runtime to stay compatible across versions.
+    try:
+        _sig = inspect.signature(client_factory)
+        _sig_params = set(_sig.parameters)
+    except (ValueError, TypeError):
+        _sig_params = set()
+
+    _client_kwargs: dict[str, Any] = {}
+    if "headers" in _sig_params and headers:
+        _client_kwargs["headers"] = headers
+    if "timeout" in _sig_params:
+        _client_kwargs["timeout"] = timeout
+
+    async with client_factory(url, **_client_kwargs) as streams:
         read_stream = streams[0]
         write_stream = streams[1]
         async with ClientSession(read_stream, write_stream) as session:

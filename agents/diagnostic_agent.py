@@ -51,12 +51,24 @@ class DiagnosticAgent(BaseAgent):
             version="1.0.0",
         )
 
-    def can_handle(self, user_message: str, context: dict | None = None) -> float:
-        """Score high for investigation-related keywords."""
+    def can_handle(self, user_message: str, context: dict | None = None, **kwargs) -> float:
+        """Score high for investigation-related keywords or if continuing a diagnostic flow."""
         msg = user_message.lower()
         cues = ["logs", "error", "fail", "check", "status", "why", "debug", "investigate", "where"]
+        
+        # Base scoring on keyword matching
         if any(cue in msg for cue in cues):
             return 0.8
+            
+        # Contextual scoring: Claim the turn if the previous assistant message mentioned logs or agents
+        state = kwargs.get("state")
+        if state and state.messages:
+            last_bot_msg = next((m for m in reversed(state.messages) if m.get("role") == "assistant"), {}).get("content", "").lower()
+            if any(term in last_bot_msg for term in ("logs", "agent", "id", "2887")):
+                # Very high score to take over parameter-only messages (like date ranges)
+                logger.info("DiagnosticAgent claiming turn based on history context")
+                return 0.95
+        
         return 0.3
 
     def handle(

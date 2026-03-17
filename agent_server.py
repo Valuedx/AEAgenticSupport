@@ -441,21 +441,21 @@ def api_admin_config_reset(section: str):
 @app.route("/webchat", methods=["GET"])
 @app.route("/", methods=["GET"])
 def webchat_page():
-    html_path = os.path.join(os.path.dirname(__file__), "webchat.html")
+    html_path = os.path.join(os.path.dirname(__file__), "frontend", "webchat.html")
     with open(html_path, "r", encoding="utf-8") as handle:
         return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/aistudio-webchat", methods=["GET"])
 def aistudio_webchat_page():
-    html_path = os.path.join(os.path.dirname(__file__), "aistudio_webchat.html")
+    html_path = os.path.join(os.path.dirname(__file__), "frontend", "aistudio_webchat.html")
     with open(html_path, "r", encoding="utf-8") as handle:
         return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/docs", methods=["GET"])
 def docs_page():
-    html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    html_path = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
     with open(html_path, "r", encoding="utf-8") as handle:
         return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
@@ -465,7 +465,7 @@ def tools_page_legacy():
     check = _admin_check()
     if check:
         return check
-    html_path = os.path.join(os.path.dirname(__file__), "agent_admin.html")
+    html_path = os.path.join(os.path.dirname(__file__), "frontend", "agent_admin.html")
     with open(html_path, "r", encoding="utf-8") as handle:
         return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
@@ -476,7 +476,7 @@ def admin_page():
     check = _admin_check()
     if check:
         return check
-    html_path = os.path.join(os.path.dirname(__file__), "admin_console.html")
+    html_path = os.path.join(os.path.dirname(__file__), "frontend", "admin_console.html")
     with open(html_path, "r", encoding="utf-8") as handle:
         return handle.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 

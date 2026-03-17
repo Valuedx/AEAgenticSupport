@@ -66,7 +66,7 @@ class OrchestratorAgent(BaseAgent):
             version="2.0.0",
         )
 
-    def can_handle(self, user_message: str, context: dict | None = None) -> float:
+    def can_handle(self, user_message: str, context: dict | None = None, **kwargs) -> float:
         """
         The orchestrator can handle anything — it's the default.
         Returns a moderate baseline score so specialists can outbid it.

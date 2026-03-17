@@ -97,7 +97,13 @@ async def workflow_get_runtime_parameters(workflow_id: str) -> str:
                     "name": p.get("name"),
                     "display_name": p.get("displayName") or p.get("displayname"),
                     "type": p.get("type") or p.get("dataType"),
-                    "required": p.get("required") or p.get("optional") is False,
+                    "required": not (
+                        p.get("optional") is True or 
+                        str(p.get("optional", "")).lower() in {"true", "1", "yes", "y"} or
+                        p.get("is_optional") is True or
+                        p.get("required") is False or
+                        p.get("is_required") is False
+                    ),
                     "default_value": p.get("defaultValue") or p.get("value"),
                     "description": p.get("description") or p.get("helpText"),
                 })

@@ -11,28 +11,110 @@ from tools.registry import tool_registry
 logger = logging.getLogger("ops_agent.tools.status")
 
 
-def check_workflow_status(workflow_name: str) -> dict:
-    # Resolve endpoint variations via client fallback (prefix + org/global paths).
+def check_workflow_status(workflow_name: str = "", status: str = "") -> dict:
+    """Check the status of bots/workflows, including a 24h summary and filtering.
+    
+    If workflow_name is provided, checks that specific bot.
+    If workflow_name is empty, provides a global summary for all bots.
+    """
+    client = get_ae_client()
+    status_filter = str(status or "").strip()
+    name_to_check = str(workflow_name or "").strip()
+    
+    # Resolve endpoint variations via client fallback.
+    # Now fetches up to 100 to provide a good 24h history.
     try:
-        data = get_ae_client().get_workflow_latest_instance(workflow_name)
+        instances = client.get_workflow_instances(
+            name_to_check, 
+            limit=100,
+            status_filter=status_filter if status_filter else None
+        )
     except Exception as exc:
-        logger.warning("check_workflow_status fallback failed for %s: %s", workflow_name, exc)
+        logger.warning("check_workflow_status fetch failed for %s: %s", name_to_check or "GLOBAL", exc)
         return {
-            "workflow_name": workflow_name,
+            "workflow_name": name_to_check or "All Bots",
             "status": "UNKNOWN",
-            "last_execution_status": None,
-            "request_id": None,
-            "agent": None,
             "error_message": str(exc),
         }
 
+    if not instances:
+        msg = f"No recent executions found"
+        if name_to_check:
+            msg += f" for '{name_to_check}'"
+        if status_filter:
+            msg += f" with status '{status_filter}'"
+        return {
+            "workflow_name": name_to_check or "All Bots",
+            "status": "NO_EXECUTIONS",
+            "message": msg,
+        }
+
+    # Latest instance details
+    latest = instances[0]
+    
+    # 24-hour summary logic
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    # Full list of AE statuses as requested by user
+    summary = {
+        "New": 0, "InProgress": 0, "Complete": 0, "Failure": 0, 
+        "ExecutionStarted": 0, "Retry": 0, "Expired": 0, "Diverted": 0, 
+        "Terminated": 0, "Cancelled": 0, "Resubmitted": 0, "Awaitinginput": 0
+    }
+    total_24h = 0
+    
+    recent_list = []
+    for item in instances:
+        ts = _parse_timestamp(
+            item.get("createdDate") or item.get("started_at")
+        )
+        
+        item_status = item.get("status", "Unknown")
+        
+        if ts and ts >= cutoff:
+            total_24h += 1
+            if item_status in summary:
+                summary[item_status] += 1
+            else:
+                summary[item_status] = summary.get(item_status, 0) + 1
+            
+            # Keep a small list of very recent ones for detail
+            if len(recent_list) < 5:
+                # Include workflow name for every entry for clarity
+                recent_list.append({
+                    "id": item.get("id") or item.get("automationRequestId"),
+                    "bot_name": item.get("workflowName") or (item.get("workflowConfiguration") or {}).get("name") or "Unknown Bot",
+                    "status": item_status,
+                    "time": str(ts) if ts else "Unknown",
+                    "agent": item.get("agentName")
+                })
+
+    # Clean up empty summary keys for cleaner output
+    active_summary = {k: v for k, v in summary.items() if v > 0}
+
+    # Resolve actual bot name from instance configuration if possible (T4 support)
+    # If it's a global check, we call it "All Bots" to avoid confusion with the first matching bot.
+    resolved_name = "All Bots" if not name_to_check else (
+        latest.get("workflowName") or 
+        (latest.get("workflowConfiguration") or {}).get("name") or 
+        name_to_check
+    )
+
     return {
-        "workflow_name": workflow_name,
-        "status": data.get("status", "UNKNOWN"),
-        "last_execution_status": data.get("status"),
-        "request_id": data.get("automationRequestId") or data.get("id"),
-        "agent": data.get("agentName"),
-        "error_message": data.get("errorMessage") or data.get("errorDetails"),
+        "bot_name": resolved_name,
+        "workflow_name": resolved_name,
+        "is_global_check": not bool(name_to_check),
+        "latest_status": latest.get("status"),
+        "latest_execution": {
+            "id": latest.get("id") or latest.get("automationRequestId"),
+            "bot_name": latest.get("workflowName") or (latest.get("workflowConfiguration") or {}).get("name") or "Unknown Bot",
+            "status": latest.get("status"),
+        },
+        "latest_execution_id": latest.get("id") or latest.get("automationRequestId"),
+        "last_24h_summary": active_summary,
+        "total_executions_24h": total_24h,
+        "recent_executions": recent_list,
+        "status_filter_applied": status_filter or "None",
+        "message": f"Results for {'bot ' + resolved_name if name_to_check else 'all bots'} (Last 24 hours)"
     }
 
 
@@ -348,16 +430,10 @@ def t4_execute_and_poll(
     Builds the correct T4 payload: orgCode, workflowName, params list format.
     """
     client = get_ae_client()
-    org = client.default_org_code
-
-    # ── "Ask Again" pattern ──
-    # Identify specific required parameters from the local catalog
-    schema = client.get_cached_workflow_parameters(workflow_name)
-    # T4 Catalogue uses 'optional': false for required parameters
-    required = [
-        p["name"] for p in schema 
-        if p.get("required") or p.get("is_required") or p.get("optional") is False
-    ]
+    # Resolve the name first for accurate schema lookup
+    resolved_name = client.resolve_cached_workflow_name(workflow_name) or workflow_name
+    
+    required = client.get_required_parameters(resolved_name)
     missing = [p for p in required if not (params or {}).get(p)]
 
     if missing:
@@ -380,7 +456,7 @@ def t4_execute_and_poll(
     # Execute via the updated client method (handles payload format + query params automatically)
     try:
         execute_resp = client.execute_workflow(
-            workflow_name=workflow_name,
+            workflow_name=resolved_name,
             workflow_id=workflow_id,
             params=params,
             source="ae-agentic-support-status-check"
@@ -556,18 +632,24 @@ tool_registry.register(
     ToolDefinition(
         name="check_workflow_status",
         description=(
-            "Check the current status of a specific workflow or execution, "
-            "including last run time, duration, and any error messages."
+            "Check the current status and 24h history of bots (workflows). "
+            "If 'workflow_name' is provided, returns details for that specific bot. "
+            "If 'workflow_name' is omitted, returns a global summary for all bots in the tenant. "
+            "Includes bot/workflow name, latest status, request ID, and a 24-hour summary of runs."
         ),
         category="status",
         tier="read_only",
         parameters={
             "workflow_name": {
                 "type": "string",
-                "description": "Name of the workflow to check",
+                "description": "Name of the workflow (bot) to check. Omit for all bots.",
+            },
+            "status": {
+                "type": "string",
+                "description": "Optional: Filter history by status (e.g., 'Complete', 'Failure', 'New', 'InProgress')",
             },
         },
-        required_params=["workflow_name"],
+        required_params=[],
         always_available=True,
     ),
     check_workflow_status,

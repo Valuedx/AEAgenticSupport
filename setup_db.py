@@ -204,6 +204,27 @@ CREATE INDEX IF NOT EXISTS idx_workflow_catalog_name
     ON workflow_catalog(workflow_name);
 CREATE INDEX IF NOT EXISTS idx_workflow_catalog_active
     ON workflow_catalog(active);
+
+-- HDFC Ticket Lifecycle Registry
+CREATE TABLE IF NOT EXISTS ticket_registry (
+    id               BIGSERIAL PRIMARY KEY,
+    ticket_id        VARCHAR(64)   NOT NULL UNIQUE,
+    process_name     VARCHAR(256)  NOT NULL,
+    description      TEXT          NOT NULL,
+    request_type     VARCHAR(32)   DEFAULT 'Request',
+    status           VARCHAR(32)   DEFAULT 'OPEN',
+    environment      VARCHAR(16)   DEFAULT 'uat',
+    user_id          VARCHAR(256),
+    conversation_id  VARCHAR(256),
+    workflow_name    VARCHAR(256),
+    created_at       TIMESTAMPTZ   DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ   DEFAULT NOW(),
+    closed_at        TIMESTAMPTZ,
+    resolution_notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticket_registry_tid ON ticket_registry(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_ticket_registry_user ON ticket_registry(user_id);
 """
 
 
@@ -242,6 +263,7 @@ def setup_database():
     print(f"  - rag_documents (RAG vector store, vector({embed_dim}))")
     print("  - issue_registry (issue tracking)")
     print("  - conversation_state (session persistence + active issue pointer)")
+    print("  - ticket_registry (HDFC ticket lifecycle management)")
     print()
     print("Next steps:")
     print("  1. Index KB data:  python -m rag.index_all")

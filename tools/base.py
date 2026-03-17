@@ -104,7 +104,9 @@ class ToolDefinition:
 
         # ── Parameters: full name + type + description + required flag ───────
         param_lines: list[str] = []
-        for param_name, param_schema in (self.parameters or {}).items():
+        params_dict = self._get_parameters_dict()
+
+        for param_name, param_schema in params_dict.items():
             if not isinstance(param_schema, dict):
                 continue
             p_type = str(param_schema.get("type", "any"))
@@ -170,6 +172,8 @@ class ToolDefinition:
                 "avoid_when": avoid_when,
                 "input_examples": self.input_examples[:2],
                 "structured_output": bool(meta.get("structured_output", False)),
+                "parameters": self.parameters,
+                "required_params": self.required_params,
             },
         }
 
@@ -181,10 +185,26 @@ class ToolDefinition:
             "description": self._build_llm_description(),
             "parameters": {
                 "type": "object",
-                "properties": self.parameters,
+                "properties": self._get_parameters_dict(),
                 "required": self.required_params,
             },
         }
+
+    def _get_parameters_dict(self) -> dict[str, dict]:
+        """Normalize parameters to a dict (handling both dict and list sources)."""
+        params = self.parameters or {}
+        if isinstance(params, dict):
+            return params
+        
+        if isinstance(params, list):
+            p_map = {}
+            for p in params:
+                if isinstance(p, dict) and p.get("name"):
+                    # Use the parameter name as key, and the whole param dict as value
+                    p_map[p["name"]] = p
+            return p_map
+            
+        return {}
 
 
 @dataclass

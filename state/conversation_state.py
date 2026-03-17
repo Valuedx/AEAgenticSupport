@@ -144,6 +144,11 @@ class ConversationState:
         with self._queue_lock:
             return len(self._message_queue) > 0
 
+    def clear_param_collection(self):
+        """Reset parameter collection state after successful execution or cancellation."""
+        self.param_collection = {}
+        logger.debug("Parameter collection cleared for conversation %s", self.conversation_id)
+
     # ── Persistence ──
 
     def save(self):
@@ -554,30 +559,47 @@ class ConversationState:
                 status = "[ok]" if success else "[fail]"
                 resolved_actions.append(f"{tool_name} {status}")
 
-        # ── Also scan result data for workflow/schedule names ────────────────
+        # ── Also scan result data for workflow/schedule/agent names ──────────────
         for call in self.tool_call_log[-3:]:
             result_data = call.get("result") or {}
-            if not isinstance(result_data, dict):
-                continue
-            items = (
-                result_data.get("schedules")
-                or result_data.get("instances")
-                or result_data.get("failures")
-                or [result_data]
-            )
-            for item in (items if isinstance(items, list) else [items]):
+            
+            # Use same robust list/dict check as Orchestrator
+            items = []
+            if isinstance(result_data, list):
+                items = result_data
+            elif isinstance(result_data, dict):
+                items = (
+                    result_data.get("schedules") or 
+                    result_data.get("instances") or 
+                    result_data.get("failures") or 
+                    result_data.get("agents") or
+                    [result_data]
+                )
+            
+            tool_name = str(call.get("tool") or "").lower()
+            for item in items:
                 if not isinstance(item, dict):
                     continue
                 for k, v in item.items():
                     if not v:
                         continue
                     kl = k.lower()
-                    if "schedule_id" in kl or kl == "id":
+                    
+                    # Improved mapping logic
+                    if kl == "schedule_id" or (kl == "id" and "schedule" in tool_name):
                         entities.setdefault("schedule_id", str(v))
+                    elif kl in {"agent_id", "agentid", "uuid"} or (kl == "id" and "agent" in tool_name):
+                        entities.setdefault("agent_id", str(v))
+                    elif kl in {"execution_id", "request_id"} or (kl == "id" and ("exec" in tool_name or "request" in tool_name)):
+                        entities.setdefault("execution_id", str(v))
+                    
                     if "name" in kl and len(str(v)) > 2:
-                        entities.setdefault("schedule_name", str(v))
-                    if "workflow" in kl and "name" in kl:
-                        entities.setdefault("workflow_name", str(v))
+                        if "schedule" in kl or "schedule" in tool_name:
+                            entities.setdefault("schedule_name", str(v))
+                        elif "agent" in kl or "agent" in tool_name:
+                            entities.setdefault("agent_name", str(v))
+                        elif "workflow" in kl:
+                            entities.setdefault("workflow_name", str(v))
 
         if not entities and not resolved_actions:
             return ""

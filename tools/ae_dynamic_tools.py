@@ -306,19 +306,22 @@ def extract_dynamic_tool_mapping(
             )
             or f"Parameter '{name}'"
         )
-        required_flag = _to_bool(
-            _get_first_value(param, ("required", "mandatory", "isrequired"), None),
-            default=None
+        opt = param.get("optional")
+        is_explicitly_optional = (
+            opt is True or 
+            (isinstance(opt, str) and str(opt).strip().lower() in {"true", "1", "yes", "y"}) or
+            param.get("is_optional") is True or
+            param.get("required") is False or
+            param.get("is_required") is False
         )
-        if required_flag is None:
-            # T4 Catalogue uses 'optional': false for required
-            opt = param.get("optional")
-            if isinstance(opt, bool):
-                required_flag = not opt
-            else:
-                required_flag = False
+        required_flag = not is_explicitly_optional
+
+        extension = _get_first_value(param, ("extension", "fileextension"), None)
 
         prop_schema = {"type": json_type, "description": description_txt}
+        if extension:
+            prop_schema["extension"] = str(extension).strip()
+
         default_val = _get_first_value(param, ("defaultvalue", "default"), None)
         if default_val is not None:
             prop_schema["default"] = default_val
@@ -334,6 +337,7 @@ def extract_dynamic_tool_mapping(
                 "required": required_flag,
                 "description": description_txt,
                 "default": default_val,
+                "extension": extension,
             }
         )
 

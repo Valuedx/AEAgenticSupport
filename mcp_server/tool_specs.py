@@ -541,6 +541,130 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         "input_examples": [{"request_id": "REQ-10421"}],
         "extra_tags": ["handoff-note", "shift-transfer", "summary"],
     },
+    "ae.ticket.create": {
+        "title": "Ticket: Create Support Ticket",
+        "description": (
+            "Raise a support ticket in the HDFC Life ticketing system for a failed or problematic process. "
+            "Use this when a workflow failure or service issue requires formal tracking by the support team. "
+            "Returns the ticket ID on success. Ticket is stored locally with status OPEN."
+        ),
+        "use_when": (
+            "A workflow failed, a process is stuck, or an incident needs formal escalation and tracking. "
+            "The user asks to 'raise a ticket', 'create an incident', 'log a support request', or 'open a case'."
+        ),
+        "avoid_when": "The issue can be resolved immediately without requiring a support team handoff.",
+        "input_examples": [
+            {
+                "process_name": "Demat Process",
+                "description": "Process failed at step 3 with timeout error. Requires manual intervention.",
+                "request_type": "Incident",
+            },
+            {
+                "process_name": "License Bot",
+                "description": "License renewal for Feb 2026 batch not processed.",
+                "request_type": "Request",
+            },
+        ],
+        "parameter_docs": {
+            "process_name": "Name of the workflow or process to raise the ticket for (e.g., 'Demat Process').",
+            "description": "Clear description of the error or service request so the ticket is self-contained.",
+            "request_type": "'Incident' for failures/outages or 'Request' for service requests. Defaults to 'Request'.",
+        },
+        "extra_tags": ["ticket", "incident", "create-ticket", "support-case", "raise-ticket", "escalation", "hdfc"],
+    },
+    "ae.ticket.get": {
+        "title": "Ticket: Get Ticket Status",
+        "description": (
+            "Fetch the current status and details of a support ticket from the local registry. "
+            "Shows status (OPEN/IN_PROGRESS/CLOSED/REOPENED), timestamps, process name, and resolution notes."
+        ),
+        "use_when": "User asks for ticket status, details, or wants to know if a ticket is open or closed.",
+        "avoid_when": "Ticket ID is not known — use ae.ticket.list to find tickets first.",
+        "input_examples": [{"ticket_id": "881"}],
+        "parameter_docs": {"ticket_id": "The ticket ID returned when the ticket was created (e.g. '881')."},
+        "extra_tags": ["ticket-status", "get-ticket", "check-ticket", "hdfc"],
+    },
+    "ae.ticket.close": {
+        "title": "Ticket: Close Ticket",
+        "description": (
+            "Mark a support ticket as CLOSED in the local registry and record the resolution. "
+            "Records closure timestamp and resolution notes for audit trail."
+        ),
+        "use_when": (
+            "The issue is resolved and the ticket should be closed. "
+            "User says 'close ticket', 'mark as resolved', 'resolve ticket', or 'ticket is fixed'."
+        ),
+        "avoid_when": "Ticket is already closed. Use ae.ticket.reopen to reactivate it.",
+        "input_examples": [
+            {"ticket_id": "881", "resolution_notes": "Root cause fixed — DB connection pool increased."}
+        ],
+        "parameter_docs": {
+            "ticket_id": "The ticket ID to close (e.g. '881').",
+            "resolution_notes": "How the issue was resolved. Recommended for audit purposes.",
+        },
+        "extra_tags": ["close-ticket", "resolve-ticket", "ticket-resolved", "hdfc"],
+    },
+    "ae.ticket.reopen": {
+        "title": "Ticket: Reopen Ticket",
+        "description": (
+            "Reopen a previously CLOSED ticket. Status changes to REOPENED and closure "
+            "timestamp is cleared so the issue can be tracked again."
+        ),
+        "use_when": "A closed ticket needs to be reactivated because the issue recurred.",
+        "avoid_when": "Ticket is already OPEN or IN_PROGRESS.",
+        "input_examples": [{"ticket_id": "881"}],
+        "parameter_docs": {"ticket_id": "The ticket ID to reopen (e.g. '881')."},
+        "extra_tags": ["reopen-ticket", "ticket-reopen", "hdfc"],
+    },
+    "ae.ticket.list": {
+        "title": "Ticket: List Tickets",
+        "description": (
+            "List support tickets from the local registry with optional filters. "
+            "Can filter by status (OPEN/CLOSED/IN_PROGRESS/REOPENED) or process name."
+        ),
+        "use_when": "User asks to see all open tickets, list recent tickets, or find tickets for a process.",
+        "avoid_when": "A specific ticket ID is already known — use ae.ticket.get instead.",
+        "input_examples": [
+            {"status": "OPEN", "limit": 10},
+            {"process_name": "Demat", "status": "CLOSED"},
+        ],
+        "parameter_docs": {
+            "status": "Filter: 'OPEN', 'CLOSED', 'IN_PROGRESS', 'REOPENED', or empty for all.",
+            "process_name": "Optional partial process name filter (case-insensitive).",
+            "limit": "Max tickets to return (default 20).",
+        },
+        "extra_tags": ["list-tickets", "open-tickets", "ticket-list", "hdfc"],
+    },
+    "ae.agent.analyze_logs": {
+        "title": "Agent: Analyze Debug Logs",
+        "description": (
+            "Extract and analyze AutomationEdge agent logs for a specific period. "
+            "MANDATORY: You MUST call 'ae.agent.list_running' FIRST to get the agent_id. "
+            "NEVER call this tool with an empty agent_id. Parse dates into ISO format (YYYY-MM-DDTHH:MM:SS). "
+            "This tool is GUARDED (requires approval)."
+        ),
+        "use_when": "Agent ID is known and you need to investigate deep agent-level errors.",
+        "input_examples": [
+            {"agent_id": "2887", "from_date": "2026-03-16T10:00:00", "tail_lines": 100}
+        ],
+        "parameter_docs": {
+            "agent_id": "REQUIRED: The ID or name from 'ae.agent.list_running'.",
+            "from_date": "ISO format date and time (YYYY-MM-DDTHH:MM:SS) for start of log period. Defaults to last 24h. Note: 14-day retention and 5-day max span apply.",
+            "to_date": "ISO format date and time (YYYY-MM-DDTHH:MM:SS) for end of log period. Defaults to now.",
+            "tail_lines": "Number of lines to read from the end of each log file (default 100).",
+        },
+        "extra_tags": ["agent-logs", "debug", "diagnostics", "agent-health"],
+    },
+    "ae.agent.list_running": {
+        "title": "Agent: List Running",
+        "description": (
+            "MANDATORY: Always call this tool first for any agent-related request to discover available agents. "
+            "Lists all currently Running/Connected/Active agents with their names and IDs. "
+            "This tool is READ_ONLY and does not require approval."
+        ),
+        "use_when": "You need to find which agents are available to provide logs or status.",
+        "extra_tags": ["list-agents", "discovery", "status"],
+    },
 }
 
 
@@ -784,6 +908,7 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
     from mcp_server.tools import schedule_tools as _sched
     from mcp_server.tools import support_composite as _support
     from mcp_server.tools import task_tools as _task
+    from mcp_server.tools import ticket_tools as _ticket
     from mcp_server.tools import workflow_tools as _wf
 
     return (
@@ -852,6 +977,7 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.agent.get_recent_failures", _agent.agent_get_recent_failures, "agent_read", "safe_read"),
         _spec("ae.agent.get_last_heartbeat", _agent.agent_get_last_heartbeat, "agent_read", "safe_read"),
         _spec("ae.agent.collect_diagnostics", _agent.agent_collect_diagnostics, "agent_read", "safe_read"),
+        _spec("ae.agent.analyze_logs", _agent.agent_analyze_logs, "agent_diag", "guarded"),
         _spec("ae.agent.restart_service", _agent.agent_restart_service, "agent_mutate", "privileged"),
         _spec("ae.agent.clear_stale_rdp_session", _agent.agent_clear_stale_rdp_session, "agent_mutate", "privileged"),
         _spec("ae.schedule.list_all", _sched.schedule_list_all, "schedule_read", "safe_read"),
@@ -897,4 +1023,9 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.support.diagnose_rdp_blocked_workflow", _support.diagnose_rdp_blocked_workflow, "support_composite", "safe_read"),
         _spec("ae.support.build_case_snapshot", _support.build_case_snapshot, "support_composite", "safe_read"),
         _spec("ae.support.prepare_human_handoff_note", _support.prepare_human_handoff_note, "support_composite", "safe_read"),
+        _spec("ae.ticket.create", _ticket.ticket_create, "support_composite", "safe_mutation"),
+        _spec("ae.ticket.get", _ticket.ticket_get, "support_composite", "safe_read"),
+        _spec("ae.ticket.close", _ticket.ticket_close, "support_composite", "safe_mutation"),
+        _spec("ae.ticket.reopen", _ticket.ticket_reopen, "support_composite", "safe_mutation"),
+        _spec("ae.ticket.list", _ticket.ticket_list, "support_composite", "safe_read"),
     )

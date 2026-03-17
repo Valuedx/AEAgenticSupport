@@ -31,14 +31,14 @@ audit = logging.getLogger("ops_agent.audit")
 MAX_DELEGATION_DEPTH = 5
 
 
-def _score_agent(agent: BaseAgent, user_message: str, context: dict | None) -> float:
+def _score_agent(agent: BaseAgent, user_message: str, context: dict | None, **kwargs) -> float:
     """
     Compute a routing score for an agent given a user message.
 
     Uses the agent's own ``can_handle()`` method plus keyword matching
     against the agent's declared domains and capabilities.
     """
-    base_score = agent.can_handle(user_message, context)
+    base_score = agent.can_handle(user_message, context, **kwargs)
     msg_lower = user_message.lower()
 
     # Bonus for domain keyword matches
@@ -116,7 +116,7 @@ class AgentRouter:
             )
 
         scored = [
-            (agent, _score_agent(agent, user_message, context_overrides))
+            (agent, _score_agent(agent, user_message, context_overrides, **kwargs))
             for agent in agents
         ]
         scored.sort(key=lambda pair: (-pair[1], pair[0].info.priority))

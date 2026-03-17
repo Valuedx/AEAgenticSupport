@@ -159,21 +159,11 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
             ),
         }
     
-    # ── "Ask Again" pattern ──
-    # Identify specific required parameters from the local catalog (one query for id + params)
     client = get_ae_client()
-    _, schema = client.get_cached_workflow_info(workflow_name)
-    required = []
-    for p in schema:
-        name = p.get("name")
-        if not name:
-            continue
-        opt = p.get("optional")
-        optional_false = opt is False or (
-            isinstance(opt, str) and opt.strip().lower() in {"false", "0", "no", "n"}
-        )
-        if p.get("required") or p.get("is_required") or optional_false:
-            required.append(name)
+    # Resolve the name first for accurate schema lookup
+    resolved_name = client.resolve_cached_workflow_name(workflow_name) or workflow_name
+    
+    required = client.get_required_parameters(resolved_name)
     missing = [p for p in required if not (parameters or {}).get(p)]
 
     if missing:
@@ -195,11 +185,11 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
 
     # Use the updated T4-compatible execute_workflow method
     try:
-        workflow_id, _ = client.get_cached_workflow_info(workflow_name)
+        workflow_id, _ = client.get_cached_workflow_info(resolved_name)
         if not workflow_id:
-            workflow_id = workflow_name
+            workflow_id = resolved_name
         raw = client.execute_workflow(
-            workflow_name=workflow_name,
+            workflow_name=resolved_name,
             workflow_id=workflow_id,
             params=parameters,
             source="ops-agent-remediation"
@@ -385,9 +375,9 @@ tool_registry.register(
     ToolDefinition(
         name="restart_execution",
         description=(
-            "Restart a failed workflow execution or request. "
+            "Restart a failed bot (workflow) execution or request. "
             "Pass the execution_id (request id) to trigger the restart. "
-            "Use this for ANY request to 'restart', 'retry', or 'run again'."
+            "Use this for ANY request to 'restart', 'retry', or 'run again' a bot."
         ),
         category="remediation",
         tier="medium_risk",
@@ -422,10 +412,10 @@ tool_registry.register(
     ToolDefinition(
         name="resubmit_execution",
         description=(
-            "Resubmit a failed execution as a NEW run. "
+            "Resubmit a failed bot (workflow) execution as a NEW run. "
             "DIFFERENT from restart_execution: restart resumes the SAME execution; "
             "resubmit creates a NEW execution. "
-            "Use when: user says 'resubmit', 'run again from scratch', or 'create new run'. "
+            "Use when: user says 'resubmit', 'run again from scratch', or 'create new bot run'. "
             "Use from_failure_point=True to retry from where it failed, "
             "or from_failure_point=False to start fresh from the beginning."
         ),
@@ -461,14 +451,14 @@ tool_registry.register(
     ToolDefinition(
         name="trigger_workflow",
         description=(
-            "Trigger a new execution of a workflow with required parameters."
+            "Trigger a new execution of a bot (workflow) with required parameters."
         ),
         category="remediation",
         tier="medium_risk",
         parameters={
             "workflow_name": {
                 "type": "string",
-                "description": "Workflow to trigger",
+                "description": "The name of the bot (workflow) to trigger",
             },
             "parameters": {
                 "type": "object",
@@ -520,7 +510,7 @@ tool_registry.register(
     ToolDefinition(
         name="bulk_retry_failures",
         description=(
-            "Retry all failed executions within a time window. "
+            "Retry all failed bot (workflow) executions within a time window. "
             "Use with caution — high impact operation."
         ),
         category="remediation",
@@ -528,7 +518,7 @@ tool_registry.register(
         parameters={
             "workflow_name": {
                 "type": "string",
-                "description": "Filter by workflow (empty for all)",
+                "description": "Filter by bot/workflow name (empty for all)",
             },
             "hours": {
                 "type": "integer",
@@ -548,15 +538,15 @@ tool_registry.register(
     ToolDefinition(
         name="disable_workflow",
         description=(
-            "Disable a workflow to prevent future scheduled runs. "
-            "Use when a workflow is causing cascading failures."
+            "Disable a bot (workflow) to prevent future scheduled runs. "
+            "Use when a bot is causing cascading failures."
         ),
         category="remediation",
         tier="high_risk",
         parameters={
             "workflow_name": {
                 "type": "string",
-                "description": "Workflow to disable",
+                "description": "The bot (workflow) to disable",
             },
             "reason": {
                 "type": "string",

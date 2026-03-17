@@ -14,3 +14,20 @@
  CREATE TABLE chat_messages (metadata jsonb, conversation_id character varying(256), content text, id integer, role character varying(32), created_at timestamp with time zone);
  CREATE TABLE rag_documents (embedding USER-DEFINED, content text, tsv tsvector, metadata jsonb, id text, collection text, created_at timestamp with time zone);
 
+ -- ── HDFC Ticket Lifecycle Registry ──────────────────────────────────────────
+ CREATE TABLE IF NOT EXISTS ticket_registry (
+     id               BIGSERIAL PRIMARY KEY,
+     ticket_id        VARCHAR(64)   NOT NULL UNIQUE,
+     process_name     VARCHAR(256)  NOT NULL,
+     description      TEXT          NOT NULL,
+     request_type     VARCHAR(32)   DEFAULT 'Request',
+     status           VARCHAR(32)   DEFAULT 'OPEN',
+     environment      VARCHAR(16)   DEFAULT 'uat',
+     user_id          VARCHAR(256),
+     conversation_id  VARCHAR(256),
+     workflow_name    VARCHAR(256),
+     created_at       TIMESTAMPTZ   DEFAULT NOW(),
+     updated_at       TIMESTAMPTZ   DEFAULT NOW(),
+     closed_at        TIMESTAMPTZ,
+     resolution_notes TEXT
+ );

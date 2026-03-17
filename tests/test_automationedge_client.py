@@ -124,6 +124,38 @@ class TestAutomationEdgeClient(unittest.TestCase):
             mock_sleep.assert_called_once_with(5)
         client.close()
 
+    def test_authorized_request_parses_429_retry_after(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            path = request.url.path
+            calls.append(path)
+            
+            if path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            
+            if len([p for p in calls if "/test-429" in p]) == 1:
+                return httpx.Response(
+                    429, 
+                    json={
+                        "message": "You have crossed the service consumption limit configured for your user. Please try after 18 seconds.", 
+                        "success": False
+                    }
+                )
+            return httpx.Response(200, json={"status": "success"})
+
+        client = self._client_with_transport(handler)
+        
+        with patch("time.sleep") as mock_sleep:
+            result = client._authorized_request("GET", "/test-429")
+            self.assertEqual(result["status"], "success")
+            # Should have called /test-429 twice (fail then retry)
+            test_calls = [p for p in calls if "/test-429" in p]
+            self.assertEqual(len(test_calls), 2)
+            # Should have slept for 18 seconds exactly
+            mock_sleep.assert_called_once_with(18)
+        client.close()
+
     def test_execute_workflow_payload_contract(self):
         captured = {"payload": None, "header": ""}
 
@@ -188,13 +220,15 @@ class TestAutomationEdgeClient(unittest.TestCase):
         def handler(request: httpx.Request):
             if request.url.path.endswith("/authenticate"):
                 return httpx.Response(200, json={"token": "tok-1"})
-            if request.url.path.endswith("/api/v1/workflows/Policy_Renewal_Batch/status"):
+            if request.url.path.endswith("/api/v1/workflows/Policy_Renewal_Batch/instances"):
                 return httpx.Response(
                     200,
                     json={
-                        "workflow_name": "Policy_Renewal_Batch",
-                        "status": "active",
-                        "errorMessage": "Input file missing",
+                        "instances": [{
+                            "workflow_name": "Policy_Renewal_Batch",
+                            "status": "active",
+                            "errorMessage": "Input file missing",
+                        }]
                     },
                 )
             return httpx.Response(404, json={})
@@ -336,6 +370,49 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertTrue(any(p.endswith("/agent/debuglogs") for p in method_paths))
         self.assertTrue(any(p.endswith("/download/1248.zip") for p in method_paths))
         client.close()
+
+    def test_get_required_parameters_fallback(self):
+        """Verify that get_required_parameters falls back to all parameters if none are marked required."""
+        client = AutomationEdgeClient()
+        
+        # Mock get_cached_workflow_parameters to return a schema with no 'required' flags
+        schema = [
+            {"name": "param1", "type": "String"},
+            {"name": "param2", "type": "Number"},
+        ]
+        
+        with patch.object(client, "get_cached_workflow_parameters", return_value=schema):
+            # Test 1: No required flags -> should return all
+            required = client.get_required_parameters("WF_Test")
+            self.assertEqual(required, ["param1", "param2"])
+            
+            # Test 2: One required flag, one non-flagged -> both should be required
+            schema_mixed = [
+                {"name": "param1", "type": "String", "required": True},
+                {"name": "param2", "type": "Number"},
+            ]
+            with patch.object(client, "get_cached_workflow_parameters", return_value=schema_mixed):
+                required_mixed = client.get_required_parameters("WF_Mixed")
+                self.assertEqual(required_mixed, ["param1", "param2"])
+
+            # Test 3: Explicit optional flag -> should be excluded
+            schema_optional = [
+                {"name": "param1", "type": "String", "optional": True},
+                {"name": "param2", "type": "Number", "required": False},
+                {"name": "param3", "type": "String"} # Required by default
+            ]
+            with patch.object(client, "get_cached_workflow_parameters", return_value=schema_optional):
+                required_opt = client.get_required_parameters("WF_Opt")
+                self.assertEqual(required_opt, ["param3"])
+
+            # Test 4: Catalogue style 'optional': false -> should be required
+            schema_catalogue = [
+                {"name": "param1", "type": "String", "optional": False},
+                {"name": "param2", "type": "Number", "optional": True},
+            ]
+            with patch.object(client, "get_cached_workflow_parameters", return_value=schema_catalogue):
+                required_cat = client.get_required_parameters("WF_Cat")
+                self.assertEqual(required_cat, ["param1"])
 
 
 if __name__ == "__main__":

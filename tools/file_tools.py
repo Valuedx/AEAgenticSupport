@@ -87,7 +87,7 @@ tool_registry.register(
             },
             "execution_id": {
                 "type": "string",
-                "description": "Execution ID (optional)",
+                "description": "Request ID (optional)",
             },
         },
         required_params=["workflow_name"],

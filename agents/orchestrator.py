@@ -253,16 +253,24 @@ class Orchestrator:
         if not text:
             return "GENERAL"
 
-        # Fast-path: if the message contains a specific numeric ID (request, execution, etc.)
-        # it is ALWAYS an OPS query — skip RAG and LLM classification.
+        # Fast-path: if the message contains IDs, dates, or time ranges, it is OPS.
         import re
-        if re.search(r"\b(request|req|id|execution|exec|automation)\s*(id|#)?\s*:?\s*\d{4,}\b", text, re.IGNORECASE):
+        id_pattern = r"\b(request|req|id|execution|exec|automation|agent)\s*(id|#)?\s*:?\s*\d{4,}\b"
+        date_pattern = r"\b(\d{1,4}[-/]\d{1,2}[-/]\d{1,4})\b"
+        if re.search(id_pattern, text, re.IGNORECASE) or re.search(date_pattern, text):
             return "OPS"
-        # Also match standalone numeric IDs that look like request IDs
-        if re.search(r"\b\d{6,}\b", text):
+            
+        # Also match standalone numeric IDs that look like request IDs or Agent IDs (e.g. 2887)
+        if re.search(r"\b\d{4,}\b", text):
             return "OPS"
 
         active_issue = tracker.get_active_issue() if tracker else None
+        # If there's an active investigation or pending action, bias towards OPS
+        if active_issue and text.lower() not in {"hi", "hello", "thanks", "ok", "yes", "no"}:
+            # Check if it looks like a follow-up answer (containing names or specific values)
+            if len(text) > 5:
+                return "OPS"
+                
         active_status = active_issue.status.value if active_issue else "none"
 
         best_similarity = 0.0
@@ -397,7 +405,8 @@ class Orchestrator:
                 context_parts = []
                 if active_issue.workflows_involved:
                     context_parts.append(f"Workflows: {', '.join(active_issue.workflows_involved)}")
-                if active_issue.error_signatures:
+                # Only include error signatures if the issue is NOT resolved (Loop Fix)
+                if active_issue.status != IssueStatus.RESOLVED and active_issue.error_signatures:
                     context_parts.append(f"Errors: {', '.join(active_issue.error_signatures)}")
                 if context_parts:
                     enriched_query = f"{user_message} (Context: {' '.join(context_parts)})"
@@ -593,6 +602,10 @@ class Orchestrator:
                         state.log_tool_call(
                             tool_name, tool_args, result.data, result.success
                         )
+                        # Cleanup param collection on success (Loop Fix)
+                        if result.success and tool_name in ("trigger_workflow", "t4_execute_and_poll"):
+                            state.clear_param_collection()
+
                         progress.on_tool_done(
                             tool_name, result.success,
                             result.error if not result.success else "",
@@ -871,6 +884,9 @@ class Orchestrator:
         state.log_tool_call(
             action["tool"], action["args"], result.data, result.success
         )
+        # Cleanup param collection on success (Loop Fix)
+        if result.success and action["tool"] in ("trigger_workflow", "t4_execute_and_poll"):
+            state.clear_param_collection()
 
         action_summary = state.pending_action_summary
         state.pending_action = None
@@ -948,12 +964,17 @@ class Orchestrator:
 
     def _format_completion_message(self, tool_name: str, data: dict) -> str:
         """Create a clean, human-readable summary of the tool result with LLM-generated suggestions."""
+        report = data.get("report")
         msg = data.get("message") or f"I've successfully completed the {tool_name} action."
+
+        if report:
+            # If tool provided a detailed markdown report, use that as the primary message
+            msg = report
         
         details = []
         exec_id = data.get("execution_id") or data.get("request_id")
         if exec_id:
-            details.append(f"• **Execution ID**: `{exec_id}`")
+            details.append(f"• **Request ID**: `{exec_id}`")
         
         status = data.get("status") or data.get("state")
         if status:
@@ -968,25 +989,56 @@ class Orchestrator:
             response += "\n" + "\n".join(details)
 
         # Ask the LLM to generate 2 context-aware suggestions for what the user might want to do next.
-        # Uses a lightweight call (max_tokens=80) so it doesn't add significant latency.
+        # If there's an error/failure, we MUST suggest creating a support ticket.
         try:
+            status_prev = str(status or "").lower()
+            is_failure = any(term in status_prev for term in ("fail", "error", "abort", "reject", "cancel", "invalid"))
+            
+            # Identify if this is likely an HDFC-related process
+            wf_name = str(workflow or "").lower()
+            is_hdfc = "hdfc" in wf_name or "hdfc" in str(tool_name).lower()
+            
+            ticket_tool = "create_hdfc_ticket" if is_hdfc else "create_incident_ticket"
+            
+            error_instruction = ""
+            if is_failure:
+                error_instruction = (
+                    "CRITICAL: The previous action failed or encountered an error. "
+                    f"At least ONE of your suggestions MUST be for creating a support ticket using `{ticket_tool}`. "
+                    f"If it's a technical error, suggest an 'Incident' type. If it's a service gap, suggest a 'Request' type."
+                )
+            else:
+                # Even on success, maybe they want to raise a service request?
+                error_instruction = (
+                    f"If the user might need follow-up assistance, you can suggest using `{ticket_tool}` with a 'Request' type."
+                )
+
             context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {msg[:200]}"
             raw = llm_client.chat(
                 (
                     "Based on the following action just completed by an AutomationEdge support agent, "
                     "suggest exactly 2 brief, actionable next steps the user might want to take. "
+                    f"{error_instruction}\n"
                     "Return ONLY 2 bullet lines starting with '- '. No preamble, no explanation.\n\n"
                     f"Context: {context_summary}"
                 ),
                 system="You are a concise assistant. Output exactly 2 lines, each starting with '- '.",
                 temperature=0.7,
-                max_tokens=80,
+                max_tokens=500,
             )
-            suggestions = [
-                line.strip().lstrip("- ").strip()
-                for line in (raw or "").splitlines()
-                if line.strip().startswith("- ")
-            ][:2]
+            # Handle both "-" and "*" bullet points
+            suggestions = []
+            for line in (raw or "").splitlines():
+                line = line.strip()
+                if line.startswith(("- ", "* ")):
+                    suggestions.append(line.lstrip("-* ").strip())
+            
+            # Defensive fallback if LLM ignored the instruction on failure
+            if is_failure and suggestions and not any(term in str(suggestions).lower() for term in ("ticket", "escalat", "incident", "support")):
+                # Inject a ticket creation suggestion as a second bullet
+                suggestions = [suggestions[0], "Raise a support ticket for further investigation."]
+
+            suggestions = suggestions[:2]
         except Exception:
             suggestions = []
 
@@ -1065,7 +1117,7 @@ Rules:
 9. If none of the above help, call discover_tools to search the full
    catalog by description or category.
 10. **CRITICAL: TECHNICAL PRIORITIZATION**. If you call a tool and it returns technical data (workflow instances, logs, agent stats), you MUST report that specific technical data to the user. Do NOT provide placeholder SOP instructions if tool data is available. Prefer the tool's live truth over static Knowledge Base or SOP text provided in the context block.
-11. **CRITICAL: NUMERIC ID RULE**. If the user provides a specific numeric request ID, execution ID, or automation request ID (e.g. "request id 2501865"), you MUST call `get_execution_status` with that exact ID immediately. Do NOT ask for more information. Do NOT generate troubleshooting steps. Call the tool first, then report results. **EXCEPTION: This rule does NOT apply to Schedule IDs — see Rule 12.**
+11. **CRITICAL: NUMERIC ID RULE**. If the user provides a specific numeric request ID, or automation request ID (e.g. "request id 2501865"), you MUST call `get_execution_status` with that exact ID immediately. Do NOT ask for more information. Do NOT generate troubleshooting steps. Call the tool first, then report results. **EXCEPTION: This rule does NOT apply to Schedule IDs — see Rule 12.**
 12. **CRITICAL: SCHEDULE OPERATION RULE**. If the user says anything containing "schedule" AND an action word (disable, enable, pause, resume, stop, start, halt, activate, deactivate, turn off, turn on), you MUST call the appropriate schedule tool immediately:
     - "disable / pause / stop / halt / deactivate" → call `ae.schedule.disable` with `schedule_id` from the message
     - "enable / resume / start / activate / turn on" → call `ae.schedule.enable` with `schedule_id` from the message
@@ -1075,6 +1127,16 @@ Rules:
     - Use a DIFFERENT heading each time — rotate naturally among: "Here are a few options:", "You might also want to:", "Suggested next actions:", "Can I help with anything else?", "What's your next step?" — NEVER repeat the same heading in consecutive turns.
     - Keep suggestions relevant to the context (e.g., after a failure: offer log analysis; after a restart: offer status monitoring).
     - Match the persona: technical users get tool-specific options; business users get plain-language options.
+14. **TERMINOLOGY RULE**: "Bots" and "Workflows" are synonymous in this environment. If a user asks about a 'bot', use the workflow-related tools (like `check_workflow_status` or `trigger_workflow`).
+15. **PROACTIVE PARAMETER DISCOVERY**: When `discover_tools` returns a workflow with `[ORCHESTRATOR_MAPPING]` in its description:
+    - **TECHNICAL MAPPING MANDATE**: You MUST silently cross-reference the required parameters against the conversation history before generating a response.
+    - **NO REDUNDANCY**: DO NOT list a parameter in your response if its value is already present in history (even if the user used similar terms like "starts tomorrow" or typos like "lleave").
+    - **DECISIVE ACTION**: If the history contains ALL required parameters, you MUST skip the conversational summary and immediately propose or prepare the `trigger_workflow` tool call. Only prompt for the values that are strictly missing.
+16. **PROACTIVE DIAGNOSTIC DISCOVERY**: If the user asks for logs, status, or diagnostics but context is missing (like `agent_id` or `execution_id`), you MUST NOT ask the user for it first. Instead, call a discovery tool like `t4_check_agent_status`, `list_recent_failures`, or `ae.agent.analyze_logs` (with agent_id="") to find potential targets.
+    - **NAME RESOLUTION**: If the user provides an agent NAME, call `ae.agent.get_details` or `ae.agent.analyze_logs` with that name. Tools are designed to resolve names to IDs automatically.
+    - **AMBIGUITY RESOLUTION**: If discovery returns exactly one candidate, proceed with the investigation. If multiple are found, list them clearly with their names and IDs and ask the user to choose.
+17. **LOG DATE SELECTION RULE**: When log extraction (`analyze_agent_logs` or `get_execution_logs`) is requested, mentioned, or about to be called, you MUST first inform the user that logs default to the last 24 hours. You MUST explicitly ask the user if they want to specify a particular `from_date` or `to_date` (e.g., 'Do you want to check logs for a specific time range?') BEFORE or WHILE performing the extraction.
+18. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
 
 Available tool categories: status, logs, file, remediation, dependency,
 config, notification, general, meta.
@@ -1086,12 +1148,12 @@ FORBIDDEN: Never respond with SOP steps like 'Step 1: Check workflow status...' 
         if state.user_role == "business":
             persona = """
 ## Persona: Business User
-Explain in plain English. No workflow names, execution IDs, or error codes.
+Explain in plain English. No workflow names, request IDs, or error codes.
 Focus on business impact, timing, and resolution status."""
         else:
             persona = """
 ## Persona: Technical Staff
-Include workflow names, execution IDs, error details, and timestamps.
+Include workflow names, request IDs, error details, and timestamps.
 Provide full diagnostic information."""
 
         issue_context = ""
@@ -1111,18 +1173,48 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         # knows which execution_id or workflow was found moments earlier.
         tool_context = ""
         if state.tool_call_log:
-            recent_calls = state.tool_call_log[-3:]
-            interesting_keys = {"execution_id", "workflow_name", "workflow", "request_id", "id", "name"}
+            recent_calls = state.tool_call_log[-4:] # Check last 4 tools for deeper context
+            # Expanded keys to catch Agent IDs and generic IDs
+            interesting_keys = {
+                "execution_id", "workflow_name", "workflow", "request_id", 
+                "agent_id", "agentid", "uuid", "id", "name"
+            }
             extracted: dict[str, str] = {}
             for call in recent_calls:
                 result_data = call.get("result") or {}
-                if isinstance(result_data, dict):
-                    for row in result_data.get("instances", result_data.get("failures", [result_data])):
-                        if not isinstance(row, dict):
-                            continue
-                        for k, v in row.items():
-                            if k.lower() in interesting_keys and v and str(v).strip():
-                                extracted[k.lower()] = str(v).strip()
+                
+                # Robustify: Handle dict, list, or direct item
+                items_to_scan = []
+                if isinstance(result_data, list):
+                    items_to_scan = result_data
+                elif isinstance(result_data, dict):
+                    # Check common AE list wrappers
+                    items_to_scan = (
+                        result_data.get("instances") or 
+                        result_data.get("failures") or 
+                        result_data.get("agents") or
+                        [result_data]
+                    )
+                else:
+                    items_to_scan = [result_data]
+
+                for row in items_to_scan:
+                    if not isinstance(row, dict):
+                        continue
+                    for k, v in row.items():
+                        if k.lower() in interesting_keys and v and str(v).strip():
+                            # Map aliases to canonical keys for the LLM
+                            canonical_k = k.lower()
+                            if canonical_k in {"agentid", "uuid"}:
+                                canonical_k = "agent_id"
+                            
+                            # Check for 'id' mapping if the tool name suggests it's an agent tool
+                            tool_called = str(call.get("tool") or call.get("tool_name") or "").lower()
+                            if canonical_k == "id" and "agent" in tool_called:
+                                canonical_k = "agent_id"
+                            
+                            extracted[canonical_k] = str(v).strip()
+
             if extracted:
                 ctx_lines = "\n".join(f"  - {k}: {v}" for k, v in extracted.items())
                 tool_context = f"""
@@ -1130,8 +1222,8 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
 The following technical values were found in the most recent tool calls.
 Use them directly when investigating instead of asking the user to repeat them:
 {ctx_lines}
-CRITICAL: If the user asks to investigate or explain a failure and an execution_id is listed above,
-you MUST call get_execution_logs with that execution_id immediately."""
+CRITICAL: If an `execution_id` or `request_id` is listed above and the user asks "why" or "explain", call `get_execution_logs` immediately.
+CRITICAL: If an `agent_id` is listed above and the user asks for logs, says "yes/ok", or PROVIDES A DATE RANGE, you MUST call `analyze_agent_logs` with that `agent_id` immediately. Do NOT ask for the agent ID again."""
 
         # Build IST (UTC+5:30) datetime and compute the appropriate greeting word
         from datetime import timezone, timedelta
@@ -1168,9 +1260,36 @@ you MUST call get_execution_logs with that execution_id immediately."""
         except Exception as _rc_err:
             logger.debug("Could not build recent context summary: %s", _rc_err)
 
+        # ── Param Collection Persistence (Memory across turns) ──
+        param_hint = ""
+        active_issue = tracker.get_active_issue()
+        is_resolved = active_issue.status == IssueStatus.RESOLVED if active_issue else False
+        
+        if not is_resolved and state.param_collection and state.param_collection.get("workflow_name"):
+            wf = state.param_collection.get("workflow_name", "the current workflow")
+            collected = dict(state.param_collection.get("collected_params") or {})
+            required_list = list(state.param_collection.get("required_params") or [])
+            remaining = [p for p in required_list if p not in collected]
+            param_hint = f"""
+## Active Workflow Parameter Collection
+Workflow: {wf}
+MANDATORY Parameters (ALL ARE REQUIRED): {required_list}
+Collected from Conversation: {json.dumps(collected, indent=2)}
+STILL MISSING: {remaining}
+
+CRITICAL RULES:
+- FORBIDDEN: Do NOT ask for, mention, or 'fill in' any parameter not in the 'MANDATORY Parameters' list.
+- NEVER assume a value for a missing parameter (e.g., do NOT guess leave_type, start_date, or employee_id).
+- YOU MUST explicitly ask the user for any parameter listed in 'STILL MISSING'.
+- NEVER trigger the workflow if 'STILL MISSING' is not empty.
+- If you call `trigger_workflow`, use ONLY the exact keys from the collected dict above.
+"""
+
         parts = [base_prompt, persona]
         if recent_context:
             parts.append(recent_context)
+        if param_hint:
+            parts.append(param_hint)
         parts.extend([issue_context, tool_context, time_context, lang_instr])
         return "\n".join(parts)
 
@@ -1206,30 +1325,59 @@ you MUST call get_execution_logs with that execution_id immediately."""
             return None
 
         execution_intent = self._is_execution_request(msg)
-        best_similarity = 0.0
+        # Only measure similarity from WF_ workflow hits — non-workflow tools
+        # like ae.agent.get_details can score higher but are irrelevant here.
+        best_wf_similarity = 0.0
         for hit in hits:
             if isinstance(hit, dict):
+                hit_name = str(hit.get("name") or hit.get("workflow_name") or hit.get("tool_name") or "").strip()
+                hit_meta = hit.get("metadata") or {}
+                is_ae = (
+                    hit_name.startswith("WF_") or 
+                    hit.get("category") == "automationedge" or 
+                    hit_meta.get("source") == "automationedge" or
+                    hit_meta.get("workflow_id")
+                )
+                if not is_ae:
+                    continue
                 try:
-                    best_similarity = max(
-                        best_similarity,
+                    best_wf_similarity = max(
+                        best_wf_similarity,
                         float(hit.get("score", 0.0) or hit.get("similarity", 0.0) or 0.0),
                     )
                 except Exception:
                     pass
 
-        if not execution_intent and best_similarity < 0.5:
+        # Lower threshold to 0.3: a WF_ score of ~0.343 is a meaningful match
+        # and should proceed to param collection even without explicit execute intent.
+        if not execution_intent and best_wf_similarity < 0.3:
             return None
 
+        # Pre-filter to AutomationEdge workflow hits only.
+        # Previously restricted to "WF_" prefix; now allowing any AE category/source.
         scored_hits: list[tuple[float, dict]] = []
         for hit in hits:
             if not isinstance(hit, dict):
                 continue
+            hit_name = str(hit.get("name") or hit.get("workflow_name") or hit.get("tool_name") or "").strip()
+            hit_meta = hit.get("metadata") or {}
+            
+            # Allow if it has a workflow_id or is from AE source
+            is_ae = (
+                hit_name.startswith("WF_") or 
+                hit.get("category") == "automationedge" or 
+                hit_meta.get("source") == "automationedge" or
+                hit_meta.get("workflow_id")
+            )
+            
+            if not is_ae:
+                continue
+                
             try:
                 sim = float(hit.get("score", 0.0) or hit.get("similarity", 0.0) or 0.0)
             except Exception:
                 sim = 0.0
-            has_wf = 1.0 if str(hit.get("workflow_name") or "").strip() else 0.0
-            scored_hits.append((sim + has_wf, hit))
+            scored_hits.append((sim, hit))
 
         if not scored_hits:
             return None
@@ -1241,63 +1389,80 @@ you MUST call get_execution_logs with that execution_id immediately."""
             or selected_hit.get("name")
             or ""
         ).strip()
-        if not workflow_name or not workflow_name.startswith("WF_"):
-            for _, hit in scored_hits:
-                wf = str(hit.get("workflow_name") or hit.get("name") or "").strip()
-                if wf.startswith("WF_"):
-                    workflow_name = wf
-                    selected_hit = hit
-                    break
         if not workflow_name:
             return None
 
-        schema = get_ae_client().get_cached_workflow_parameters(workflow_name)
-        # Prefer matched-tool metadata first; fallback to DB schema.
-        hit_params = selected_hit.get("parameters")
-        required_with_desc: list[tuple[str, str]] = []
-        if isinstance(hit_params, list):
+        client = get_ae_client()
+        schema = client.get_cached_workflow_parameters(workflow_name)
+        hit_meta = selected_hit.get("metadata") or {}
+        hit_params = hit_meta.get("parameters") or selected_hit.get("parameters") or {}
+        
+        # Merge hit_params and schema to get the most comprehensive list.
+        # RAG index (hit_params) is often more up-to-date than the local catalog CACHE.
+        
+        # 1. Start with schema (DB) as the baseline
+        combined_schema: dict[str, dict] = {p.get("name"): p for p in (schema or []) if p.get("name")}
+        
+        # 2. Layer on search hit parameters (Metadata)
+        if isinstance(hit_params, dict):
+            for name, p_schema in hit_params.items():
+                if name not in combined_schema:
+                    combined_schema[name] = {"name": name}
+                if isinstance(p_schema, dict):
+                    combined_schema[name].update(p_schema)
+        elif isinstance(hit_params, list):
             for p in hit_params:
-                if not isinstance(p, dict):
-                    continue
-                name = str(p.get("name") or "").strip()
-                if not name:
-                    continue
-                is_required = (
-                    p.get("required")
-                    or p.get("is_required")
-                    or p.get("optional") is False
-                    or (
-                        isinstance(p.get("optional"), str)
-                        and p.get("optional").strip().lower() in {"false", "0", "no", "n"}
-                    )
-                )
-                if is_required:
-                    desc = str(p.get("description") or p.get("displayName") or "").strip()
-                    required_with_desc.append((name, desc))
+                if isinstance(p, dict) and p.get("name"):
+                    name = p.get("name")
+                    if name not in combined_schema:
+                        combined_schema[name] = p
+                    else:
+                        combined_schema[name].update(p)
 
-        if not required_with_desc:
-            for p in schema:
-                if not isinstance(p, dict):
-                    continue
-                name = str(p.get("name") or "").strip()
-                if not name:
-                    continue
-                is_required = (
-                    p.get("required")
-                    or p.get("is_required")
-                    or p.get("optional") is False
-                    or (
-                        isinstance(p.get("optional"), str)
-                        and p.get("optional").strip().lower() in {"false", "0", "no", "n"}
-                    )
-                )
-                if is_required:
-                    desc = str(p.get("description") or p.get("displayName") or "").strip()
-                    required_with_desc.append((name, desc))
+        required_with_desc: list[tuple[str, str]] = []
+        for name, p in combined_schema.items():
+            # A parameter is REQUIRED unless it is explicitly marked as optional.
+            opt = p.get("optional")
+            is_explicitly_optional = (
+                opt is True or 
+                (isinstance(opt, str) and str(opt).strip().lower() in {"true", "1", "yes", "y"}) or
+                p.get("is_optional") is True or
+                p.get("required") is False or
+                p.get("is_required") is False
+            )
+            
+            if not is_explicitly_optional:
+                desc = str(p.get("description") or p.get("displayName") or "").strip()
+                required_with_desc.append((name, desc))
 
         required = [name for name, _ in required_with_desc]
+        # No longer need manual fallbacks here as the client handles the 'required by default' model.
         if not required:
             return None
+
+        # ── Proactive Extraction (Fix for "Preflight Blindness") ──
+        # Extract params from the current message AND history immediately.
+        extracted = self._extract_params_from_user_message(
+            user_message=msg,
+            param_names=required,
+            messages=state.messages
+        )
+        # Apply normalization/mapping logic here too (Fix for "Preflight Blindness")
+        collected = {}
+        normalized_required = {self._norm_param_key(p): p for p in required}
+        for key, value in extracted.items():
+            if value in (None, "", "null", "None"):
+                continue
+            if key in required:
+                collected[key] = str(value).strip()
+                continue
+            # Try fuzzy mapping via normalization
+            mapped = normalized_required.get(self._norm_param_key(key))
+            if mapped:
+                collected[mapped] = str(value).strip()
+
+        # Validate extensions
+        validation_errors = self._validate_parameter_extensions(workflow_name, collected)
 
         if workflow_name not in state.affected_workflows:
             state.affected_workflows.append(workflow_name)
@@ -1307,32 +1472,107 @@ you MUST call get_execution_logs with that execution_id immediately."""
                 active_issue.issue_id, workflow_name
             )
 
-        pretty_items = []
-        for name, desc in required_with_desc:
-            pretty_name = self._prettify_param_name(name)
-            clean_desc = self._clean_param_description(desc, name)
-            pretty_items.append((pretty_name, clean_desc))
-
+        # Update remaining items for the request message
+        remaining_required = [p for p in required if p not in collected]
+        
         state.param_collection = {
             "workflow_name": workflow_name,
             "required_params": required,
-            "collected_params": {},
+            "collected_params": collected,
             "execution_tool": str(selected_hit.get("use_tool") or "trigger_workflow"),
             "execution_template": {"workflow_name": workflow_name},
             "matched_tool": selected_hit,
             "auto_execute": False,
         }
+
+        # If everything is already collected, return None to let the main loop proceed
+        if not remaining_required:
+            logger.info(f"Preflight: All params for {workflow_name} found in history/current message.")
+            return None
+
+        # Only list truly missing items
+        pretty_items = []
+        remaining_with_desc = [combined_schema.get(n) for n in remaining_required if combined_schema.get(n)]
+        for p_schema in remaining_with_desc:
+            name = p_schema.get("name")
+            desc = str(p_schema.get("description") or p_schema.get("displayName") or "").strip()
+            p_type = p_schema.get("type") or p_schema.get("uiControlType") or ""
+            p_ext = p_schema.get("extension") or ""
+            
+            pretty_name = self._prettify_param_name(name)
+            clean_desc = self._clean_param_description(desc, name)
+            
+            # Enrich label with type/extension info if relevant
+            label = pretty_name
+            metadata_hint = []
+            if p_type.lower() == "file" or p_ext:
+                metadata_hint.append("File Upload")
+                if p_ext:
+                    ext = str(p_ext).strip()
+                    if not ext.startswith("."): ext = "." + ext
+                    metadata_hint.append(f"format: {ext}")
+            
+            if metadata_hint:
+                label += f" ({', '.join(metadata_hint)})"
+                
+            pretty_items.append((label, clean_desc))
+
         sop_guidance = self._extract_sop_param_hints(
             workflow_name=workflow_name,
             required_params=required,
             sop_hits=sop_hits or [],
         )
+
+        intro = "I can help with that."
+        if validation_errors:
+            intro = "\n".join(validation_errors) + "\n\n" + intro
+
         return self._build_param_request_message(
             workflow_name=workflow_name,
             items=pretty_items,
-            intro="I can help with that.",
+            intro=intro,
             sop_guidance=sop_guidance,
         )
+
+    def _validate_parameter_extensions(self, workflow_name: str, collected: dict) -> list[str]:
+        """Validate collected parameters against their required extensions.
+        Returns a list of human-readable error messages.
+        """
+        schema = get_ae_client().get_cached_workflow_parameters(workflow_name)
+        errors = []
+        for p in schema:
+            if not isinstance(p, dict):
+                continue
+            name = p.get("name")
+            required_ext = p.get("extension")
+            if not name or not required_ext:
+                continue
+            
+            # Extension might be ".xlsx" or "xlsx"
+            ext_suffix = str(required_ext).strip()
+            if not ext_suffix.startswith("."):
+                ext_suffix = "." + ext_suffix
+
+            value = collected.get(name)
+            if not value:
+                continue
+            
+            val_str = str(value).strip()
+            # Skip validation for GUIDs (already uploaded to AE)
+            # Typically looks like GUID-xxxx-xxxx or just a long UUID-like string
+            if val_str.upper().startswith("GUID-") or ("-" in val_str and len(val_str) > 30):
+                continue
+            
+            if not val_str.lower().endswith(ext_suffix.lower()):
+                errors.append(
+                    f"The parameter '{self._prettify_param_name(name)}' requires a **{ext_suffix}** file. "
+                    f"You provided '{val_str}'."
+                )
+                # Remove from collected so it is asked for again
+                if name in collected:
+                    del collected[name]
+                
+        return errors
 
     def _is_execution_request(self, user_message: str) -> bool:
         """LLM-based intent check to avoid hardcoded workflow-action keyword lists."""
@@ -1367,7 +1607,7 @@ you MUST call get_execution_logs with that execution_id immediately."""
         if not missing:
             return None
 
-        extracted = self._extract_params_from_user_message(user_message, missing)
+        extracted = self._extract_params_from_user_message(user_message, missing, state.messages)
         normalized_required = {self._norm_param_key(p): p for p in required}
         for key, value in extracted.items():
             if not value:
@@ -1379,6 +1619,9 @@ you MUST call get_execution_logs with that execution_id immediately."""
             if mapped:
                 collected[mapped] = str(value).strip()
 
+        # Validate extensions
+        validation_errors = self._validate_parameter_extensions(workflow_name, collected)
+
         remaining = [p for p in required if not collected.get(p)]
         state.param_collection = {
             **pc,
@@ -1388,11 +1631,46 @@ you MUST call get_execution_logs with that execution_id immediately."""
         }
 
         if remaining:
-            pretty_items = [(self._prettify_param_name(p), "") for p in remaining]
+            # Build request for missing or invalid items
+            pretty_items = []
+            # Use combined schema info to get descriptions if possible
+            # We already have the workflow_name and remaining list.
+            # Look up descriptions from the cached schema for better labeling.
+            schema_list = get_ae_client().get_cached_workflow_parameters(workflow_name)
+            schema_map = {p.get("name"): p for p in schema_list if isinstance(p, dict) and p.get("name")}
+            
+            for name in remaining:
+                # Always include the parameter even if not in local schema
+                p_schema = schema_map.get(name, {})
+                p_name = self._prettify_param_name(name)
+                desc = p_schema.get("description") or p_schema.get("displayName") or ""
+                clean_desc = self._clean_param_description(desc, name)
+                
+                p_type = p_schema.get("type") or p_schema.get("uiControlType") or ""
+                p_ext = p_schema.get("extension") or ""
+                
+                label = p_name
+                metadata_hint = []
+                if p_type.lower() == "file" or p_ext:
+                    metadata_hint.append("File Upload")
+                    if p_ext:
+                        ext = str(p_ext).strip()
+                        if not ext.startswith("."): ext = "." + ext
+                        metadata_hint.append(f"format: {ext}")
+                
+                if metadata_hint:
+                    label += f" ({', '.join(metadata_hint)})"
+
+                pretty_items.append((label, clean_desc))
+
+            intro = "Got it, thanks."
+            if validation_errors:
+                intro = "\n".join(validation_errors) + "\n\n" + intro
+
             return self._build_param_request_message(
                 workflow_name=workflow_name,
                 items=pretty_items,
-                intro="Got it, thanks.",
+                intro=intro,
             )
 
         tool_name = str(pc.get("execution_tool") or "trigger_workflow")
@@ -1454,15 +1732,30 @@ you MUST call get_execution_logs with that execution_id immediately."""
             )
         )
 
-    def _extract_params_from_user_message(self, user_message: str, param_names: list[str]) -> dict[str, str | None]:
+    def _extract_params_from_user_message(self, user_message: str, param_names: list[str], messages: list[dict] | None = None) -> dict[str, str | None]:
         """LLM-based param extractor inspired by code_ref remediation_agent_extract_params."""
         if not param_names:
             return {}
+        
+        context_str = ""
+        if messages:
+            # Get last 5 messages for context without overwhelming the prompt
+            context_history = messages[-6:-1] if len(messages) > 1 else []
+            history_lines = []
+            for m in context_history:
+                role = "User" if m.get("role") == "user" else "Assistant"
+                history_lines.append(f"{role}: {m.get('content')}")
+            if history_lines:
+                context_str = "Conversation History:\n" + "\n".join(history_lines) + "\n\n"
+
         prompt = (
-            "Extract parameter values from the user message.\n"
+            f"{context_str}"
+            "Extract parameter values from the user message, cross-referencing with the conversation history if provided.\n"
+            "CRITICAL: You MUST use the exact keys from the 'Parameters needed' list below for the JSON keys.\n"
+            "CRITICAL: Do NOT extract values that are generic or part of the user's intent framing (e.g. do not extract 'leave' from 'i want to apply for leave'). Only extract specific, concrete values provided by the user (e.g. 'sick', 'annual', '2023-12-01').\n"
             "Return valid JSON only.\n\n"
             f"Parameters needed: {param_names}\n"
-            f'User message: "{user_message}"\n\n'
+            f'Current User message: "{user_message}"\n\n'
             'Return format: {"param_name": "value_or_null", ...}'
         )
         try:
@@ -1604,7 +1897,7 @@ you MUST call get_execution_logs with that execution_id immediately."""
         try:
             filtered = llm_client.chat(
                 f"Rewrite this for a non-technical business user. "
-                f"Remove workflow names, execution IDs, error codes. "
+                f"Remove workflow names, request IDs, error codes. "
                 f"Focus on impact and status. "
                 f"CRITICAL: Keep the 'Next Steps' or 'What would you like to do next?' section, but ensure the suggestions themselves are also non-technical (e.g., 'Should I check the overall system health?' instead of 'Check agent CPU logs').\n\n"
                 f"Original Response:\n{response}",
@@ -1641,21 +1934,45 @@ you MUST call get_execution_logs with that execution_id immediately."""
         intro: str = "",
         sop_guidance: list[str] | None = None,
     ) -> str:
+        """LLM-based natural prompting inspired by the provided reference code."""
         friendly_wf = self._humanize_workflow_name(workflow_name)
-        lines = []
-        for label, desc in items:
-            if desc:
-                lines.append(f"- {label}: {desc}")
-            else:
-                lines.append(f"- {label}")
-        prefix = f"{intro} " if intro else ""
-        msg = (
-            f"{prefix}To continue with {friendly_wf}, please share:\n"
-            + "\n".join(lines)
-        )
+        param_details = "\n".join([f"- {label}: {desc}" if desc else f"- {label}" for label, desc in items])
+        
+        sop_str = ""
         if sop_guidance:
-            msg += "\n\nPlease follow these guidelines:\n" + "\n".join(f"- {g}" for g in sop_guidance[:3])
-        return msg
+            sop_str = "\nGuidelines from SOPs:\n" + "\n".join([f"- {g}" for g in sop_guidance[:3]])
+
+        prompt = (
+            f"You are a helpful RPA automation assistant. You are helping the user with: '{friendly_wf}'.\n"
+            f"{intro}\n\n"
+            "Ask the user to provide the following required information in a warm, conversational, and premium tone.\n"
+            "List each item clearly with a bullet point. If a description is provided, use it to help the user understand what is needed.\n"
+            "Do NOT use technical terms like JSON or API. End with an encouraging note.\n\n"
+            f"Required Information:\n{param_details}\n{sop_str}\n\n"
+            "Write the message now:"
+        )
+
+        try:
+            # Using temperature 0.4 for a slightly more natural/varied but still professional feel
+            response = llm_client.chat(
+                prompt,
+                system="You are a warm, helpful automation assistant providing a premium experience.",
+                temperature=0.4,
+                max_tokens=1024
+            )
+            return response.strip()
+        except Exception as e:
+            logger.warning(f"LLM prompting failed: {e}. Falling back to static template.")
+            # Static fallback if LLM fails
+            lines = [f"- {label}: {desc}" if desc else f"- {label}" for label, desc in items]
+            prefix = f"{intro} " if intro else ""
+            msg = (
+                f"{prefix}To continue with {friendly_wf}, please share:\n"
+                + "\n".join(lines)
+            )
+            if sop_guidance:
+                msg += "\n\nPlease follow these guidelines:\n" + "\n".join(f"- {g}" for g in sop_guidance[:3])
+            return msg
 
     @staticmethod
     def _humanize_workflow_name(workflow_name: str) -> str:

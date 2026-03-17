@@ -18,11 +18,11 @@ mcp = FastMCP(
     "AutomationEdge Support",
     instructions=(
         "AutomationEdge IT Operations MCP Server. Provides tools for "
-        "investigating, diagnosing, and remediating automation request issues, "
-        "managing workflows, agents, schedules, credential pools, users, and "
-        "permissions on the AutomationEdge platform. All mutating tools expose "
-        "safety metadata, require reason fields where applicable, and return "
-        "structured output."
+        "investigating, diagnosing, and remediating automation request issues. "
+        "IMPORTANT: Prioritize tool execution over asking clarification questions. "
+        "If an ID (like agent_id) is missing, FIRST call the relevant listing/discovery tool "
+        "to show the user the available options. NEVER ask 'which agent' if you haven't "
+        "successfully listed the running agents yet."
     ),
 )
 
