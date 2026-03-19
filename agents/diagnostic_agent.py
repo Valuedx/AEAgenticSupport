@@ -60,14 +60,22 @@ class DiagnosticAgent(BaseAgent):
         if any(cue in msg for cue in cues):
             return 0.8
             
-        # Contextual scoring: Claim the turn if the previous assistant message mentioned logs or agents
+        # Contextual scoring: Claim the turn if the previous assistant message mentioned logs/agents,
+        # or if the current issue explicitly involves an agent we've already found.
         state = kwargs.get("state")
-        if state and state.messages:
-            last_bot_msg = next((m for m in reversed(state.messages) if m.get("role") == "assistant"), {}).get("content", "").lower()
-            if any(term in last_bot_msg for term in ("logs", "agent", "id", "2887")):
+        if state:
+            active_issue = state.messages and next((m for m in reversed(state.messages) if m.get("role") == "assistant"), {}).get("content", "").lower()
+            if any(term in str(active_issue) for term in ("logs", "agent", "id")):
                 # Very high score to take over parameter-only messages (like date ranges)
-                logger.info("DiagnosticAgent claiming turn based on history context")
+                logger.info("DiagnosticAgent claiming turn based on bot history (logs/agent)")
                 return 0.95
+            
+            # Check if an agent ID is already being tracked for the active issue
+            if context and context.get("active_issue"):
+                issue = context["active_issue"]
+                if hasattr(issue, "agent_ids") and issue.agent_ids:
+                    if any(aid in msg for aid in issue.agent_ids):
+                         return 0.9
         
         return 0.3
 

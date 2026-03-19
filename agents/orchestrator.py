@@ -460,6 +460,8 @@ class Orchestrator:
                     context_parts.append(f"Errors: {', '.join(active_issue.error_signatures)}")
                 if active_issue.execution_ids:
                     context_parts.append(f"ExecutionIDs: {', '.join(active_issue.execution_ids)}")
+                if active_issue.agent_ids:
+                    context_parts.append(f"AgentIDs: {', '.join(active_issue.agent_ids)}")
                 if context_parts:
                     enriched_query = f"{user_message} (Context: {' '.join(context_parts)})"
                     logger.info(f"RAG enriched query: {enriched_query}")
@@ -698,12 +700,20 @@ class Orchestrator:
                                     active_issue.issue_id,
                                     cast(Any, result.error)[:100],
                                 )
-                            if isinstance(result.data, dict):
-                                eid = result.data.get("execution_id") or result.data.get("request_id")
-                                if eid:
-                                    tracker.add_execution_id_to_issue(
-                                        active_issue.issue_id, str(eid)
-                                    )
+                                # Generic ID extraction for issue tracking (Feature 1.1)
+                                if isinstance(result.data, dict):
+                                    eid = result.data.get("execution_id") or result.data.get("request_id")
+                                    if eid:
+                                        tracker.add_execution_id_to_issue(active_issue.issue_id, str(eid))
+                                    aid = result.data.get("agent_id") or result.data.get("agentId")
+                                    if aid:
+                                        tracker.add_agent_id_to_issue(active_issue.issue_id, str(aid))
+                                elif isinstance(result.data, list):
+                                    for item in result.data:
+                                        if isinstance(item, dict):
+                                            aid = item.get("agent_id") or item.get("agentId") or (item.get("id") if "agent" in tool_name.lower() else None)
+                                            if aid:
+                                                tracker.add_agent_id_to_issue(active_issue.issue_id, str(aid))
 
                         # Handle "Ask Again" pattern from Tool Result
                         result_payload = (

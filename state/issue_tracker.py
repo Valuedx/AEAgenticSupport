@@ -63,6 +63,7 @@ class Issue:
     findings: list[dict] = field(default_factory=list)
     affected_workflows: list[str] = field(default_factory=list)
     related_issue_ids: list[str] = field(default_factory=list)
+    agent_ids: list[str] = field(default_factory=list)
     recurrence_count: int = 0
 
     def is_stale(self, stale_minutes: int = None) -> bool:
@@ -75,8 +76,9 @@ class Issue:
 
     def to_summary(self) -> str:
         workflow_info = f" | Workflows: {', '.join(self.workflows_involved)}" if self.workflows_involved else ""
+        agent_info = f" | Agents: {', '.join(self.agent_ids)}" if self.agent_ids else ""
         return (
-            f"[{self.issue_id}] {self.title} | Status: {self.status.value}{workflow_info}"
+            f"[{self.issue_id}] {self.title} | Status: {self.status.value}{workflow_info}{agent_info}"
         )
 
     def to_dict(self) -> dict:
@@ -505,6 +507,12 @@ If no issue_id applies: CLASSIFICATION|none"""
         if issue_id in self.issues:
             if exec_id not in self.issues[issue_id].execution_ids:
                 self.issues[issue_id].execution_ids.append(exec_id)
+                self._persist_issue(self.issues[issue_id])
+
+    def add_agent_id_to_issue(self, issue_id: str, agent_id: str):
+        if issue_id in self.issues:
+            if agent_id not in self.issues[issue_id].agent_ids:
+                self.issues[issue_id].agent_ids.append(agent_id)
                 self._persist_issue(self.issues[issue_id])
 
     def get_issue_findings(self, issue_id: str) -> list[dict]:

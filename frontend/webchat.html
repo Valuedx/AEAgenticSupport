@@ -564,16 +564,9 @@
         const reader = r.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let eventType = ''; // persists across chunk boundaries
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const lines = buffer.split('\n');
-          buffer = lines.pop();
-
-          let eventType = '';
+        const processLines = (lines) => {
           for (const line of lines) {
             if (line.startsWith('event: ')) {
               eventType = line.slice(7).trim();
@@ -595,10 +588,30 @@
                 typingEl.style.display = 'none';
                 addMsg(parsed || 'No response.', 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
               }
-              eventType = '';
+              eventType = ''; // reset only after data line is consumed
+            } else if (line === '') {
+              eventType = ''; // SSE blank-line separator resets state
             }
           }
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            // Flush any remaining buffered content (final frame without trailing newline)
+            if (buffer.trim()) {
+              processLines(buffer.split('\n'));
+            }
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep incomplete last line in buffer
+          processLines(lines);
         }
+        // Safety net: always hide the typing indicator when stream closes
+        typingEl.style.display = 'none';
+        if (progressEl) { progressEl.remove(); progressEl = null; }
       } catch (e) {
         if (progressEl) progressEl.remove();
         typingEl.style.display = 'none';

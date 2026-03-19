@@ -12,7 +12,7 @@ import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Optional, Any, Dict, List, cast
 
 from psycopg2.extras import Json
 
@@ -55,30 +55,30 @@ class ConversationState:
         self.user_metadata: dict = {}
 
         self.phase: ConversationPhase = ConversationPhase.IDLE
-        self.messages: list[dict] = []
-        self.findings: list[Finding] = []
-        self.tool_call_log: list[dict] = []
-        self.affected_workflows: list[str] = []
+        self.messages: List[Dict[str, Any]] = []
+        self.findings: List[Finding] = []
+        self.tool_call_log: List[Dict[str, Any]] = []
+        self.affected_workflows: List[str] = []
 
-        self.pending_action: Optional[dict] = None
+        self.pending_action: Optional[Dict[str, Any]] = None
         self.pending_action_summary: str = ""
-        self.param_collection: dict = {}
-        self.suspended_flow: dict = {}   # snapshot of a suspended param/approval flow
-        self.rca_data: Optional[dict] = None
+        self.param_collection: Dict[str, Any] = {}
+        self.suspended_flow: Dict[str, Any] = {}   # snapshot of a suspended param/approval flow
+        self.rca_data: Optional[Dict[str, Any]] = None
 
         # Feature 2.3: Metadata
         self.summary: str = ""
         self.is_human_handoff: bool = False
-        self.tags: list[str] = []
+        self.tags: List[str] = []
         self.preferred_language: str = "en" # Feature 2.2
 
         # Concurrency
         self.is_agent_working: bool = False
         self.interrupt_requested: bool = False
-        self._message_queue: list[dict] = []
+        self._message_queue: List[Dict[str, Any]] = []
         self._queue_lock = threading.Lock()
         # Deferred message writes: flushed in save() to reduce hot-path DB round-trips
-        self._pending_message_inserts: list[tuple[str, str, dict]] = []
+        self._pending_message_inserts: List[tuple[str, str, Dict[str, Any]]] = []
 
     # ── Messages ──
 
@@ -187,9 +187,9 @@ class ConversationState:
                             """, (self.conversation_id, role, content, Json(metadata)))
                         self._pending_message_inserts.clear()
                     state_data = {
-                        "messages": self.messages[-50:],
-                        "findings": [asdict(f) for f in self.findings[-20:]],
-                        "tool_call_log": self.tool_call_log[-30:],
+                        "messages": [self.messages[i] for i in range(max(0, len(self.messages) - 50), len(self.messages))],
+                        "findings": [asdict(f) for f in self.findings[max(0, len(self.findings) - 20):]],
+                        "tool_call_log": [self.tool_call_log[i] for i in range(max(0, len(self.tool_call_log) - 30), len(self.tool_call_log))],
                         "affected_workflows": self.affected_workflows,
                         "pending_action": self.pending_action,
                         "pending_action_summary": self.pending_action_summary,
@@ -252,17 +252,17 @@ class ConversationState:
                         data = row[3] or {}
                         state.summary = row[4] or ""
                         state.is_human_handoff = bool(row[5])
-                        state.messages = data.get("messages", [])
-                        state.tool_call_log = data.get("tool_call_log", [])
+                        state.messages = cast(List[Dict[str, Any]], data.get("messages", []))
+                        state.tool_call_log = cast(List[Dict[str, Any]], data.get("tool_call_log", []))
                         state.affected_workflows = data.get(
                             "affected_workflows", []
                         )
-                        state.pending_action = data.get("pending_action")
+                        state.pending_action = cast(Optional[Dict[str, Any]], data.get("pending_action"))
                         state.pending_action_summary = data.get(
                             "pending_action_summary", ""
                         )
-                        state.param_collection = data.get("param_collection", {}) or {}
-                        state.suspended_flow = data.get("suspended_flow", {}) or {}
+                        state.param_collection = cast(Dict[str, Any], data.get("param_collection", {}) or {})
+                        state.suspended_flow = cast(Dict[str, Any], data.get("suspended_flow", {}) or {})
                         state.preferred_language = data.get("preferred_language", "en")
                         for f_data in data.get("findings", []):
                             state.findings.append(Finding(**f_data))
@@ -499,16 +499,22 @@ class ConversationState:
         import re
 
         # ── Collect last N user/assistant message pairs ─────────────────────
-        recent_messages = [
+        # Split into two steps to help type checker with slice on list comprehension
+        filtered_msgs: List[Dict[str, Any]] = [
             m for m in self.messages
             if m.get("role") in ("user", "assistant")
-        ][-n_turns * 2:]  # n_turns pairs = 2*n messages
+        ]
+        # Use length-based slice to avoid negative index/overload issues in some type checkers
+        start_idx = max(0, len(filtered_msgs) - n_turns * 2)
+        # Bypassing slicing entirely with a list comprehension for stubborn type checkers
+        recent_messages: List[Dict[str, Any]] = [filtered_msgs[i] for i in range(start_idx, len(filtered_msgs))]
 
         if not recent_messages:
             return ""
 
         # ── Regex patterns for common entity types ──────────────────────────
         _SCHEDULE_ID = re.compile(r"\bschedule[_\s]?id[:\s#]*(\d{3,})\b", re.IGNORECASE)
+        _AGENT_ID    = re.compile(r"\b(?:agent|host)[_\s]?id[:\s#]*(\d{2,})\b", re.IGNORECASE)
         _EXEC_ID     = re.compile(r"\bexecution[_\s]?id[:\s#]*(\d{4,})\b", re.IGNORECASE)
         _REQUEST_ID  = re.compile(r"\b(?:request|req)[_\s]?id[:\s#]*(\d{4,})\b", re.IGNORECASE)
         _STANDALONE_ID = re.compile(r"(?<!\d)(\d{4,6})(?!\d)")
@@ -528,6 +534,8 @@ class ConversationState:
 
             for m in _SCHEDULE_ID.finditer(text):
                 entities.setdefault("schedule_id", m.group(1))
+            for m in _AGENT_ID.finditer(text):
+                entities.setdefault("agent_id", m.group(1))
             for m in _EXEC_ID.finditer(text):
                 entities.setdefault("execution_id", m.group(1))
             for m in _REQUEST_ID.finditer(text):
@@ -540,11 +548,19 @@ class ConversationState:
                 for m in _STANDALONE_ID.finditer(text):
                     val = m.group(1)
                     # Don't overwrite already-labelled entities
-                    if "schedule_id" not in entities and "id" in text.lower():
-                        entities.setdefault("mentioned_id", val)
+                    if "id" in text.lower():
+                        if "agent" in text.lower() or "host" in text.lower():
+                            entities.setdefault("agent_id", val)
+                        elif "schedule" in text.lower():
+                            entities.setdefault("schedule_id", val)
+                        else:
+                            entities.setdefault("mentioned_id", val)
 
         # ── Scan tool call log for resolved actions and values ───────────────
-        for call in self.tool_call_log[-n_turns:]:
+        # Use length-based slice via comprehension
+        tc_start = max(0, len(self.tool_call_log) - n_turns)
+        calls_to_scan: List[Dict[str, Any]] = [self.tool_call_log[i] for i in range(tc_start, len(self.tool_call_log))]
+        for call in calls_to_scan:
             tool_name = call.get("tool", "")
             params = call.get("params", {}) or {}
             success = call.get("success", False)
@@ -568,7 +584,10 @@ class ConversationState:
                 resolved_actions.append(f"{tool_name} {status}")
 
         # ── Also scan result data for workflow/schedule/agent names ──────────────
-        for call in self.tool_call_log[-3:]:
+        # Use length-based slice via comprehension
+        tc_recent_start = max(0, len(self.tool_call_log) - 3)
+        recent_calls: List[Dict[str, Any]] = [self.tool_call_log[i] for i in range(tc_recent_start, len(self.tool_call_log))]
+        for call in recent_calls:
             result_data = call.get("result") or {}
             
             # Use same robust list/dict check as Orchestrator
@@ -624,7 +643,9 @@ class ConversationState:
 
         # Recent message digest (last 5 turns, compact)
         lines.append("\n### Last Turns Summary:")
-        for msg in recent_messages[-6:]:
+        digest_start = max(0, len(recent_messages) - 6)
+        recent_digest: List[Dict[str, Any]] = [recent_messages[i] for i in range(digest_start, len(recent_messages))]
+        for msg in recent_digest:
             role = "User" if msg["role"] == "user" else "Agent"
             content = str(msg.get("content", ""))[:150].replace("\n", " ")
             lines.append(f"  [{role}] {content}")
