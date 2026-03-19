@@ -1442,6 +1442,29 @@ class AutomationEdgeClient:
             return []
         return []
 
+    def get_running_instances(self, workflow_name: str = "") -> list[dict]:
+        """
+        Query /workflowinstances individually for each running state.
+        This is a specialized search for active (non-terminal) states.
+        Returns the first match found to prevent duplicate triggers.
+        """
+        active_statuses = ["InProgress", "ExecutionStarted", "New"]
+        for status in active_statuses:
+            try:
+                # Query /workflowinstances for this SINGLE status
+                # max_to_fetch=1 since we only need to know if ONE is running
+                res = self.get_workflow_instances(
+                    workflow_name=workflow_name,
+                    limit=1,
+                    status_filter=status
+                )
+                if res:
+                    return res
+            except Exception as exc:
+                logger.warning("Running check failed for status %s: %s", status, exc)
+                continue
+        return []
+
     def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
         """Get execution logs by execution id with T4 fallback paths and debug log flow."""
         if not execution_id:

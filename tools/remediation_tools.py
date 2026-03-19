@@ -377,6 +377,32 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
     except Exception as exc:
         logger.warning(f"Pre-trigger agent check failed for {resolved_name}: {exc}")
 
+    # ── BUGFIX: In-progress guard ──────────────────────────────────────────────
+    # Before triggering, check if an instance of this workflow is already running.
+    # This prevents race conditions and redundant triggers.
+    try:
+        running = client.get_running_instances(resolved_name)
+        if running:
+            inst = running[0]
+            # AE requests often use 'requestId' or 'executionId'
+            rid = inst.get("requestId") or inst.get("id") or inst.get("executionId") or "?"
+            friendly = resolved_name.replace("_", " ").replace("-", " ").title()
+            
+            return {
+                "success": False,
+                "blocked_reason": "concurrent_execution",
+                "message": (
+                    f"⏳ **{friendly}** is already running (Execution ID: `{rid}`).\n\n"
+                    f"Please wait for the current execution to complete before triggering again. "
+                    f"I'll keep you updated on its status."
+                ),
+                "running_instances": running[:3],
+                "workflow_name": resolved_name,
+            }
+    except Exception as exc:
+        # Non-blocking: if the check itself fails, we logged a warning but proceed with the trigger
+        logger.warning(f"In-progress check failed for {resolved_name}: {exc}")
+
     # ── IMPROVEMENT 1: Batch parameter collection ─────────────────────────────
     required = client.get_required_parameters(resolved_name)       # list[str]
     param_schema_map = {p.get("name"): p for p in schema}         # name → schema entry

@@ -263,9 +263,19 @@ class AgentRouter:
                     delegation.reason[:100],
                 )
 
+                # BUGFIX: Build a focused task message from delegation reason/context
+                # instead of forwarding the raw user message (which might re-trigger workflows).
+                delegation_context = delegation.context or {}
+                context_str = ""
+                if delegation_context:
+                    context_str = " Context: " + ", ".join(
+                        f"{k}={v}" for k, v in delegation_context.items() if v
+                    )
+                delegate_message = f"{delegation.reason}.{context_str}"
+
                 delegate_result = self._execute_with_delegation(
                     agent=target,
-                    user_message=user_message,
+                    user_message=delegate_message,
                     shared=shared,
                     depth=depth + 1,
                     **kwargs,

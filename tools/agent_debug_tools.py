@@ -383,6 +383,22 @@ def analyze_agent_logs(
         return {"error": f"Please restart your agent {agent_name} first", "agent_state": state}
 
     # ── 1. Parse Dates ──
+    # IMPORTANT: from_date is mandatory for agent log analysis.
+    # Never use a default date range — always require the user to specify.
+    if not from_date or not str(from_date).strip():
+        return {
+            "success": False,
+            "needs_user_input": True,
+            "question": (
+                "I found the agent. To extract the logs, please provide the **date range**:\n\n"
+                "- **From date** *(e.g. `2026-03-18T00:00:00`)* — start of the log window\n"
+                "- **To date** *(e.g. `2026-03-19T23:59:59`)* — end of the log window\n\n"
+                "You can specify any range within the last 14 days (server retention limit)."
+            ),
+            "agent_id": agent_id,
+            "tool_name": "analyze_agent_logs",
+        }
+
     retention_days = 14
     min_date = datetime.now() - timedelta(days=retention_days)
     warning_retention = False
@@ -758,15 +774,15 @@ tool_registry.register(
         name="analyze_agent_logs",
         description=(
             "Extract and AI-analyze logs from an AutomationEdge AGENT for a specific time period. "
+            "IMPORTANT: You MUST ask the user for the 'from_date' and 'to_date' before calling this tool. "
+            "Never use a default date range — always get explicit dates from the user first. "
             "Processes each dated .log.gz file in the ZIP independently: scans BACKWARD for "
             "timestamped ERROR lines only (never stack-trace lines), captures up to 10 error blocks "
             "per file with 50 lines of context, sorted date/time wise. Falls back to last 100 lines "
             "for clean files. Groups similar errors by normalized signature across all files, sends "
             "one representative block per unique type to LLM (12k char cap, 600 token response). "
             "AI Diagnostic & Summary placed at top of report. "
-            "Use for agent-level issues: connectivity, DNS, credentials, service crashes. "
-            "Requires agent_id and time range. Call list_agents first if agent_id unknown. "
-            "Dates must be ISO format (YYYY-MM-DDTHH:MM:SS)."
+            "Use for agent-level issues: connectivity, DNS, credentials, service crashes."
         ),
         category="diagnostics",
         tier="medium_risk",
@@ -777,19 +793,19 @@ tool_registry.register(
             },
             "from_date": {
                 "type": "string",
-                "description": "Start date/time (ISO: YYYY-MM-DDTHH:MM:SS). Defaults to last 24h. Server retains ~14 days.",
+                "description": "REQUIRED: Start date/time in ISO format (YYYY-MM-DDTHH:MM:SS). Always ask the user for this — never assume or default. Server retains ~14 days.",
             },
             "to_date": {
                 "type": "string",
-                "description": "End date/time (ISO: YYYY-MM-DDTHH:MM:SS). Defaults to now.",
+                "description": "REQUIRED: End date/time in ISO format (YYYY-MM-DDTHH:MM:SS). Always ask the user for this — never assume or default.",
             },
             "tail_lines": {
                 "type": "integer",
                 "description": "Lines to return for clean (no-error) files (default 100).",
             },
         },
-        required_params=[],
-        use_when="User asks for agent logs, why an agent is offline, or provides a date range for bot-runner troubleshooting.",
+        required_params=["agent_id", "from_date", "to_date"],
+        use_when="User asks for agent logs, why an agent is offline, or provides a date range for bot-runner troubleshooting. ALWAYS ask for from_date and to_date from the user before calling this tool.",
         avoid_when="User provides a specific Request ID or Execution ID — use 'get_execution_logs' instead.",
     ),
     analyze_agent_logs,

@@ -86,9 +86,13 @@ class RemediationAgent(BaseAgent):
         # 2. If remediation was successful, delegate to diagnostic_agent for verification.
         # AE-55: Only delegate if a tool from the 'remediation' category was successful.
         # Do NOT delegate if the tool requested user input (needs_user_input=True).
+        # BUGFIX: Skip verification delegation for direct triggers that internally poll to completion.
+        _SKIP_VERIFICATION_TOOLS = {"trigger_workflow", "t4_execute_and_poll"}
+
         remedial_success = any(
             t.get("success") is True and 
             not t.get("needs_user_input") and
+            t.get("tool", "") not in _SKIP_VERIFICATION_TOOLS and
             tool_registry.get_tool(t.get("tool", "") or "").category == "remediation"
             for t in state.tool_call_log[-2:]
         )
