@@ -1300,6 +1300,71 @@ class AutomationEdgeClient:
             return []
         return []
 
+    def get_running_instances(self, workflow_name: str = "") -> list[dict]:
+        """
+        Query /workflowinstances individually for each running state.
+        States: 'InProgress', 'ExecutionStarted', 'New'.
+        Returns the first match found. This avoids API limitations with multi-value status searches.
+        """
+        active_statuses = ["InProgress", "ExecutionStarted", "New"]
+        org = self.default_org_code
+        
+        # Determine candidate names for searching
+        candidate_names = []
+        if workflow_name:
+            resolved = self.resolve_cached_workflow_name(workflow_name)
+            candidate_names = [resolved] if resolved else [workflow_name]
+
+        # T4 /workflowinstances often requires /aeengine/rest prefix
+        for status in active_statuses:
+            payload = {
+                "advanceSearch": {
+                    "conditionType": "AND",
+                    "conditions": [
+                        {
+                            "column": {"columnName": "status", "dataType": "enum"},
+                            "operator": "eq", "values": [status]
+                        }
+                    ]
+                }
+            }
+            if candidate_names:
+                payload["advanceSearch"]["conditions"].append({
+                    "column": {
+                        "columnName": "workflowConfiguration.name",
+                        "dataType": "string"
+                    },
+                    "operator": "eq",
+                    "values": [candidate_names[0]]
+                })
+
+            paths = [
+                f"/{org}/workflowinstances" if org else None,
+                "/workflowinstances"
+            ]
+            paths = [p for p in paths if p]
+
+            for use_prefix in (True, False):
+                for path in paths:
+                    try:
+                        # Fetch a small page (size=5) since we only need to know if ANY are running
+                        params = {"offset": 0, "size": 5, "order": "desc"}
+                        raw = self._authorized_request(
+                            "POST", path, 
+                            params=params, 
+                            payload=payload, 
+                            use_rest_prefix=use_prefix,
+                            silent_on_status=[400, 404, 500]
+                        )
+                        items = self._extract_list(raw)
+                        if items:
+                            logger.info("Found %d instances in state '%s' for %s", len(items), status, workflow_name)
+                            return items
+                    except Exception as exc:
+                        logger.debug("Running check failed for %s status %s (prefix=%s): %s", path, status, use_prefix, exc)
+                        continue
+        return []
+
     def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
         """Get execution logs by execution id with T4 fallback paths and debug log flow."""
         if not execution_id:

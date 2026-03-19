@@ -377,6 +377,40 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
     except Exception as exc:
         logger.warning(f"Pre-trigger agent check failed for {resolved_name}: {exc}")
 
+    # ── IMPROVEMENT 7: In-progress guard (Concurrent execution check) ─────────
+    # Before triggering, check if an instance of THIS workflow is already running.
+    # Block the trigger if one is found to prevent duplicate executions.
+    try:
+        running = client.get_running_instances(resolved_name)
+        if running:
+            inst = running[0]
+            # Extract execution ID from various possible T4 fields
+            exec_id = (
+                inst.get("id") 
+                or inst.get("automationRequestId") 
+                or inst.get("requestId") 
+                or inst.get("executionId") 
+                or "?"
+            )
+            # Friendly display name
+            friendly = resolved_name.replace("_", " ").replace("-", " ").title()
+            logger.info("Trigger blocked for %s: instance %s is already running", resolved_name, exec_id)
+            return {
+                "success": False,
+                "blocked_reason": "concurrent_execution",
+                "message": (
+                    f"⏳ **{friendly}** is already running (Execution ID: `{exec_id}`).\n\n"
+                    f"Please wait for the current execution to complete before triggering it again. "
+                    f"I'll help you monitor the status if needed!"
+                ),
+                "workflow_name": resolved_name,
+                "running_instances": running[:3], # return a few for context
+            }
+    except Exception as exc:
+        logger.warning("In-progress check failed for %s: %s", resolved_name, exc)
+        # Non-blocking: if the check fails (e.g. API error), we proceed with the trigger
+        # to avoid blocking users due to monitoring tool failures.
+
     # ── IMPROVEMENT 1: Batch parameter collection ─────────────────────────────
     required = client.get_required_parameters(resolved_name)       # list[str]
     param_schema_map = {p.get("name"): p for p in schema}         # name → schema entry

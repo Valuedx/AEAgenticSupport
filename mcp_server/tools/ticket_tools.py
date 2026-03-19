@@ -33,7 +33,10 @@ def _ticket_cfg() -> dict:
     if env == "prod":
         base_url = os.environ.get("TICKET_API_PROD_URL", "").strip()
         if not base_url:
-            logger.warning("TICKET_API_ENV=prod but TICKET_API_PROD_URL not set — falling back to UAT")
+            logger.warning(
+                "[ticket_cfg] TICKET_API_ENV=prod but TICKET_API_PROD_URL is not set — "
+                "falling back to UAT URL"
+            )
             base_url = os.environ.get("TICKET_API_URL", "").strip()
     else:
         base_url = os.environ.get("TICKET_API_URL", "").strip()
@@ -55,7 +58,7 @@ def _safe_json(obj) -> str:
 
 def _db():
     """Lazy import of ticket_db to avoid circular imports at module load."""
-    from tools import ticket_db
+    import tools.ticket_db as ticket_db
     return ticket_db
 
 
@@ -81,22 +84,47 @@ async def ticket_create(
         request_type:  'Incident' for failures/outages, 'Request' for service requests.
         user_id:       ID or email of the user raising the ticket (for audit / privacy).
     """
+    fn = "ticket_create"
+
+    # ── Input validation ────────────────────────────────────────────────────
     if not process_name or not process_name.strip():
+        logger.error("[%s] Validation failed: process_name is empty", fn)
         return _safe_json({"success": False, "error": "process_name is required."})
+
     if not description or not description.strip():
+        logger.error("[%s] Validation failed: description is empty", fn)
         return _safe_json({"success": False, "error": "description is required."})
 
     request_type = request_type.strip().title()
     if request_type not in ("Incident", "Request"):
-        return _safe_json({"success": False,
-                           "error": f"request_type must be 'Incident' or 'Request', got '{request_type}'."})
+        logger.error(
+            "[%s] Validation failed: invalid request_type='%s'. Must be 'Incident' or 'Request'",
+            fn, request_type,
+        )
+        return _safe_json({
+            "success": False,
+            "error": f"request_type must be 'Incident' or 'Request', got '{request_type}'.",
+        })
 
+    # ── Config validation ───────────────────────────────────────────────────
     cfg = _ticket_cfg()
-    if not cfg["url"]:
-        return _safe_json({"success": False, "error": "TICKET_API_URL not set in .env."})
-    if not cfg["email"] or not cfg["password"]:
-        return _safe_json({"success": False, "error": "TICKET_API_EMAIL or TICKET_API_PASSWORD not set in .env."})
 
+    if not cfg["url"]:
+        logger.error(
+            "[%s] Config error: TICKET_API_URL is not set in .env (env=%s)",
+            fn, cfg["env"],
+        )
+        return _safe_json({"success": False, "error": "TICKET_API_URL not set in .env."})
+
+    if not cfg["email"]:
+        logger.error("[%s] Config error: TICKET_API_EMAIL is not set in .env", fn)
+        return _safe_json({"success": False, "error": "TICKET_API_EMAIL not set in .env."})
+
+    if not cfg["password"]:
+        logger.error("[%s] Config error: TICKET_API_PASSWORD is not set in .env", fn)
+        return _safe_json({"success": False, "error": "TICKET_API_PASSWORD not set in .env."})
+
+    # ── Build request ───────────────────────────────────────────────────────
     form_data = {
         "process_name": process_name.strip(),
         "Description": description.strip(),
@@ -104,24 +132,72 @@ async def ticket_create(
         "Email": cfg["email"],
         "password": cfg["password"],
     }
-    logger.info("Creating ticket: process='%s' type='%s' env='%s'", process_name, request_type, cfg["env"])
 
+    logger.info(
+        "[%s] Sending ticket creation request | process='%s' | type='%s' | env='%s' | url='%s'",
+        fn, process_name.strip(), request_type, cfg["env"], cfg["url"],
+    )
+
+    # ── HTTP call ───────────────────────────────────────────────────────────
     try:
         async with httpx.AsyncClient(verify=False, timeout=cfg["timeout"]) as client:
             response = await client.post(cfg["url"], data=form_data)
 
-        raw = (response.text or "").strip()
         http_status = response.status_code
-        logger.debug("Ticket API [%d]: %s", http_status, raw[:200])
+        raw = (response.text or "").strip()
 
+        # Always log full response so failures are visible in CMD/terminal
+        logger.info(
+            "[%s] API response received | http_status=%d | env='%s' | raw_response='%s'",
+            fn, http_status, cfg["env"], raw,
+        )
+
+        # ── Parse response ──────────────────────────────────────────────────
+        # API always returns HTTP 200.
+        # Success payload : "Ticket raised successfully. Ticket ID: 881"
+        # Failure payload : "result not successful"
         ticket_id: str | None = None
         success = False
+        raw_lower = raw.lower()
 
-        if "ticket raised successfully" in raw.lower():
-            success = True
+        if "ticket raised successfully" in raw_lower:
+            # ── SUCCESS path ────────────────────────────────────────────────
             parts = raw.split("Ticket ID:")
             if len(parts) == 2:
                 ticket_id = parts[1].strip().rstrip(".")
+                success = True
+                logger.info(
+                    "[%s] Ticket created successfully | ticket_id='%s' | process='%s' | env='%s'",
+                    fn, ticket_id, process_name.strip(), cfg["env"],
+                )
+            else:
+                # API said success but didn't include a Ticket ID — log as warning
+                logger.warning(
+                    "[%s] API returned success message but 'Ticket ID:' label not found. "
+                    "Cannot extract ticket_id. | raw_response='%s' | process='%s' | env='%s'",
+                    fn, raw, process_name.strip(), cfg["env"],
+                )
+
+        elif "result not successful" in raw_lower:
+            # ── KNOWN FAILURE path — e.g. bad credentials, duplicate, unknown process ──
+            logger.error(
+                "[%s] Ticket creation FAILED — API returned 'result not successful' | "
+                "http_status=%d | env='%s' | process='%s' | request_type='%s' | "
+                "Likely causes: wrong credentials, unknown process_name, or duplicate ticket. | "
+                "raw_response='%s'",
+                fn, http_status, cfg["env"],
+                process_name.strip(), request_type, raw,
+            )
+
+        else:
+            # ── UNKNOWN response — log the full body so it is visible in terminal ──
+            logger.error(
+                "[%s] Ticket creation returned an unrecognised response | "
+                "http_status=%d | env='%s' | process='%s' | request_type='%s' | "
+                "raw_response='%s'",
+                fn, http_status, cfg["env"],
+                process_name.strip(), request_type, raw,
+            )
 
         # ── Save to DB ──────────────────────────────────────────────────────
         db_saved = False
@@ -135,29 +211,72 @@ async def ticket_create(
                     environment=cfg["env"],
                     user_id=str(user_id or ""),
                 )
+                if db_saved:
+                    logger.info(
+                        "[%s] Ticket '%s' persisted to local DB successfully",
+                        fn, ticket_id,
+                    )
+                else:
+                    logger.error(
+                        "[%s] DB save returned False for ticket_id='%s' — "
+                        "ticket was created on HDFC but NOT saved locally",
+                        fn, ticket_id,
+                    )
             except Exception as db_exc:
-                logger.error("DB save failed for ticket %s: %s", ticket_id, db_exc)
+                logger.error(
+                    "[%s] DB save raised exception for ticket_id='%s': %s",
+                    fn, ticket_id, db_exc, exc_info=True,
+                )
 
         return _safe_json({
             "success": success,
             "ticket_id": ticket_id,
             "status": "OPEN" if success else None,
-            "message": raw,
+            # Full raw API body — always included so caller/UI can display it
+            "api_response": raw,
             "http_status": http_status,
             "process_name": process_name.strip(),
             "request_type": request_type,
             "environment": cfg["env"],
             "user_id": str(user_id or ""),
             "db_saved": db_saved,
+            # Human-readable error: use exact API text so the user sees what went wrong
+            "error": None if success else (raw or f"API returned HTTP {http_status} with no response body."),
         })
 
+    # ── Network / timeout errors ────────────────────────────────────────────
     except httpx.TimeoutException:
-        return _safe_json({"success": False, "error": f"Ticket API timed out after {cfg['timeout']}s.", "environment": cfg["env"]})
+        logger.error(
+            "[%s] Request timed out after %ds | url='%s' | env='%s'",
+            fn, cfg["timeout"], cfg["url"], cfg["env"],
+        )
+        return _safe_json({
+            "success": False,
+            "error": f"Ticket API timed out after {cfg['timeout']}s.",
+            "environment": cfg["env"],
+        })
+
     except httpx.ConnectError as exc:
-        return _safe_json({"success": False, "error": f"Cannot connect to {cfg['url']}: {exc}", "environment": cfg["env"]})
+        logger.error(
+            "[%s] Connection failed | url='%s' | env='%s' | error=%s",
+            fn, cfg["url"], cfg["env"], exc,
+        )
+        return _safe_json({
+            "success": False,
+            "error": f"Cannot connect to {cfg['url']}: {exc}",
+            "environment": cfg["env"],
+        })
+
     except Exception as exc:
-        logger.error("ticket_create unexpected error: %s", exc, exc_info=True)
-        return _safe_json({"success": False, "error": f"Unexpected error: {exc}", "environment": cfg["env"]})
+        logger.error(
+            "[%s] Unexpected exception | env='%s' | error=%s",
+            fn, cfg["env"], exc, exc_info=True,  # full traceback in logs
+        )
+        return _safe_json({
+            "success": False,
+            "error": f"Unexpected error: {exc}",
+            "environment": cfg["env"],
+        })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,22 +293,40 @@ async def ticket_get(ticket_id: str) -> str:
     Args:
         ticket_id: The ticket ID returned when the ticket was created (e.g. "881").
     """
+    fn = "ticket_get"
+
     if not ticket_id or not str(ticket_id).strip():
+        logger.error("[%s] Validation failed: ticket_id is empty", fn)
         return _safe_json({"success": False, "error": "ticket_id is required."})
 
+    tid = str(ticket_id).strip()
+    logger.info("[%s] Looking up ticket_id='%s'", fn, tid)
+
     try:
-        record = _db().get_ticket(str(ticket_id).strip())
+        record = _db().get_ticket(tid)
     except Exception as exc:
+        logger.error("[%s] DB lookup failed for ticket_id='%s': %s", fn, tid, exc, exc_info=True)
         return _safe_json({"success": False, "error": f"DB error: {exc}"})
 
     if not record:
+        logger.warning(
+            "[%s] ticket_id='%s' not found in local registry",
+            fn, tid,
+        )
         return _safe_json({
             "success": False,
             "found": False,
-            "ticket_id": ticket_id,
-            "error": f"Ticket '{ticket_id}' not found in local registry. It may have been created before lifecycle tracking was enabled.",
+            "ticket_id": tid,
+            "error": (
+                f"Ticket '{tid}' not found in local registry. "
+                "It may have been created before lifecycle tracking was enabled."
+            ),
         })
 
+    logger.info(
+        "[%s] ticket_id='%s' found | status='%s' | process='%s'",
+        fn, tid, record.get("status"), record.get("process_name"),
+    )
     return _safe_json({
         "success": True,
         "found": True,
@@ -223,18 +360,23 @@ async def ticket_close(ticket_id: str, resolution_notes: str = "") -> str:
         ticket_id:        The ticket ID to close (e.g. "881").
         resolution_notes: Description of how the issue was resolved. Recommended for audit trail.
     """
+    fn = "ticket_close"
+
     if not ticket_id or not str(ticket_id).strip():
+        logger.error("[%s] Validation failed: ticket_id is empty", fn)
         return _safe_json({"success": False, "error": "ticket_id is required."})
 
     tid = str(ticket_id).strip()
+    logger.info("[%s] Attempting to close ticket_id='%s'", fn, tid)
 
-    # Verify ticket exists first
     try:
         record = _db().get_ticket(tid)
     except Exception as exc:
+        logger.error("[%s] DB lookup failed for ticket_id='%s': %s", fn, tid, exc, exc_info=True)
         return _safe_json({"success": False, "error": f"DB lookup error: {exc}"})
 
     if not record:
+        logger.error("[%s] ticket_id='%s' not found in local registry — cannot close", fn, tid)
         return _safe_json({
             "success": False,
             "ticket_id": tid,
@@ -243,6 +385,10 @@ async def ticket_close(ticket_id: str, resolution_notes: str = "") -> str:
 
     current_status = record.get("status", "")
     if current_status == "CLOSED":
+        logger.warning(
+            "[%s] ticket_id='%s' is already CLOSED — skipping",
+            fn, tid,
+        )
         return _safe_json({
             "success": False,
             "ticket_id": tid,
@@ -253,11 +399,23 @@ async def ticket_close(ticket_id: str, resolution_notes: str = "") -> str:
     try:
         ok = _db().close_ticket(tid, str(resolution_notes or ""))
     except Exception as exc:
+        logger.error(
+            "[%s] DB close failed for ticket_id='%s': %s",
+            fn, tid, exc, exc_info=True,
+        )
         return _safe_json({"success": False, "error": f"DB close error: {exc}"})
 
     if not ok:
+        logger.error(
+            "[%s] DB close_ticket returned False for ticket_id='%s'",
+            fn, tid,
+        )
         return _safe_json({"success": False, "ticket_id": tid, "error": "Failed to close ticket in DB."})
 
+    logger.info(
+        "[%s] ticket_id='%s' closed successfully | previous_status='%s' | notes='%s'",
+        fn, tid, current_status, resolution_notes,
+    )
     return _safe_json({
         "success": True,
         "ticket_id": tid,
@@ -283,21 +441,31 @@ async def ticket_reopen(ticket_id: str) -> str:
     Args:
         ticket_id: The ticket ID to reopen (e.g. "881").
     """
+    fn = "ticket_reopen"
+
     if not ticket_id or not str(ticket_id).strip():
+        logger.error("[%s] Validation failed: ticket_id is empty", fn)
         return _safe_json({"success": False, "error": "ticket_id is required."})
 
     tid = str(ticket_id).strip()
+    logger.info("[%s] Attempting to reopen ticket_id='%s'", fn, tid)
 
     try:
         record = _db().get_ticket(tid)
     except Exception as exc:
+        logger.error("[%s] DB lookup failed for ticket_id='%s': %s", fn, tid, exc, exc_info=True)
         return _safe_json({"success": False, "error": f"DB lookup error: {exc}"})
 
     if not record:
+        logger.error("[%s] ticket_id='%s' not found — cannot reopen", fn, tid)
         return _safe_json({"success": False, "ticket_id": tid, "error": f"Ticket '{tid}' not found."})
 
     current_status = record.get("status", "")
     if current_status not in ("CLOSED",):
+        logger.warning(
+            "[%s] ticket_id='%s' cannot be reopened — current status is '%s' (must be CLOSED)",
+            fn, tid, current_status,
+        )
         return _safe_json({
             "success": False,
             "ticket_id": tid,
@@ -308,11 +476,23 @@ async def ticket_reopen(ticket_id: str) -> str:
     try:
         ok = _db().reopen_ticket(tid)
     except Exception as exc:
+        logger.error(
+            "[%s] DB reopen failed for ticket_id='%s': %s",
+            fn, tid, exc, exc_info=True,
+        )
         return _safe_json({"success": False, "error": f"DB reopen error: {exc}"})
 
     if not ok:
+        logger.error(
+            "[%s] DB reopen_ticket returned False for ticket_id='%s'",
+            fn, tid,
+        )
         return _safe_json({"success": False, "ticket_id": tid, "error": "Failed to reopen ticket in DB."})
 
+    logger.info(
+        "[%s] ticket_id='%s' reopened successfully | previous_status='%s'",
+        fn, tid, current_status,
+    )
     return _safe_json({
         "success": True,
         "ticket_id": tid,
@@ -344,16 +524,27 @@ async def ticket_list(
         user_id:      Filter by the user who raised the ticket (exact match).
         limit:        Maximum number of tickets to return (default 20, max 100).
     """
+    fn = "ticket_list"
+
     status = str(status or "").strip().upper()
     process_name = str(process_name or "").strip()
     user_id = str(user_id or "").strip()
     limit = min(int(limit or 20), 100)
 
     if status and status not in VALID_STATUSES:
+        logger.error(
+            "[%s] Invalid status filter '%s'. Valid values: %s",
+            fn, status, sorted(VALID_STATUSES),
+        )
         return _safe_json({
             "success": False,
             "error": f"Invalid status '{status}'. Must be one of: {sorted(VALID_STATUSES)}",
         })
+
+    logger.info(
+        "[%s] Listing tickets | status='%s' | process_name='%s' | user_id='%s' | limit=%d",
+        fn, status or "ALL", process_name or "ALL", user_id or "ALL", limit,
+    )
 
     try:
         tickets = _db().list_tickets(
@@ -363,9 +554,9 @@ async def ticket_list(
             limit=limit,
         )
     except Exception as exc:
+        logger.error("[%s] DB list_tickets failed: %s", fn, exc, exc_info=True)
         return _safe_json({"success": False, "error": f"DB list error: {exc}"})
 
-    # Summarise for display
     summary = []
     for t in tickets:
         summary.append({
@@ -379,9 +570,14 @@ async def ticket_list(
             "resolution_notes": t.get("resolution_notes") or "",
         })
 
+    logger.info("[%s] Returning %d tickets", fn, len(summary))
     return _safe_json({
         "success": True,
         "count": len(summary),
-        "filters": {"status": status or "ALL", "process_name": process_name or "ALL", "user_id": user_id or "ALL"},
+        "filters": {
+            "status": status or "ALL",
+            "process_name": process_name or "ALL",
+            "user_id": user_id or "ALL",
+        },
         "tickets": summary,
     })
