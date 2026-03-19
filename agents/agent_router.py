@@ -263,9 +263,22 @@ class AgentRouter:
                     delegation.reason[:100],
                 )
 
+                # BUGFIX: Do NOT pass the original user_message to the delegate.
+                # Passing the raw user message causes the delegate to re-execute
+                # the user's original intent (e.g. re-triggering a workflow
+                # when it was only meant to verify the previous execution).
+                # Instead, build a focused task message from the delegation context.
+                delegation_context = delegation.context or {}
+                context_str = ""
+                if delegation_context:
+                    context_str = " Context: " + ", ".join(
+                        f"{k}={v}" for k, v in delegation_context.items() if v
+                    )
+                delegate_message = f"{delegation.reason}.{context_str}"
+
                 delegate_result = self._execute_with_delegation(
                     agent=target,
-                    user_message=user_message,
+                    user_message=delegate_message,
                     shared=shared,
                     depth=depth + 1,
                     **kwargs,
