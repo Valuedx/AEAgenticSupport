@@ -720,13 +720,23 @@ class ToolRegistry:
 
                 # THROTTLING: Add a small delay between detail requests to avoid spiking AE
                 import time
-                time.sleep(0.2)
+                time.sleep(0.05)
                 
+                # Check negative cache before calling (Registry level check)
+                if getattr(client, "_metadata_fail_cache", None) and wf_id in client._metadata_fail_cache:
+                    logger.debug("Registry skipping already-failed workflow: %s", wf_id)
+                    continue
+
                 details = client.get_workflow_details(wf_id)
-                if wf_name:
+                if details and wf_name:
                     details_by_workflow[wf_name] = details
             except Exception as exc:
-                logger.warning("Could not load workflow details for %s: %s", wf_id, exc)
+                # We don't need a loud warning here if it's already a known quiet-fail
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                if status_code in {400, 404}:
+                     logger.debug("Could not load workflow details for %s (quiet fail): %s", wf_id, exc)
+                else:
+                     logger.warning("Could not load workflow details for %s: %s", wf_id, exc)
 
         mappings = extract_dynamic_tool_mappings_from_payload(
             workflows,
@@ -823,6 +833,27 @@ class ToolRegistry:
             # If required params are missing, return a structured request for them
             # instead of a silent failure. The orchestrator will see needs_user_input=True
             # and re-prompt the user with the question.
+            # AE-77: Check for "File" type parameters. File upload is not supported in agentic chat yet.
+            schema = client.get_cached_workflow_parameters(mapping.workflow_name)
+            file_params = [
+                p.get("name") for p in (schema or [])
+                if str(p.get("type") or p.get("uiControlType") or "").strip().lower() in {"file", "attachment", "upload"}
+            ]
+            if file_params:
+                logger.info(f"Dynamic tool '{mapping.tool_name}' requires file upload. Rejecting agentic trigger.")
+                return {
+                    "success": False,
+                    "error": (
+                        f"The **{mapping.workflow_name}** bot requires a **document upload** "
+                        f"for: `{', '.join(file_params)}`. \n\n"
+                        "Since document uploading is not currently supported in this chat, "
+                        "please log in to the **AutomationEdge (AE) server** to trigger this bot manually. "
+                        "Thank you for your understanding!"
+                    ),
+                    "tool_name": mapping.tool_name,
+                    "workflow_name": mapping.workflow_name,
+                }
+
             missing = [p for p in mapping.required_params if not kwargs.get(p)]
             if missing:
                 # Build a friendly, conversational question (mirrors code_ref.py pattern)

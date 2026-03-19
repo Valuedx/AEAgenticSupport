@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any, List, Optional, cast
 
 import httpx
 import urllib3
@@ -95,6 +95,7 @@ class AutomationEdgeClient:
 
         self._session_token = ""
         self._token_expiry: Optional[datetime] = None
+        self._metadata_fail_cache: set[str] = set()
         self._auth_lock = threading.Lock()
 
         self._client = client or httpx.Client(
@@ -226,6 +227,9 @@ class AutomationEdgeClient:
         max_retries = 2  # Total 3 attempts
         for attempt in range(max_retries + 1):
             try:
+                # Construct full URL for logging
+                full_url = str(self._client.base_url).rstrip("/") + request_path
+                
                 response = self._client.request(
                     method.upper(),
                     request_path,
@@ -234,6 +238,10 @@ class AutomationEdgeClient:
                     data=data,
                     headers=request_headers,
                 )
+                
+                # Debug logging for troubleshooting paths
+                if response.status_code >= 400:
+                    logger.debug(f"DEBUG API CALL: {method} {full_url} | PARAMS: {params} | PAYLOAD: {payload} | STATUS: {response.status_code}")
 
                 if response.status_code == 401 and retry_on_401 and self.use_session_auth and attempt < max_retries:
                     logger.info("AE returned 401, re-authenticating and retrying once.")
@@ -285,20 +293,43 @@ class AutomationEdgeClient:
                     error_body = response.text
                 else:
                     # Truncate non-JSON (likely HTML) bodies to avoid log spam
-                    error_body = response.text[:200]
+                    error_body = "".join([response.text[i] for i in range(min(len(response.text), 200))])
                     if len(response.text) > 200:
                         error_body += "... [truncated]"
             except Exception:
                 error_body = "<could not read body>"
 
-            if response.status_code in silent:
-                # Log as debug/info for expected/silent trial failures
-                logger.debug("AE API Silent Failure %d for %s: %s", response.status_code, request_path, error_body)
+            if response is not None and response.status_code in silent:
+                # T4 discovery often hits 400/404 on workflows without specific configs.
+                # Use DEBUG for these known common errors to avoid log spam.
+                if response.status_code in (silent_on_status or []):
+                    # Use full_url for more informative logging
+                    full_url = str(self._client.base_url).rstrip("/") + request_path
+                    # Use DEBUG level for trial loops to avoid user confusion
+                    text_short = "".join([response.text[i] for i in range(min(len(response.text), 200))])
+                    logger.debug("AE API Silent Failure %d for %s: %s", response.status_code, full_url, text_short)
+                    return None
             else:
-                logger.error("AE API Error %d for %s: %s", response.status_code, request_path, error_body)
+                status = response.status_code if response is not None else 0
+                logger.error("AE API Error %d for %s: %s", status, request_path, error_body)
             raise exc
 
         return self._json_or_text(response)
+
+    def _extract_body_safe(self, exc: httpx.HTTPStatusError) -> str:
+        """Safely extract the response body from an HTTPStatusError."""
+        try:
+            response = exc.response
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "application/json" in content_type:
+                return response.text
+            # Truncate non-JSON bodies
+            body = "".join([response.text[i] for i in range(min(len(response.text), 200))])
+            if len(response.text) > 200:
+                body += "... [truncated]"
+            return body
+        except Exception:
+            return "<could not read body>"
 
     def restart_request(self, execution_id: str, reason: str = "") -> dict:
         """Restart a workflow instance using the T4 PUT /restart endpoint.
@@ -562,7 +593,7 @@ class AutomationEdgeClient:
     def list_workflows(
         self,
         offset: int = 0,
-        page_size: int = 200,
+        page_size: int = 50,
         all_pages: bool = True,
     ) -> list[dict]:
         """Fetch workflows from T4.
@@ -603,7 +634,7 @@ class AutomationEdgeClient:
             )
             if not all_pages or len(batch) < page_size:
                 break
-            current_offset += page_size
+            current_offset = int(current_offset) + int(page_size)
 
         return all_workflows
 
@@ -664,7 +695,7 @@ class AutomationEdgeClient:
             logger.info("Workflows fetched (Runtime) offset=%d -> %d records", current_offset, len(batch))
             if not all_pages or len(batch) < page_size:
                 break
-            current_offset += page_size
+            current_offset = int(current_offset) + int(page_size)
         return all_workflows
 
     def resolve_cached_workflow_name(self, workflow_name: str) -> str:
@@ -678,7 +709,7 @@ class AutomationEdgeClient:
         if base:
             variants.append(base)
             if base.upper().startswith("WF_"):
-                variants.append(base[3:])
+                variants.append("".join([base[i] for i in range(3, len(base))]) if len(base) > 3 else "")
             else:
                 variants.append(f"WF_{base}")
 
@@ -709,13 +740,57 @@ class AutomationEdgeClient:
             return ""
         except Exception as exc:
             logger.debug("T4: cached workflow name resolution failed for %s: %s", workflow_name, exc)
+
+    def get_cached_workflow_id(self, workflow_name: str) -> Optional[str]:
+        """Resolve numeric workflow_id from local catalog for a given technical name."""
+        name = str(workflow_name or "").strip()
+        if not name:
+            return None
+        try:
+            from config.db import get_conn
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT workflow_id FROM workflow_catalog WHERE lower(workflow_name) = %s",
+                        (name.lower(),),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        id_val = str(row[0]).strip()
+                        logger.info(f"T4 Catalog: Resolved name '{name}' to ID '{id_val}'")
+                        return id_val
+            return None
+        except Exception as exc:
+            logger.debug("T4: cached workflow ID resolution failed for %s: %s", name, exc)
+            return None
+    def resolve_workflow_via_rag(self, query: str, top_k: int = 3) -> str:
+        """Use RAG semantic search to resolve a bot name from a user query."""
+        try:
+            from rag.engine import get_rag_engine
+            rag = get_rag_engine()
+            results = rag.search_tools(query, top_k=top_k)
+            if results:
+                # Pick the best match that has a workflow name in metadata
+                for res in results:
+                    meta = res.get("metadata") or {}
+                    wf_name = meta.get("workflow_name")
+                    if wf_name:
+                        logger.info(f"RAG resolved '{query}' to '{wf_name}' (score: {res.get('rrf_score', 'N/A')})")
+                        return wf_name
+            return ""
+        except Exception as exc:
+            logger.warning(f"RAG workflow resolution failed for '{query}': {exc}")
             return ""
 
     def get_workflow_details(self, workflow_identifier: str) -> dict:
         if not workflow_identifier:
             raise ValueError("workflow_identifier is required")
-
+        
         wf_ident = str(workflow_identifier).strip()
+        if wf_ident in self._metadata_fail_cache:
+            logger.debug("Skipping workflow details for %s (marked in fail cache)", wf_ident)
+            return {}
+
         if not wf_ident.isdigit():
             resolved = self.resolve_cached_workflow_name(wf_ident)
             if resolved:
@@ -755,9 +830,15 @@ class AutomationEdgeClient:
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in {400, 404, 500}:
                         last_exc = exc
+                        # If it's a definitive "unsupported" error, mark it in negative cache
+                        if exc.response.status_code == 400 and "AE-1005" in self._extract_body_safe(exc):
+                            self._metadata_fail_cache.add(wf_ident)
                         continue
                     raise
         if last_exc and isinstance(last_exc, Exception):
+            # Also catch the final failure to mark cache
+            if isinstance(last_exc, httpx.HTTPStatusError):
+                 self._metadata_fail_cache.add(wf_ident)
             raise last_exc
         raise RuntimeError(f"Could not fetch workflow details for {workflow_identifier}")
 
@@ -777,8 +858,8 @@ class AutomationEdgeClient:
         ]
         last_exc: Optional[Exception] = None
         
-        # T4 variability: try with and without /aeengine/rest prefix
-        for use_prefix in (False, True):
+        # T4 variability: try with /aeengine/rest prefix first for T4 consistency
+        for use_prefix in (True, False):
             for path in paths:
                 try:
                     result = self._authorized_request(
@@ -875,6 +956,33 @@ class AutomationEdgeClient:
             f"Could not fetch latest instance for workflow '{workflow_name}'"
         )
 
+    def get_workflow_instance_by_id(self, instance_id: str | int) -> dict:
+        """Fetch a specific workflow instance by its numeric ID using T4 GET /workflowinstances/{id}."""
+        ident = str(instance_id).strip()
+        if not ident:
+            return {}
+            
+        # T4 usually supports /workflowinstances/{id} directly
+        paths = [
+            f"/workflowinstances/{ident}",
+            f"/tenants/{self.default_org_code}/workflowinstances/{ident}" if self.default_org_code else None,
+            f"/{self.default_org_code}/workflowinstances/{ident}" if self.default_org_code else None,
+        ]
+        paths = [p for p in paths if p]
+        
+        last_exc = None
+        for use_prefix in (True, False):
+            for path in paths:
+                try:
+                    return self._authorized_request("GET", path, use_rest_prefix=use_prefix, silent_on_status=[404])
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+        
+        if last_exc and isinstance(last_exc, Exception):
+            raise last_exc
+        return {}
+
     def get_workflow_instances(
         self, 
         workflow_name: str = "", 
@@ -890,6 +998,7 @@ class AutomationEdgeClient:
         name = str(workflow_name or "").strip()
         
         candidate_names: list[str] = []
+        candidate_ids: list[str] = []
         if name:
             resolved = self.resolve_cached_workflow_name(name)
             for candidate in (
@@ -900,6 +1009,17 @@ class AutomationEdgeClient:
                 candidate = str(candidate or "").strip()
                 if candidate and candidate.lower() not in {item.lower() for item in candidate_names}:
                     candidate_names.append(candidate)
+                    
+                    # Try to get numeric ID for T4 path fallbacks
+                    wf_id = self.get_cached_workflow_id(candidate)
+                    if wf_id and wf_id not in candidate_ids:
+                        candidate_ids.append(wf_id)
+                
+            # If name is numeric, consider it a potential workflowId candidate as well
+            if name.isdigit() and name not in candidate_ids:
+                candidate_ids.append(name)
+
+            logger.info(f"T4 Deep Search: Resolved candidates names={candidate_names}, ids={candidate_ids}")
 
         org = (org_code or self.default_org_code or "").strip()
         modern_paths = [f"/api/v1/workflows/{candidate}/executions" for candidate in candidate_names]
@@ -909,18 +1029,19 @@ class AutomationEdgeClient:
         for path in modern_paths:
             try:
                 # Modern API usually takes status in query params if supported
-                params = {"limit": max(limit, 1)}
+                request_params: dict[str, Any] = {"limit": max(limit, 1)}
                 if status_filter:
-                    params["status"] = status_filter
+                    request_params["status"] = status_filter
                 
                 result = self._authorized_request(
                     "GET", path, 
-                    params=params, 
+                    params=request_params, 
                     use_rest_prefix=False,
                     silent_on_status=[400, 404, 500]
                 )
-                if isinstance(result, list):
-                    return result[: max(limit, 1)]
+                if isinstance(result, list) and result:
+                    limit_val = max(limit, 1)
+                    return [result[i] for i in range(min(len(result), limit_val))]
                 if isinstance(result, dict):
                     items = (
                         result.get("instances")
@@ -928,9 +1049,27 @@ class AutomationEdgeClient:
                         or result.get("data")
                         or []
                     )
-                    if isinstance(items, list):
-                        return items[: max(limit, 1)]
-                    return [result]
+                    if isinstance(items, list) and items:
+                        if candidate_names:
+                            norm_candidates = {c.lower() for c in candidate_names}
+                            filtered = [
+                                it for it in items 
+                                if (it.get("workflowName") or (it.get("workflowConfiguration") or {}).get("name") or "").lower() in norm_candidates
+                            ]
+                            if filtered:
+                                limit_val = max(limit, 1)
+                                return [filtered[i] for i in range(min(len(filtered), limit_val))]
+                        else:
+                            limit_val = max(limit, 1)
+                            return [items[i] for i in range(min(len(items), limit_val))]
+                    if result and not isinstance(result, list) and not items:
+                         # Single object result - check if it matches
+                         if candidate_names:
+                             wfn = (result.get("workflowName") or (result.get("workflowConfiguration") or {}).get("name") or "").lower()
+                             if wfn in {c.lower() for c in candidate_names}:
+                                 return [result]
+                         else:
+                             return [result]
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in {400, 404, 500}:
                     last_exc = exc
@@ -938,48 +1077,133 @@ class AutomationEdgeClient:
                 raise
 
         # Phase 2: T4 POST /workflowinstances with broad filtering support
-        # This is the most robust way for T4 to get filtered results.
         t4_path = "/workflowinstances"
-        for use_prefix in (False, True):
+        # Favor prefix=True first for T4 as it's the standard /aeengine/rest standard
+        for use_prefix in (True, False):
             try:
-                # T4 POST payload for filtering
-                payload = {
-                    "offset": 0,
-                    "size": max(limit, 1),
-                    "order": "desc",
-                }
-                # Only add workflowName filter if provided
-                if candidate_names:
-                    payload["workflowName"] = candidate_names[0]
-                elif name:
-                    payload["workflowName"] = name
-                if status_filter:
-                    payload["status"] = status_filter
+                all_t4_results = []
+                current_offset = 0
+                # Increase depth if searching for a specific bot in a busy tenant
+                max_to_fetch = max(limit, 1000 if candidate_names else 1)
+                
+                # We'll use a fixed page size of 50 for T4 stability (server limit)
+                page_size = 50
+                
+                while len(all_t4_results) < max_to_fetch:
+                    fetch_size = min(page_size, max_to_fetch - len(all_t4_results))
+                    # T4 often expects pagination in query params even for POST
+                    params = {"offset": current_offset, "size": fetch_size, "order": "desc"}
+                    payload = {}
+                    if candidate_names:
+                        # Use the specific T4 Advance Search format for precise filtering
+                        payload = {
+                            "advanceSearch": {
+                                "conditions": [
+                                    {
+                                        "column": {
+                                            "columnName": "workflowConfiguration.name",
+                                            "dataType": "string"
+                                        },
+                                        "operator": "like",
+                                        "values": [candidate_names[0]],
+                                        "hasError": False
+                                    }
+                                ],
+                                "conditionType": ""
+                            }
+                        }
+                    elif name:
+                        # If name looks like an ID (numeric), use the precise ID filter column
+                        column_name = "workflowConfiguration.id" if name.isdigit() else "workflowConfiguration.name"
+                        column_type = "int" if name.isdigit() else "string"
+                        val = int(name) if name.isdigit() else name
+                        
+                        payload = {
+                            "advanceSearch": {
+                                "conditions": [
+                                    {
+                                        "column": {
+                                            "columnName": column_name,
+                                            "dataType": column_type
+                                        },
+                                        "operator": "eq" if name.isdigit() else "like",
+                                        "values": [val],
+                                        "hasError": False
+                                    }
+                                ],
+                                "conditionType": ""
+                            }
+                        }
+                    
+                    if status_filter:
+                         # Append status filter to advanceSearch if present
+                         if "advanceSearch" in payload:
+                             payload["advanceSearch"]["conditions"].append({
+                                 "column": {
+                                     "columnName": "status",
+                                     "dataType": "string"
+                                 },
+                                 "operator": "eq",
+                                 "values": [status_filter],
+                                 "hasError": False
+                             })
+                         else:
+                             payload["status"] = status_filter
 
-                result = self._authorized_request(
-                    "POST", t4_path, 
-                    payload=payload, 
-                    use_rest_prefix=use_prefix,
-                    silent_on_status=[400, 404, 500]
-                )
-                items = self._extract_list(result)
-                if items:
-                    return items
-            except Exception as exc:
-                last_exc = exc
-                continue
+                    result = self._authorized_request(
+                        "POST", t4_path, 
+                        params=params,
+                        payload=payload, 
+                        use_rest_prefix=use_prefix,
+                        silent_on_status=[400, 404, 500]
+                    )
+                    items = self._extract_list(result)
+                    if not items:
+                        break
+                        
+                    all_t4_results.extend(items)
+                    
+                    if len(items) < fetch_size:
+                        break
+                        
+                    current_offset += len(items)
+                
+                if all_t4_results:
+                    if candidate_names:
+                        # Strict filtering to avoid global results being returned if name not found.
+                        # T4 name-based POST /workflowinstances often returns ALL instances if the name isn't found.
+                        norm_candidates = {c.lower() for c in candidate_names}
+                        filtered = []
+                        for res in all_t4_results:
+                            # T4 can return name in workflowName OR workflowConfiguration.name
+                            wfn = (res.get("workflowName") or 
+                                   (res.get("workflowConfiguration") or {}).get("name") or 
+                                   "").lower()
+                            if wfn in norm_candidates:
+                                filtered.append(res)
+                        
+                        logger.info("Phase 2: Retrieved %d instances, %d match candidates %s", len(all_t4_results), len(filtered), candidate_names)
+                        if filtered:
+                            limit_val = int(max_to_fetch)
+                            return [filtered[i] for i in range(min(len(filtered), limit_val))]
+                    else:
+                        logger.info("Phase 2: Retrieved %d instances (no filter)", len(all_t4_results))
+                        limit_val = int(max_to_fetch)
+                        return [all_t4_results[i] for i in range(min(len(all_t4_results), limit_val))]
             except Exception as exc:
                 last_exc = exc
                 continue
 
         # Phase 3: T4 GET fallbacks
         t4_get_paths = []
-        if candidate_names:
-            for candidate in candidate_names:
-                if org:
-                    t4_get_paths.append(f"/{org}/workflows/{candidate}/instances")
-                t4_get_paths.append(f"/workflows/{candidate}/instances")
-        else:
+        # T4 often requires numeric IDs for /workflows/{id}/instances
+        # But we also try names just in case some T4 version supports it.
+        for candidate in (candidate_ids + candidate_names):
+            if org:
+                t4_get_paths.append(f"/{org}/workflows/{candidate}/instances")
+            t4_get_paths.append(f"/workflows/{candidate}/instances")
+            
+        if not t4_get_paths and not name:
             # If no workflow name, Phase 3 falls back to a global T4 instances list
             t4_get_paths.append("/workflowinstances")
             if org:
@@ -988,26 +1212,93 @@ class AutomationEdgeClient:
         for use_prefix in (False, True):
             for path in t4_get_paths:
                 try:
-                    result = self._authorized_request(
-                        "GET", path, 
-                        use_rest_prefix=use_prefix,
-                        silent_on_status=[400, 404, 500]
-                    )
-                    if isinstance(result, list):
-                        return result[: max(limit, 1)]
-                    if isinstance(result, dict):
-                        items = result.get("instances") or result.get("executions") or []
-                        if isinstance(items, list):
-                            return items[: max(limit, 1)]
-                        return [result]
+                    all_get_results = []
+                    current_offset = 0
+                    max_to_fetch = max(limit, 1)
+                    page_size = 50
+                    
+                    while len(all_get_results) < max_to_fetch:
+                        fetch_size = min(page_size, max_to_fetch - len(all_get_results))
+                        
+                        # T4 specific-workflow instances endpoint does NOT support paging/order via GET.
+                        # Only global /workflowinstances supports them.
+                        use_params = "/workflowinstances" in path
+                        params: dict[str, Any] = {}
+                        if use_params:
+                            params = {"offset": current_offset, "size": fetch_size, "order": "desc"}
+                            if status_filter:
+                                params["status"] = status_filter
+                            
+                        try:
+                            result = self._authorized_request(
+                                "GET", path, 
+                                params=params if use_params else None,
+                                use_rest_prefix=use_prefix,
+                                silent_on_status=[400, 404, 500]
+                            )
+                            items = []
+                            if isinstance(result, list):
+                                items = result
+                            elif isinstance(result, dict):
+                                items = result.get("instances") or result.get("executions") or result.get("data") or []
+                                if not isinstance(items, list) and result:
+                                    items = [result]
+                                    
+                            if not items or not isinstance(items, list):
+                                break
+                                
+                            all_get_results.extend(items)
+                            if len(items) < fetch_size:
+                                break
+                            current_offset += len(items)
+                        except httpx.HTTPStatusError as exc:
+                            body = self._extract_body_safe(exc)
+                            logger.info(f"Phase 3: Path {path} failed with {exc.response.status_code}. Body: {body}")
+                            if "AE-1005" in str(body):
+                                # Skip this broken path and try next one in t4_get_paths
+                                break 
+                            last_exc = exc
+                            break
+                        
+                    if all_get_results:
+                        if candidate_names:
+                            norm_candidates = {c.lower() for c in candidate_names}
+                            filtered = []
+                            for res in all_get_results:
+                                # T4 can return name in workflowName OR workflowConfiguration.name
+                                wfn = (res.get("workflowName") or 
+                                       (res.get("workflowConfiguration") or {}).get("name") or 
+                                       "").lower()
+                                if wfn in norm_candidates:
+                                    filtered.append(res)
+                            
+                            logger.info("Phase 3: Retrieved %d instances from %s, %d match candidates", len(all_get_results), path, len(filtered))
+                            if filtered:
+                                limit_val = int(max_to_fetch)
+                                return [filtered[i] for i in range(min(len(filtered), limit_val))]
+                        else:
+                            logger.info("Phase 3: Retrieved %d instances from %s (no filter)", len(all_get_results), path)
+                            limit_val = int(max_to_fetch)
+                            return [all_get_results[i] for i in range(min(len(all_get_results), limit_val))]
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in {400, 404, 500}:
-                        last_exc = exc
+                        # Capture error body for the final raise if all paths fail
+                        try:
+                            error_text = exc.response.text
+                        except Exception:
+                            error_text = "N/A"
+                        
+                        msg = f"Phase 3: Path {path} failed with {exc.response.status_code}. Body: {error_text}"
+                        last_exc = RuntimeError(msg)
+                        logger.info(msg)
                         continue
                     raise
         if last_exc and isinstance(last_exc, Exception):
-            raise last_exc
-        raise RuntimeError(f"Could not fetch instances for workflow '{name or 'All Bots'}'")
+            # If we were searching for a specific bot and found nothing, return empty rather than erroring 
+            # if the error was a 400/404/500 which often means "no data" for specific workflow paths.
+            logger.warning("All status retrieval paths failed/empty for candidates %s. Returning []. Last error: %s", candidate_names or name, last_exc)
+            return []
+        return []
 
     def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
         """Get execution logs by execution id with T4 fallback paths and debug log flow."""
@@ -1020,14 +1311,14 @@ class AutomationEdgeClient:
         
         # We'll try the most likely combinations on T4 and modern AE
         attempts = [
+            # T4 standard (with prefix) - PRIMARY T4 PATH
+            ("GET", f"/workflowinstances/{execution_id}/logs", True),
             # T4 standard (no prefix)
             ("GET", f"/workflowinstances/{execution_id}/logs", False),
             # T4 org-scoped (no prefix)
             ("GET", f"/{self.default_org_code}/workflowinstances/{execution_id}/logs", False) if self.default_org_code else None,
             # Modern AE (no prefix)
             ("GET", f"/api/v1/executions/{execution_id}/logs", False),
-            # T4 standard (with prefix) - common failure point but checked once
-            ("GET", f"/workflowinstances/{execution_id}/logs", True),
         ]
         attempts = [a for a in attempts if a]
         
@@ -1037,7 +1328,7 @@ class AutomationEdgeClient:
             try:
                 # Use tail only if explicitly requested and > 0
                 params = {"tail": tail} if tail > 0 else {}
-                return self._authorized_request(
+                result = self._authorized_request(
                     method,
                     path,
                     params=params,
@@ -1045,6 +1336,16 @@ class AutomationEdgeClient:
                     use_rest_prefix=use_prefix,
                     silent_on_status=[400, 404, 429, 500],
                 )
+                if result:
+                    # If it's a list or dict with logs, return it
+                    if isinstance(result, list) or (isinstance(result, dict) and (result.get("logs") or result.get("is_zip"))):
+                        logger.info(f"Phase 1: Successfully retrieved logs via {path}")
+                        if isinstance(result, dict):
+                            result["source_info"] = f"Phase 1 direct path: {path}"
+                        return result
+                # If silent failure or empty result, continue to next path/phase
+                logger.debug(f"Phase 1: Path {path} returned no data, trying next...")
+                continue
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
                 # If we hit 400 (unsupported) or 429 (rate limit), stop Phase 1 early and try Phase 2
@@ -1061,26 +1362,48 @@ class AutomationEdgeClient:
         # This is the "fallback of last resort" for T4 where /logs is restricted
         logger.info(f"Phase 2: Initiating T4 debug log flow for execution {execution_id}")
         try:
-            # 1. Get execution status for metadata
-            status_data = self.get_execution_status(execution_id)
-            # T4 Date extraction
-            from_date = status_data.get("startTime") or status_data.get("createdDate")
-            to_date = status_data.get("endTime") or status_data.get("lastUpdatedDate")
+            # 1. Check if a COMPLETE debug log request already exists for this execution_id
+            # This avoids creating redundant "NEW" requests which the server might pick first.
+            existing_requests = self.get_agent_debug_logs()
+            best_existing_id = None
+            if existing_requests and isinstance(existing_requests, list):
+                # Sort by id descending to get the most recent one first
+                sorted_reqs = sorted(
+                    [r for r in existing_requests if isinstance(r, dict)], 
+                    key=lambda x: x.get("id") or 0, 
+                    reverse=True
+                )
+                for r in sorted_reqs:
+                    req_wf_id = str(r.get("workflowInstanceId") or "")
+                    if req_wf_id == str(execution_id) and (r.get("status") or "").upper() == "COMPLETE":
+                        if r.get("logFileLink"):
+                            best_existing_id = r.get("id")
+                            logger.info(f"Found existing COMPLETE debug log request {best_existing_id} for execution {execution_id}")
+                            break
             
-            # Start/End dates are required for debug log post
-            if not from_date:
-                # Fallback to current time - 1h if missing (in ms)
-                from_date = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
-            if not to_date:
-                to_date = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-            # 2. Request debug log generation
-            debug_req = self.request_debug_logs(execution_id, from_date, to_date)
-            req_id = debug_req.get("id")
+            req_id = best_existing_id
             if not req_id:
-                 raise RuntimeError(f"T4 debug log request failed: {debug_req}")
+                # 2. Get execution status for metadata (dates) only if we need to request a new one
+                status_data = self.get_execution_status(execution_id)
+                # T4 Date extraction
+                from_date = status_data.get("startTime") or status_data.get("createdDate")
+                to_date = status_data.get("endTime") or status_data.get("lastUpdatedDate")
+                
+                # Start/End dates are required for debug log post
+                if not from_date:
+                    # Fallback to current time - 1h if missing (in ms)
+                    from_date = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
+                if not to_date:
+                    to_date = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-            # 3. Poll for logFileLink
+                # 3. Request debug log generation
+                debug_req = self.request_debug_logs(execution_id, from_date, to_date)
+                req_id = debug_req.get("id")
+                if not req_id:
+                     raise RuntimeError(f"T4 debug log request failed: {debug_req}")
+                logger.info(f"Created new T4 debug log request {req_id} for execution {execution_id}")
+
+            # 4. Poll for logFileLink (or download immediately if we found an existing one)
             import time
             for poll_attempt in range(10): # Max ~90s
                 # T4 can take several seconds to register a debug log request
@@ -1092,13 +1415,18 @@ class AutomationEdgeClient:
                 updated = self.get_debug_log_request(str(req_id))
                 if updated.get("is_zip") or updated.get("log_zip_content"):
                     logger.info(f"T4 debug log request {req_id}: received binary ZIP content directly.")
+                    if isinstance(updated, dict):
+                        updated["source_info"] = f"T4 debug log request {req_id} (reused existing)" if best_existing_id else f"T4 debug log request {req_id} (newly created)"
                     return updated
 
                 link = updated.get("logFileLink")
                 if link:
                     logger.info(f"T4 debug log ready via link: {link}")
                     # 4. Download (use rest prefix False as it's typically an absolute-ish or full path)
-                    return self._authorized_request("GET", link, use_rest_prefix=False)
+                    res = self._authorized_request("GET", link, use_rest_prefix=False)
+                    if isinstance(res, dict):
+                        res["source_info"] = f"T4 debug log request {req_id} (ready via link)"
+                    return res
                 
                 if (updated.get("status") or "").upper() in ("FAILED", "ERROR"):
                     raise RuntimeError(f"T4 debug log request {req_id} failed on server.")
@@ -1119,7 +1447,8 @@ class AutomationEdgeClient:
              if last_exc:
                  # Check if last_exc is an actual exception type Pyre likes
                  if isinstance(last_exc, BaseException):
-                     raise flow_err from last_exc
+                      # Use cast(Any, flow_err) to avoid possible type conflicts when chaining
+                      raise cast(Any, flow_err) from last_exc
              raise flow_err
 
     def request_debug_logs(self, execution_id: str, from_date: Any = None, to_date: Any = None) -> dict:
@@ -1273,7 +1602,7 @@ class AutomationEdgeClient:
                 elif isinstance(result, list):
                     raw_agents = result
 
-                normalized = []
+                normalized: list[dict[str, Any]] = []
                 for agent in raw_agents:
                     if not isinstance(agent, dict):
                         continue
@@ -1318,7 +1647,7 @@ class AutomationEdgeClient:
             result = self._authorized_request(
                 "POST",
                 path,
-                params={"type": "AGENT", "offset": 0, "size": 100},
+                params={"type": "AGENT", "offset": 0, "size": 50},
                 use_rest_prefix=True,
             )
             agents: list[dict] = []
@@ -1331,6 +1660,42 @@ class AutomationEdgeClient:
             return agents
         except Exception as exc:
             logger.error("T4: agent status check failed: %s", exc)
+            return []
+
+    def get_workflow_agents(self) -> list[dict]:
+        """Fetch workflow-to-agent mapping from T4.
+        
+        Endpoint: GET /workflows/agents
+        Returns list of dicts with 'workflow' and 'agents' list.
+        """
+        path = f"/{self.default_org_code}/workflows/agents" if self.default_org_code else "/workflows/agents"
+        try:
+            return self._authorized_request(
+                "GET",
+                path,
+                use_rest_prefix=True,
+                silent_on_status=[404]
+            ) or []
+        except Exception as exc:
+            logger.error(f"T4: get_workflow_agents failed: {exc}")
+            return []
+
+    def get_agents_workflows(self) -> list[dict]:
+        """Fetch agent-to-workflow mapping from T4.
+        
+        Endpoint: GET /agents/workflows
+        Returns list of dicts with 'agent' and 'workflows' list.
+        """
+        path = f"/{self.default_org_code}/agents/workflows" if self.default_org_code else "/agents/workflows"
+        try:
+            return self._authorized_request(
+                "GET",
+                path,
+                use_rest_prefix=True,
+                silent_on_status=[404]
+            ) or []
+        except Exception as exc:
+            logger.error(f"T4: get_agents_workflows failed: {exc}")
             return []
 
     def sync_workflow_catalog(self, workflows: Optional[list[dict]] = None) -> int:
@@ -1425,7 +1790,7 @@ class AutomationEdgeClient:
             if not workflows:
                 return 0
 
-            docs: list[dict] = []
+            docs: list[dict[str, Any]] = []
             for wf in workflows:
                 wf_id = str(wf.get("workflowId") or wf.get("id") or "").strip()
                 wf_name = str(wf.get("workflowName") or wf.get("name") or "").strip()
@@ -1485,7 +1850,8 @@ class AutomationEdgeClient:
 
                 # UNIFIED ID: tool-{tool_name} matches ToolDefinition.to_rag_document()
                 doc_id = f"tool-{display_name}"
-                docs.append({
+                # Cast to Any to avoid strict dict type mismatch on tags/metadata
+                docs.append(cast(Any, {
                     "id": doc_id,
                     "content": content,
                     "collection": "tools",
@@ -1502,7 +1868,7 @@ class AutomationEdgeClient:
                         "tier": tier,
                         "parameters": params, # STORE PARAMETERS FOR UI DISCOVERY
                     },
-                })
+                }))
 
             if not docs:
                 return 0
@@ -1679,7 +2045,7 @@ class AutomationEdgeClient:
 
     def list_agents(self, filters: Optional[dict] = None) -> list[dict]:
         """List all agents using the monitoring endpoint."""
-        params = {"type": "AGENT", "offset": 0, "size": 200}
+        params = {"type": "AGENT", "offset": 0, "size": 50}
         if filters:
             params.update(filters)
         

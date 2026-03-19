@@ -11,6 +11,8 @@ import json
 import logging
 import re
 from datetime import datetime
+from typing import cast, Any, List, Optional
+
 
 from google.genai import types
 
@@ -62,7 +64,7 @@ class Orchestrator:
         
         # Start tracking turn metrics
         import uuid
-        turn_id = f"turn-{uuid.uuid4().hex[:8]}"
+        turn_id = f"turn-{cast(Any, uuid.uuid4().hex)[:8]}"
         metrics_collector.start_turn(state.conversation_id, turn_id)
         
         try:
@@ -75,6 +77,46 @@ class Orchestrator:
                 if active:
                     active.touch()
                     tracker._persist_issue(active)
+
+                # Ask the LLM whether the user is responding to the approval
+                # or pivoting to something completely new.
+                intent_result = self.approval_gate.classify_approval_turn(
+                    user_message=user_message,
+                    pending_action=state.pending_action,
+                    pending_summary=state.pending_action_summary,
+                    conversation_messages=state.messages,
+                )
+                if intent_result.intent == ApprovalIntent.NEW_REQUEST:
+                    # Suspend the pending approval so the user can resume later
+                    state.suspended_flow = {
+                        "type": "approval",
+                        "pending_action": dict(state.pending_action or {}),
+                        "pending_action_summary": state.pending_action_summary,
+                    }
+                    state.pending_action = None
+                    state.pending_action_summary = ""
+                    state.phase = ConversationPhase.IDLE
+                    self.approval_gate.log_decision(state.conversation_id, "CANCELLED")
+                    logger.info(
+                        "approval_suspended conversation_id=%s intent=%s",
+                        state.conversation_id, intent_result.reason,
+                    )
+                    # Answer the new question and append a resume reminder
+                    inner = self._process_message(
+                        user_message, state, tracker, progress,
+                        feedback_agent_id=feedback_agent_id,
+                    )
+                    suspended_summary = state.suspended_flow.get(
+                        "pending_action_summary", "previous action"
+                    )
+                    reminder = (
+                        f"\n\n---\n"
+                        f"\u23f8\ufe0f A pending action is on hold: **{suspended_summary}**\n"
+                        f"Reply **continue** to review it again, or **drop it** to cancel."
+                    )
+                    state.save()
+                    return inner + reminder
+
                 response = self._handle_approval_response(
                     user_message, state, tracker
                 )
@@ -107,7 +149,7 @@ class Orchestrator:
             # ── Route based on classification ──
             if classification == MessageClassification.NEW_ISSUE:
                 tracker.create_issue(
-                    title=user_message[:80],
+                    title=cast(Any, user_message)[:80],
                     description=user_message,
                 )
                 state.phase = ConversationPhase.IDLE
@@ -132,7 +174,7 @@ class Orchestrator:
             elif classification == MessageClassification.RELATED_NEW:
                 parent_id = issue_id or tracker.active_issue_id
                 issue = tracker.create_issue(
-                    title=user_message[:80],
+                    title=cast(Any, user_message)[:80],
                     description=user_message,
                 )
                 if parent_id:
@@ -160,7 +202,7 @@ class Orchestrator:
                     response = (
                         f"This issue has now recurred {old_issue.recurrence_count} "
                         f"times. Previous resolution "
-                        f"({old_issue.resolution[:150]}) is not holding. "
+                        f"({cast(Any, old_issue.resolution)[:150]}) is not holding. "
                         f"I'm escalating to the operations team for a permanent fix."
                     )
                     state.save()
@@ -174,7 +216,7 @@ class Orchestrator:
                 if old_issue.resolution:
                     recurrence_note += (
                         f"Last time the resolution was: "
-                        f"{old_issue.resolution[:200]}. "
+                        f"{cast(Any, old_issue.resolution)[:200]}. "
                         f"Let me check if the same root cause applies.\n\n"
                     )
                 response = recurrence_note + self._process_message(
@@ -244,6 +286,10 @@ class Orchestrator:
 
             state.save()
             return response
+        except Exception as e:
+            logger.exception(f"Error in handle_message: {e}")
+            metrics_collector.record_turn_error(turn_id, str(e))
+            return f"I encountered a technical problem: {cast(Any, str(e))[:100]}. Please try again or contact support."
         finally:
             metrics_collector.end_turn(turn_id)
 
@@ -412,6 +458,8 @@ class Orchestrator:
                 # Only include error signatures if the issue is NOT resolved (Loop Fix)
                 if active_issue.status != IssueStatus.RESOLVED and active_issue.error_signatures:
                     context_parts.append(f"Errors: {', '.join(active_issue.error_signatures)}")
+                if active_issue.execution_ids:
+                    context_parts.append(f"ExecutionIDs: {', '.join(active_issue.execution_ids)}")
                 if context_parts:
                     enriched_query = f"{user_message} (Context: {' '.join(context_parts)})"
                     logger.info(f"RAG enriched query: {enriched_query}")
@@ -442,7 +490,7 @@ class Orchestrator:
                 incident_hits = f_incidents.result()
 
             context_block = self._format_rag_context(
-                tool_hits[:5], kb_hits, sop_hits, incident_hits
+                [tool_hits[i] for i in range(min(len(tool_hits), 5))], kb_hits, sop_hits, incident_hits
             )
 
             rag_tool_names = [
@@ -478,6 +526,9 @@ class Orchestrator:
                 state.add_message("assistant", param_followup)
                 state.is_agent_working = False
                 return param_followup
+
+            # Track whether a flow was just suspended so we can append a reminder below
+            _flow_was_suspended = bool(state.suspended_flow)
 
             preflight = self._preflight_workflow_param_collection(
                 user_message=user_message,
@@ -622,8 +673,9 @@ class Orchestrator:
 
                         if tool_name == "discover_tools":
                             found = (result.data or {}).get("tools", [])
-                            found_names = [t["name"] for t in found]
-                            new_names = [n for n in found_names if n not in active_tool_names]
+                            found_names: List[str] = [str(t.get("name") or "") for t in cast(List[Any], found) if isinstance(t, dict)]
+                            active_set: set[str] = cast(set[str], active_tool_names)
+                            new_names = [n for n in found_names if n and not active_set.__contains__(n)]
                             discovered_names.extend(new_names)
                             logger.info(
                                 "discover_tools result: found=%s new_to_active=%s",
@@ -642,11 +694,16 @@ class Orchestrator:
                                 tracker.add_workflow_to_issue(
                                     active_issue.issue_id, wf
                                 )
-                            if not result.success:
                                 tracker.add_error_signature(
                                     active_issue.issue_id,
-                                    result.error[:100],
+                                    cast(Any, result.error)[:100],
                                 )
+                            if isinstance(result.data, dict):
+                                eid = result.data.get("execution_id") or result.data.get("request_id")
+                                if eid:
+                                    tracker.add_execution_id_to_issue(
+                                        active_issue.issue_id, str(eid)
+                                    )
 
                         # Handle "Ask Again" pattern from Tool Result
                         result_payload = (
@@ -751,6 +808,19 @@ class Orchestrator:
                     final_response = self._filter_for_persona(
                         final_response, state
                     )
+                    # If a previous flow was suspended, remind the user they can resume
+                    if _flow_was_suspended and state.suspended_flow:
+                        wf = (
+                            state.suspended_flow.get("workflow_name")
+                            or state.suspended_flow.get("pending_action_summary")
+                            or "previous request"
+                        )
+                        final_response += (
+                            f"\n\n---\n"
+                            f"\u23f8\ufe0f The **{wf}** request is on hold.\n"
+                            f"Reply **continue** to pick up where we left off, "
+                            f"or **drop it** to cancel."
+                        )
                     state.add_message("assistant", final_response)
                     state.is_agent_working = False
                     state.phase = ConversationPhase.IDLE
@@ -799,7 +869,7 @@ class Orchestrator:
             if hint == "interrupt":
                 parts.append(
                     f"**Queued (urgent):** Processing your earlier message "
-                    f"now — \"{content[:150]}\""
+                    f"now — \"{cast(Any, content)[:150]}\""
                 )
                 state.add_message("user", content)
                 resp = self._process_message(content, state, tracker)
@@ -807,11 +877,11 @@ class Orchestrator:
             elif hint == "additive":
                 state.add_message("user", f"[Additional context] {content}")
                 parts.append(
-                    f"**Noted additional context:** {content[:200]}"
+                    f"**Noted additional context:** {cast(Any, content)[:200]}"
                 )
             elif hint == "new_request":
                 parts.append(
-                    f"**Queued request:** \"{content[:150]}\" — "
+                    f"**Queued request:** \"{cast(Any, content)[:150]}\" — "
                     f"I'll handle this next."
                 )
                 state.add_message("user", content)
@@ -1022,7 +1092,7 @@ class Orchestrator:
                     f"If the user might need follow-up assistance, you can suggest using `{ticket_tool}` with a 'Request' type."
                 )
 
-            context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {msg[:200]}"
+            context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {cast(Any, msg)[:200]}"
             raw = llm_client.chat(
                 (
                     "Based on the following action just completed by an AutomationEdge support agent, "
@@ -1047,7 +1117,7 @@ class Orchestrator:
                 # Inject a ticket creation suggestion as a second bullet
                 suggestions = [suggestions[0], "Raise a support ticket for further investigation."]
 
-            suggestions = suggestions[:2]
+            suggestions = [suggestions[i] for i in range(min(len(suggestions), 2))]
         except Exception:
             suggestions = []
 
@@ -1091,12 +1161,12 @@ class Orchestrator:
                 "Detect the language of the following text. "
                 "Return ONLY the ISO 639-1 language code (e.g. 'en', 'es', 'fr', 'hi', 'zh'). "
                 "If unsure, return 'en'.\n\n"
-                f"Text: {text[:200]}"
+                f"Text: {cast(Any, text)[:200]}"
             )
             # Use raw chat to avoid recursion
             response = llm_client.chat(prompt, system="You are a language detector.")
             lang = str(response).strip().lower()
-            return lang[:2].replace(".", "") if len(lang) >= 2 else "en"
+            return cast(Any, lang)[:2].replace(".", "") if len(lang) >= 2 else "en"
         except Exception:
             return "en"
 
@@ -1117,8 +1187,7 @@ Rules:
 5. Every tool call is audited.
 6. Read tool descriptions carefully. They may include use/avoid guidance,
    required parameters, and example arguments. Follow those hints exactly.
-7. Prefer specific typed tools (check_workflow_status, get_execution_logs,
-   etc.) - they have better validation and cleaner audit trails.
+7. Always prioritize `check_workflow_status` for ANY query about a bot's state, performance, or history. Followed by `get_execution_logs` for deep analysis.
 8. If no typed tool fits, use the general-purpose escape hatches:
    - call_ae_api: hit any AE REST endpoint directly
    - query_database: run read-only SQL against the ops database
@@ -1136,7 +1205,7 @@ Rules:
     - Use a DIFFERENT heading each time — rotate naturally among: "Here are a few options:", "You might also want to:", "Suggested next actions:", "Can I help with anything else?", "What's your next step?" — NEVER repeat the same heading in consecutive turns.
     - Keep suggestions relevant to the context (e.g., after a failure: offer log analysis; after a restart: offer status monitoring).
     - Match the persona: technical users get tool-specific options; business users get plain-language options.
-14. **TERMINOLOGY RULE**: "Bots" and "Workflows" are synonymous in this environment. If a user asks about a 'bot', use the workflow-related tools (like `check_workflow_status` or `trigger_workflow`).
+14. **TERMINOLOGY & STATUS-FIRST RULE**: "Bots" and "Workflows" are synonymous. If a user asks about a bot (even by a "friendly" or "natural language" name like 'Email Bot JD'), you MUST call `check_workflow_status` as your FIRST action unless they explicitly say "run", "start", or "trigger". Never assume the user wants to execute a bot just because they mentioned its name.
 15. **PROACTIVE PARAMETER DISCOVERY**: When `discover_tools` returns a workflow with `[ORCHESTRATOR_MAPPING]` in its description:
     - **TECHNICAL MAPPING MANDATE**: You MUST silently cross-reference the required parameters against the conversation history before generating a response.
     - **NO REDUNDANCY**: DO NOT list a parameter in your response if its value is already present in history (even if the user used similar terms like "starts tomorrow" or typos like "lleave").
@@ -1144,7 +1213,9 @@ Rules:
 16. **PROACTIVE DIAGNOSTIC DISCOVERY**: If the user asks for logs, status, or diagnostics but context is missing (like `agent_id` or `execution_id`), you MUST NOT ask the user for it first. Instead, call a discovery tool like `t4_check_agent_status`, `list_recent_failures`, or `ae.agent.analyze_logs` (with agent_id="") to find potential targets.
     - **NAME RESOLUTION**: If the user provides an agent NAME, call `ae.agent.get_details` or `ae.agent.analyze_logs` with that name. Tools are designed to resolve names to IDs automatically.
     - **AMBIGUITY RESOLUTION**: If discovery returns exactly one candidate, proceed with the investigation. If multiple are found, list them clearly with their names and IDs and ask the user to choose.
-17. **LOG DATE SELECTION RULE**: When log extraction (`analyze_agent_logs` or `get_execution_logs`) is requested, mentioned, or about to be called, you MUST first inform the user that logs default to the last 24 hours. You MUST explicitly ask the user if they want to specify a particular `from_date` or `to_date` (e.g., 'Do you want to check logs for a specific time range?') BEFORE or WHILE performing the extraction.
+17. **LOG DATE SELECTION RULE**: 
+    - **Agent Host Logs (`analyze_agent_logs`)**: When requested for an `agent_id`, you MUST inform the user that logs default to the last 24 hours and ask if they want to specify a particular `from_date` or `to_date` BEFORE performing extraction.
+    - **Workflow Execution Logs (`get_execution_logs`)**: When requested for a specific Request/Execution ID, you MUST NOT ask for a time range. These logs represent the entire lifecycle of that specific run and do not require date filters. Call the tool immediately.
 18. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
 
 Available tool categories: status, logs, file, remediation, dependency,
@@ -1182,7 +1253,8 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
         # knows which execution_id or workflow was found moments earlier.
         tool_context = ""
         if state.tool_call_log:
-            recent_calls = state.tool_call_log[-4:] # Check last 4 tools for deeper context
+            log_len = len(state.tool_call_log)
+            recent_calls = [state.tool_call_log[i] for i in range(max(0, log_len - 4), log_len)]
             # Expanded keys to catch Agent IDs and generic IDs
             interesting_keys = {
                 "execution_id", "workflow_name", "workflow", "request_id", 
@@ -1334,6 +1406,7 @@ CRITICAL RULES:
             return None
 
         execution_intent = self._is_execution_request(msg)
+
         # Only measure similarity from WF_ workflow hits — non-workflow tools
         # like ae.agent.get_details can score higher but are irrelevant here.
         best_wf_similarity = 0.0
@@ -1357,9 +1430,9 @@ CRITICAL RULES:
                 except Exception:
                     pass
 
-        # Lower threshold to 0.3: a WF_ score of ~0.343 is a meaningful match
-        # and should proceed to param collection even without explicit execute intent.
-        if not execution_intent and best_wf_similarity < 0.3:
+        # AE-102: Strictly respect execution intent.
+        # If the LLM says NOT_EXECUTE, don't proactively start param collection/blocking.
+        if not execution_intent:
             return None
 
         # Pre-filter to AutomationEdge workflow hits only.
@@ -1422,11 +1495,30 @@ CRITICAL RULES:
         elif isinstance(hit_params, list):
             for p in hit_params:
                 if isinstance(p, dict) and p.get("name"):
-                    name = p.get("name")
-                    if name not in combined_schema:
-                        combined_schema[name] = p
+                    pname = str(p.get("name")).strip()
+                    if pname and pname not in combined_schema:
+                        combined_schema[pname] = p
                     else:
-                        combined_schema[name].update(p)
+                        target_dict = combined_schema.get(pname)
+                        if isinstance(target_dict, dict):
+                            target_dict.update(p)
+
+        # AE-77: Intercept file upload parameters before collection starts.
+        # File upload is not supported in agentic chat yet.
+        file_params = [
+            name for name, p in combined_schema.items()
+            if str(p.get("type") or p.get("uiControlType") or "").strip().lower() in {"file", "attachment", "upload"}
+        ]
+        if file_params:
+            logger.info(f"Preflight: Workflow '{workflow_name}' matches but requires file upload ({file_params}). Rejecting.")
+            params_str = ", ".join(file_params)
+            return (
+                f"I've identified that the **{workflow_name}** bot requires a **document upload** "
+                f"for the following input(s): `{params_str}`. \n\n"
+                "Since document uploading is not supported in the chat interface yet, "
+                "please log in to the **AutomationEdge (AE) server** to trigger this bot manually. "
+                "I apologize for the inconvenience!"
+            )
 
         required_with_desc: list[tuple[str, str]] = []
         for name, p in combined_schema.items():
@@ -1593,8 +1685,8 @@ CRITICAL RULES:
                     f'User message: "{user_message}"'
                 ),
                 system=(
-                    "EXECUTE means user wants to run/create/trigger an automation workflow task. "
-                    "NOT_EXECUTE means status/help/info/troubleshooting/general chat."
+                    "EXECUTE means user wants to run, create, or trigger a new automation workflow. "
+                    "NOT_EXECUTE means the user is asking for logs, status, history, errors, or general help with an EXISTING execution or workflow."
                 ),
                 temperature=0.0,
                 max_tokens=8,
@@ -1603,8 +1695,82 @@ CRITICAL RULES:
         except Exception:
             return False
 
+    def _detect_context_switch(
+        self,
+        user_message: str,
+        workflow_name: str,
+        missing_params: list[str],
+        conversation_messages: list[dict],
+    ) -> bool:
+        """
+        Use the LLM to decide whether the user’s message is a new/unrelated
+        request rather than an answer to the pending parameter question.
+
+        Returns True  → context switch detected (suspend param collection).
+        Returns False → message is (or might be) a param value (keep collecting).
+
+        Deliberately avoids hard-coded keyword lists so detection is language-
+        and phrasing-agnostic.
+        """
+        context_tail = conversation_messages[-4:] if conversation_messages else []
+        history_block = "\n".join(
+            f"{m.get('role', 'unknown')}: {str(m.get('content', ''))[:200]}"
+            for m in context_tail
+        )
+        prompt = (
+            f"The bot was collecting inputs for a workflow named ‘{workflow_name}’.\n"
+            f"It is still waiting for: {', '.join(missing_params)}.\n"
+            f"Recent conversation:\n{history_block}\n\n"
+            f"The user just said: \"{user_message}\"\n\n"
+            "Is the user’s message a COMPLETELY NEW, UNRELATED request or question \n"
+            "(i.e. NOT providing the value(s) asked for)?\n"
+            "Reply with exactly one word: YES or NO."
+        )
+        try:
+            result = llm_client.chat(
+                prompt,
+                system=(
+                    "You classify user intent during multi-turn parameter collection. "
+                    "YES means the user has switched topic. "
+                    "NO means the user is still answering the parameter question."
+                ),
+                temperature=0.0,
+                max_tokens=5,
+            ).strip().upper()
+            is_switch = result.startswith("YES")
+            logger.debug(
+                "context_switch_check workflow=%s message=%r result=%s",
+                workflow_name, user_message[:60], result,
+            )
+            return is_switch
+        except Exception as exc:
+            logger.warning("_detect_context_switch LLM call failed: %s", exc)
+            return False
+
     def _continue_param_collection(self, user_message: str, state: ConversationState, tracker: IssueTracker | None = None) -> str | None:
         """Continue multi-turn param collection (ported from code_ref remediation flow)."""
+        # ── Handle resume / drop for a previously suspended flow ──
+        if state.suspended_flow:
+            msg_lower = user_message.strip().lower()
+            if msg_lower in {
+                "continue", "yes", "resume", "yes continue",
+                "pick up", "go back", "proceed",
+            }:
+                # Restore the suspended flow
+                state.param_collection = dict(
+                    state.suspended_flow.get("param_collection", {})
+                )
+                state.clear_suspended_flow()
+                logger.info("param_collection_resumed conversation_id=%s", state.conversation_id)
+                # Fall through so the next missing param is asked
+            elif msg_lower in {
+                "drop it", "cancel it", "skip it", "cancel",
+                "forget it", "no", "don't",
+            }:
+                state.clear_suspended_flow()
+                state.clear_param_collection()
+                return "Understood — I’ve cancelled that request. How else can I help?"
+
         pc = state.param_collection or {}
         workflow_name = str(pc.get("workflow_name") or "").strip()
         required = [p for p in (pc.get("required_params") or []) if p]
@@ -1615,6 +1781,24 @@ CRITICAL RULES:
         missing = [p for p in required if not collected.get(p)]
         if not missing:
             return None
+
+        # ── LLM-based context switch detection ──
+        # If the user is asking something completely unrelated, suspend the
+        # param flow so _process_message can answer the new question.
+        if self._detect_context_switch(
+            user_message, workflow_name, missing, state.messages
+        ):
+            state.suspended_flow = {
+                "type": "param_collection",
+                "param_collection": dict(state.param_collection),
+                "workflow_name": workflow_name,
+            }
+            state.clear_param_collection()
+            logger.info(
+                "param_collection_suspended workflow=%s conversation_id=%s",
+                workflow_name, state.conversation_id,
+            )
+            return None  # let _process_message handle the new question
 
         extracted = self._extract_params_from_user_message(user_message, missing, state.messages)
         normalized_required = {self._norm_param_key(p): p for p in required}
@@ -1647,6 +1831,22 @@ CRITICAL RULES:
             # Look up descriptions from the cached schema for better labeling.
             schema_list = get_ae_client().get_cached_workflow_parameters(workflow_name)
             schema_map = {p.get("name"): p for p in schema_list if isinstance(p, dict) and p.get("name")}
+            
+            # AE-77: Safety check even in continue phase
+            file_params = [
+                name for name, p in schema_map.items()
+                if str(p.get("type") or p.get("uiControlType") or "").strip().lower() in {"file", "attachment", "upload"}
+            ]
+            if file_params:
+                logger.info(f"Continue: Workflow '{workflow_name}' requires file upload. Rejecting.")
+                params_str = ", ".join(file_params)
+                return (
+                    f"I see that the **{workflow_name}** bot requires a **document upload** "
+                    f"for: `{params_str}`. \n\n"
+                    "Currently, I cannot process file uploads through this chat. "
+                    "Please go to the **AutomationEdge (AE) server** to trigger this bot manually. "
+                    "Thank you for your understanding!"
+                )
             
             for name in remaining:
                 # Always include the parameter even if not in local schema
@@ -1749,7 +1949,8 @@ CRITICAL RULES:
         context_str = ""
         if messages:
             # Get last 5 messages for context without overwhelming the prompt
-            context_history = messages[-6:-1] if len(messages) > 1 else []
+            m_len = len(messages)
+            context_history = [messages[i] for i in range(max(0, m_len - 6), max(0, m_len - 1))] if m_len > 1 else []
             history_lines = []
             for m in context_history:
                 role = "User" if m.get("role") == "user" else "Assistant"
@@ -1792,7 +1993,7 @@ CRITICAL RULES:
     def _norm_param_key(value: str) -> str:
         txt = "".join(ch for ch in str(value).lower() if ch.isalnum())
         if txt.endswith("s") and len(txt) > 3:
-            txt = txt[:-1]
+            txt = cast(Any, txt)[:-1]
         return txt
 
     def _start_or_update_param_collection(
@@ -1878,22 +2079,22 @@ CRITICAL RULES:
         # Feature: Prioritize tools so LLM sees them as the primary action source
         if tool_hits:
             tool_text = "\n".join(
-                f"- {h.get('content', '')[:150]}" for h in tool_hits[:5]
+                f"- {str(h.get('content', ''))}" for h in [tool_hits[i] for i in range(min(len(tool_hits), 5))]
             )
             sections.append(f"## Relevant Tools\n{tool_text}")
         if kb_hits:
             kb_text = "\n".join(
-                f"- {h.get('content', '')[:200]}" for h in kb_hits[:3]
+                f"- {str(h.get('content', ''))}" for h in [kb_hits[i] for i in range(min(len(kb_hits), 3))]
             )
             sections.append(f"## Knowledge Base\n{kb_text}")
         if sop_hits:
             sop_text = "\n".join(
-                f"- {h.get('content', '')[:200]}" for h in sop_hits[:3]
+                f"- {str(h.get('content', ''))}" for h in [sop_hits[i] for i in range(min(len(sop_hits), 3))]
             )
             sections.append(f"## SOPs\n{sop_text}")
         if incident_hits:
             inc_text = "\n".join(
-                f"- {h.get('content', '')[:250]}" for h in incident_hits[:3]
+                f"- {str(h.get('content', ''))}" for h in [incident_hits[i] for i in range(min(len(incident_hits), 3))]
             )
             sections.append(f"## Past Incidents & Resolutions\n{inc_text}")
         return "\n\n".join(sections) if sections else ""
@@ -1949,7 +2150,7 @@ CRITICAL RULES:
         
         sop_str = ""
         if sop_guidance:
-            sop_str = "\nGuidelines from SOPs:\n" + "\n".join([f"- {g}" for g in sop_guidance[:3]])
+            sop_str = "\nGuidelines from SOPs:\n" + "\n".join([f"- {g}" for g in [sop_guidance[i] for i in range(min(len(sop_guidance), 3))]])
 
         prompt = (
             f"You are a helpful RPA automation assistant. You are helping the user with: '{friendly_wf}'.\n"
@@ -1980,14 +2181,14 @@ CRITICAL RULES:
                 + "\n".join(lines)
             )
             if sop_guidance:
-                msg += "\n\nPlease follow these guidelines:\n" + "\n".join(f"- {g}" for g in sop_guidance[:3])
+                msg += "\n\nPlease follow these guidelines:\n" + "\n".join(f"- {g}" for g in [sop_guidance[i] for i in range(min(len(sop_guidance), 3))])
             return msg
 
     @staticmethod
     def _humanize_workflow_name(workflow_name: str) -> str:
         name = str(workflow_name or "").strip()
         if name.upper().startswith("WF_"):
-            name = name[3:]
+            name = str(name)[3:] if len(str(name)) > 3 else ""
         name = name.replace("_", " ").replace("-", " ").strip()
         return name.title() if name else "this workflow"
 
@@ -2006,7 +2207,7 @@ CRITICAL RULES:
         hints: list[str] = []
         required_norm = {self._norm_param_key(p): p for p in required_params}
 
-        for hit in sop_hits[:3]:
+        for hit in [sop_hits[i] for i in range(min(len(sop_hits), 3))]:
             content = str(hit.get("content") or "")
             if not content:
                 continue
@@ -2029,7 +2230,7 @@ CRITICAL RULES:
                             hints.append(cleaned)
                         break
 
-        return hints[:3]
+        return [hints[i] for i in range(min(len(hints), 3))]
 
     def _build_action_failure_response(self, *, action_tool: str, action_args: dict, error_text: str) -> str:
         """Natural fallback message with SOP-guided steps."""
@@ -2130,7 +2331,7 @@ CRITICAL RULES:
         steps = self._get_sop_troubleshooting_steps(user_message)
         if not steps:
             # Secondary parse directly from provided SOP hits.
-            for hit in sop_hits[:3]:
+            for hit in [sop_hits[i] for i in range(min(len(sop_hits), 3))]:
                 content = str(hit.get("content") or "")
                 for raw in content.splitlines():
                     line = raw.strip(" -*\t")
@@ -2148,7 +2349,7 @@ CRITICAL RULES:
         if steps:
             return (
                 "I couldn’t find a direct automation tool for this request, but here are SOP-based steps to resolve it:\n"
-                + "\n".join(f"- {s}" for s in steps[:3])
+                + "\n".join(f"- {s}" for s in [steps[i] for i in range(min(len(steps), 3))])
                 + "\n\nIf you want, I can also create an incident ticket for follow-up."
             )
 

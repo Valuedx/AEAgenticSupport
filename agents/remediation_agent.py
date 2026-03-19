@@ -83,12 +83,21 @@ class RemediationAgent(BaseAgent):
         )
 
         # ── Verification Loop (Feature 6.1) ──
-        # If we successfully executed a remediation tool, delegate back for verification.
-        last_calls = state.tool_call_log[-3:]
-        remediation_success = any(tc["success"] for tc in last_calls)
+        # 2. If remediation was successful, delegate to diagnostic_agent for verification.
+        # AE-55: Only delegate if a tool from the 'remediation' category was successful.
+        # Do NOT delegate if the tool requested user input (needs_user_input=True).
+        remedial_success = any(
+            t.get("success") is True and 
+            not t.get("needs_user_input") and
+            tool_registry.get_tool(t.get("tool", "") or "").category == "remediation"
+            for t in state.tool_call_log[-2:]
+        )
+        
+        if remedial_success:
+            logger.info("Remediation successful, requesting verification from diagnostic_agent")
         
         delegation = None
-        if remediation_success:
+        if remedial_success: # Changed from remediation_success to remedial_success
             logger.info("Remediation successful, delegating to diagnostic for verification")
             delegation = DelegationRequest(
                 target_agent_id="diagnostic_agent",

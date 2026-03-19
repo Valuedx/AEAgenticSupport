@@ -81,16 +81,16 @@ async def agent_get_status(agent_id: str) -> str:
             match = get_ae_client().get_agent(agent_id)
         except Exception:
             return {"error": f"Agent '{agent_id}' not found"}
-    state = (match.get("agentState") or match.get("state") or "UNKNOWN").upper()
-    return {
-        "agent_id": match.get("agentId") or match.get("id"),
-        "agent_name": match.get("agentName") or match.get("name"),
-        "state": state,
-        "is_healthy": state in ("CONNECTED", "RUNNING", "ACTIVE"),
-        "last_seen": match.get("lastSeen") or match.get("lastHeartbeat"),
-        "version": match.get("version") or match.get("agentVersion"),
-        "os": match.get("os") or match.get("operatingSystem"),
-    }
+        state = (match.get("agentState") or match.get("state") or "UNKNOWN").upper()
+        return {
+            "agent_id": match.get("agentId") or match.get("id"),
+            "agent_name": match.get("agentName") or match.get("name"),
+            "state": state,
+            "is_healthy": state in ("CONNECTED", "RUNNING", "ACTIVE"),
+            "last_seen": match.get("lastSeen") or match.get("lastHeartbeat"),
+            "version": match.get("version") or match.get("agentVersion"),
+            "os": match.get("os") or match.get("operatingSystem"),
+        }
 
 
 async def agent_get_details(agent_id: str) -> str:

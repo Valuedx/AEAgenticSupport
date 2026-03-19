@@ -20,6 +20,16 @@ from psycopg2.extras import Json
 
 logger = logging.getLogger("ops_agent.approval")
 
+# ---------------------------------------------------------------------------
+# Sensitive parameter keys that must never be shown to users.
+# Extend this list as new tools are added.
+# ---------------------------------------------------------------------------
+_SENSITIVE_PARAM_KEYS: frozenset[str] = frozenset({
+    "api_key", "token", "secret", "password", "auth", "credential",
+    "private_key", "access_key", "client_secret",
+})
+
+
 @dataclass
 class ApprovalRequest:
     tool_name: str
@@ -27,6 +37,7 @@ class ApprovalRequest:
     tier: str
     reason: str
     summary: str
+    request_id: str = ""  # populated by log_request; threaded into log_decision
 
 
 class ApprovalIntent(Enum):
@@ -51,59 +62,81 @@ class ApprovalIntentResult:
 class ApprovalGate:
     """Determines whether a tool call needs approval and manages the flow."""
 
-    _APPROVE_PATTERNS = [
-        r"\bapprove\b",
-        r"\bapproved\b",
-        r"\byes\b",
-        r"\byep\b",
-        r"\byeah\b",
-        r"\bsure\b",
-        r"\bok(?:ay)?\b",
-        r"\bgo ahead\b",
-        r"\bproceed\b",
-        r"\bdo it\b",
-        r"\brun it\b",
-        r"\bexecute\b",
-        r"\blet'?s do it\b",
+    # Pre-compiled patterns — compiled once at class definition time for
+    # performance and to avoid re-compiling on every classification call.
+    _APPROVE_RES: list[re.Pattern] = [
+        re.compile(p) for p in [
+            r"\bapprove\b",
+            r"\bapproved\b",
+            r"\byes\b",
+            r"\byep\b",
+            r"\byeah\b",
+            r"\bsure\b",
+            r"\bok(?:ay)?\b",
+            r"\bgo ahead\b",
+            r"\bproceed\b",
+            r"\bdo it\b",
+            r"\brun it\b",
+            r"\bexecute\b",
+            r"\blet'?s do it\b",
+        ]
     ]
-    _REJECT_PATTERNS = [
-        r"\breject\b",
-        r"\bden(?:y|ied)\b",
-        r"\bno\b",
-        r"\bnope\b",
-        r"\bdo not\b",
-        r"\bdon't\b",
-        r"\bnot now\b",
-        r"\bthat's risky\b",
-        r"\btoo risky\b",
+    _REJECT_RES: list[re.Pattern] = [
+        re.compile(p) for p in [
+            r"\breject\b",
+            r"\bden(?:y|ied)\b",
+            r"\bno\b",
+            r"\bnope\b",
+            r"\bdo not\b",
+            r"\bdon't\b",
+            r"\bnot now\b",
+            r"\bthat's risky\b",
+            r"\btoo risky\b",
+        ]
     ]
-    _CANCEL_PATTERNS = [
-        r"\bcancel\b",
-        r"\bnever mind\b",
-        r"\bforget it\b",
-        r"\babort\b",
-        r"\bhold on\b",
-        r"\bstop\b",
+    _CANCEL_RES: list[re.Pattern] = [
+        re.compile(p) for p in [
+            r"\bcancel\b",
+            r"\bnever mind\b",
+            r"\bforget it\b",
+            r"\babort\b",
+            r"\bhold on\b",
+            r"\bstop\b",
+        ]
     ]
+    _NEGATED_APPROVAL_RE = re.compile(
+        r"\b(?:don'?t|do not|not|never)\s+(?:approve|go ahead|proceed|do it|run it)\b"
+    )
+    _EXPLICIT_ALTERNATE_RE = re.compile(
+        r"\b(can you|could you|please)\b.*\b(check|investigate|look into|try|restart|disable|enable|fix)\b"
+    )
+    _ALTERNATE_WITH_COMMA_RE = re.compile(
+        r"\b(check|investigate|look into|try|restart|disable|enable|fix)\b"
+    )
+
     _QUESTION_CUES = (
         "what", "why", "how", "when", "where", "which", "who",
         "can you", "could you", "will this", "is this", "does this",
     )
-    _NEW_REQUEST_CUES = (
-        "instead", "also", "rather", "check", "investigate", "look into",
-        "try", "run", "restart", "disable", "enable", "fix",
-    )
+    _NEW_REQUEST_CUES_RES: list[re.Pattern] = [
+        re.compile(rf"\b{re.escape(cue)}\b") for cue in (
+            "instead", "also", "rather", "check", "investigate", "look into",
+            "try", "run", "restart", "disable", "enable", "fix",
+        )
+    ]
 
-    def needs_approval(self, tool_name: str, tier: str,
-                       params: dict) -> bool:
+    # ------------------------------------------------------------------
+    # Needs-approval logic
+    # ------------------------------------------------------------------
+
+    def needs_approval(self, tool_name: str, tier: str, params: dict) -> bool:
         if tool_name == "call_ae_api":
             method = str(params.get("method", "GET")).upper()
             if method == "GET":
                 return False
             return True
 
-        # Protected workflows should always require explicit approval,
-        # even for otherwise low-risk tools.
+        # Protected workflows always require explicit approval.
         workflow = params.get("workflow_name", "")
         if workflow in get_runtime_value(
             "PROTECTED_WORKFLOWS",
@@ -119,56 +152,111 @@ class ApprovalGate:
 
         return tier in tier_sets["required"]
 
-    def create_approval_request(self, conversation_id: str, tool_name: str, tier: str,
-                                params: dict,
-                                summary: str) -> ApprovalRequest:
+    # ------------------------------------------------------------------
+    # Request lifecycle
+    # ------------------------------------------------------------------
+
+    def create_approval_request(
+        self,
+        conversation_id: str,
+        tool_name: str,
+        tier: str,
+        params: dict,
+        summary: str,
+    ) -> ApprovalRequest:
         req = ApprovalRequest(
             tool_name=tool_name,
             tool_params=params,
             tier=tier,
-            reason=(
-                f"Tool '{tool_name}' is tier '{tier}' and requires "
-                f"user approval."
-            ),
+            reason=self._build_reason(tool_name, tier),
             summary=summary,
         )
-        # Log to DB
-        self.log_request(conversation_id, req)
+        req.request_id = self.log_request(conversation_id, req)
         return req
 
-    def log_request(self, conversation_id: str, request: ApprovalRequest):
-        """Record the initial approval request in the audit log."""
+    @staticmethod
+    def _build_reason(tool_name: str, tier: str) -> str:
+        return f"Tool '{tool_name}' is tier '{tier}' and requires user approval."
+
+    def log_request(self, conversation_id: str, request: ApprovalRequest) -> str:
+        """
+        Record the initial approval request in the audit log.
+        Returns the generated request_id so callers can thread it into
+        log_decision — this prevents multi-row ambiguity when a conversation
+        has more than one pending request.
+        """
+        req_id = self._generate_request_id()
         try:
-            req_id = self._generate_request_id()
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO approval_audit_log 
-                        (conversation_id, request_id, tool_name, tool_params, status, tier, summary)
+                    cur.execute(
+                        """
+                        INSERT INTO approval_audit_log
+                            (conversation_id, request_id, tool_name,
+                             tool_params, status, tier, summary)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """, (conversation_id, req_id, request.tool_name, Json(request.tool_params), 'PENDING', request.tier, request.summary))
+                        """,
+                        (
+                            conversation_id,
+                            req_id,
+                            request.tool_name,
+                            Json(request.tool_params),
+                            "PENDING",
+                            request.tier,
+                            request.summary,
+                        ),
+                    )
                 conn.commit()
         except Exception as e:
-            logger.warning(f"Failed to log approval request: {e}")
+            logger.warning("Failed to log approval request: %s", e)
+        return req_id
 
-    def log_decision(self, conversation_id: str, status: str, approver_id: str = ""):
-        """Record the decision (APPROVED/REJECTED/CANCELLED) in the audit log."""
+    def log_decision(
+        self,
+        conversation_id: str,
+        request_id: str,
+        status: str,
+        approver_id: str = "",
+    ) -> None:
+        """
+        Record the decision (APPROVED / REJECTED / CANCELLED) in the audit log.
+
+        Uses both conversation_id and request_id in the WHERE clause to ensure
+        exactly one row is updated — guards against stale-row overwrites when a
+        conversation has had multiple approval cycles, or when session IDs are
+        reused across different users/sessions.
+
+        Also constrains to rows created in the last 24 hours as an extra
+        safeguard against accidentally touching archived audit records.
+        """
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # We update the latest pending request for this conversation
-                    cur.execute("""
-                        UPDATE approval_audit_log 
-                        SET status = %s, approver_id = %s, decided_at = NOW()
-                        WHERE conversation_id = %s AND status = 'PENDING'
-                    """, (status, approver_id, conversation_id))
+                    cur.execute(
+                        """
+                        UPDATE approval_audit_log
+                        SET    status      = %s,
+                               approver_id = %s,
+                               decided_at  = NOW()
+                        WHERE  conversation_id = %s
+                          AND  request_id      = %s
+                          AND  status          = 'PENDING'
+                          AND  created_at      > NOW() - INTERVAL '24 hours'
+                        """,
+                        (status, approver_id, conversation_id, request_id),
+                    )
                 conn.commit()
         except Exception as e:
-            logger.warning(f"Failed to log approval decision: {e}")
+            logger.warning("Failed to log approval decision: %s", e)
 
-    def _generate_request_id(self) -> str:
+    @staticmethod
+    def _generate_request_id() -> str:
         import uuid
         return f"apprv-{uuid.uuid4().hex[:8]}"
+
+    # ------------------------------------------------------------------
+    # User-facing prompt formatting
+    # ------------------------------------------------------------------
 
     def format_approval_prompt(self, request: ApprovalRequest) -> str:
         lines = [
@@ -179,20 +267,31 @@ class ApprovalGate:
             "",
             "Parameters:",
         ]
-        for k, v in request.tool_params.items():
+        safe = self._redact_sensitive_params(request.tool_params)
+        for k, v in safe.items():
             lines.append(f"  {k}: {v}")
         lines.append("")
         lines.append("Reply **approve** to proceed or **reject** to cancel.")
         return "\n".join(lines)
 
-    def parse_approval_response(self, user_message: str) -> Optional[bool]:
-        """Returns True for approve, False for reject, None if unrecognised."""
-        result = self.classify_approval_turn(user_message)
-        if result.intent == ApprovalIntent.APPROVE:
-            return True
-        if result.intent == ApprovalIntent.REJECT:
-            return False
-        return None
+    @staticmethod
+    def _redact_sensitive_params(params: dict) -> dict:
+        """
+        Return a copy of params with values for sensitive keys replaced by
+        '[REDACTED]'.  Prevents API tokens, passwords, and similar secrets
+        from being shown to users in the approval prompt.
+        """
+        redacted = {}
+        for k, v in params.items():
+            if k.lower() in _SENSITIVE_PARAM_KEYS:
+                redacted[k] = "[REDACTED]"
+            else:
+                redacted[k] = v
+        return redacted
+
+    # ------------------------------------------------------------------
+    # Intent classification — public API
+    # ------------------------------------------------------------------
 
     def classify_approval_turn(
         self,
@@ -203,8 +302,10 @@ class ApprovalGate:
     ) -> ApprovalIntentResult:
         """
         Classify a user turn while awaiting approval.
-        Returns a structured intent including approval, rejection,
-        clarification, cancellation, new request, or unknown.
+
+        Returns a structured ApprovalIntentResult.  Callers should prefer this
+        method over parse_approval_response when they need to distinguish
+        between clarify / cancel / new_request and a plain unknown.
         """
         rule_based = self._classify_rule_based(user_message)
         if rule_based.intent != ApprovalIntent.UNKNOWN and rule_based.confidence >= 0.9:
@@ -219,12 +320,36 @@ class ApprovalGate:
             pending_summary=pending_summary,
             conversation_messages=conversation_messages,
         )
-        if llm_based:
-            return llm_based
-        return rule_based
+        return llm_based if llm_based else rule_based
 
-    def format_clarification_prompt(self, pending_action: Optional[dict],
-                                    pending_summary: str) -> str:
+    def parse_approval_response(self, user_message: str) -> Optional[ApprovalIntentResult]:
+        """
+        Classify a user message and return the full ApprovalIntentResult, or
+        None if the intent could not be determined.
+
+        Callers can inspect result.intent for APPROVE / REJECT / CLARIFY /
+        CANCEL / NEW_REQUEST rather than collapsing everything non-approve /
+        non-reject into a silent None.  A simple boolean check is still
+        possible:
+
+            result = gate.parse_approval_response(msg)
+            if result and result.intent == ApprovalIntent.APPROVE:
+                ...
+        """
+        result = self.classify_approval_turn(user_message)
+        if result.intent == ApprovalIntent.UNKNOWN:
+            return None
+        return result
+
+    # ------------------------------------------------------------------
+    # Clarification prompt
+    # ------------------------------------------------------------------
+
+    def format_clarification_prompt(
+        self,
+        pending_action: Optional[dict],
+        pending_summary: str,
+    ) -> str:
         if not pending_action:
             return (
                 "There is no pending approval action right now. "
@@ -237,16 +362,23 @@ class ApprovalGate:
             f"Summary: {pending_summary or 'No summary available'}",
             "Parameters:",
         ]
-        for k, v in (pending_action.get("args") or {}).items():
+        safe = self._redact_sensitive_params(pending_action.get("args") or {})
+        for k, v in safe.items():
             lines.append(f"  {k}: {v}")
-        lines.extend([
-            "",
-            "Reply in natural language:",
-            "- approve (for example: 'yes, proceed')",
-            "- reject (for example: 'no, don't do this')",
-            "- or ask another question.",
-        ])
+        lines.extend(
+            [
+                "",
+                "Reply in natural language:",
+                "- approve (for example: 'yes, proceed')",
+                "- reject (for example: 'no, don't do this')",
+                "- or ask another question.",
+            ]
+        )
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Rule-based classification
+    # ------------------------------------------------------------------
 
     def _classify_rule_based(self, user_message: str) -> ApprovalIntentResult:
         msg = (user_message or "").strip()
@@ -259,9 +391,9 @@ class ApprovalGate:
                 normalized_message=msg_lower,
             )
 
-        has_cancel = self._has_any_pattern(msg_lower, self._CANCEL_PATTERNS)
-        has_reject = self._has_any_pattern(msg_lower, self._REJECT_PATTERNS)
-        has_approve = self._has_any_pattern(msg_lower, self._APPROVE_PATTERNS)
+        has_cancel = self._has_any_compiled(msg_lower, self._CANCEL_RES)
+        has_reject = self._has_any_compiled(msg_lower, self._REJECT_RES)
+        has_approve = self._has_any_compiled(msg_lower, self._APPROVE_RES)
         looks_like_question = self._looks_like_question(msg_lower)
         has_new_request = self._looks_like_new_request(msg_lower)
 
@@ -290,6 +422,8 @@ class ApprovalGate:
                 normalized_message=msg_lower,
             )
 
+        # Check approve BEFORE new_request so "ok, approve this instead" is
+        # classified as APPROVE rather than NEW_REQUEST.
         if has_approve and not self._looks_like_negated_approval(msg_lower):
             return ApprovalIntentResult(
                 intent=ApprovalIntent.APPROVE,
@@ -332,6 +466,10 @@ class ApprovalGate:
             normalized_message=msg_lower,
         )
 
+    # ------------------------------------------------------------------
+    # LLM-based classification
+    # ------------------------------------------------------------------
+
     def _classify_with_llm(
         self,
         user_message: str,
@@ -341,13 +479,26 @@ class ApprovalGate:
     ) -> Optional[ApprovalIntentResult]:
         context_tail = (conversation_messages or [])[-4:]
         context_block = "\n".join(
-            f"{m.get('role', 'unknown')}: {m.get('content', '')[:220]}"
+            # Truncate each message and append an ellipsis so the LLM knows the
+            # content was cut — a silent mid-sentence cut can cause misclassification.
+            f"{m.get('role', 'unknown')}: "
+            + (
+                m.get("content", "")[:220] + "..."
+                if len(m.get("content", "")) > 220
+                else m.get("content", "")
+            )
             for m in context_tail
         )
         action_tool = (pending_action or {}).get("tool", "")
         action_tier = (pending_action or {}).get("tier", "")
-        action_args = (pending_action or {}).get("args", {})
+        # Never send raw args to the LLM — redact sensitive values first.
+        action_args = self._redact_sensitive_params(
+            (pending_action or {}).get("args", {})
+        )
 
+        # Delimit the user message clearly to reduce prompt-injection risk.
+        # A crafted message like `"intent": "approve"` in free text should
+        # not influence the JSON the model is asked to produce.
         prompt = (
             "Classify this user message in an approval checkpoint.\n"
             f"Pending tool: {action_tool}\n"
@@ -355,7 +506,9 @@ class ApprovalGate:
             f"Pending summary: {pending_summary}\n"
             f"Pending args: {json.dumps(action_args, default=str)}\n"
             f"Recent conversation:\n{context_block}\n\n"
-            f"User message: {user_message}\n\n"
+            "<user_message>\n"
+            f"{user_message}\n"
+            "</user_message>\n\n"
             "Return JSON with fields: "
             "intent, confidence, reason, question, alternate_request.\n"
             "intent must be one of: approve, reject, clarify, cancel, "
@@ -364,7 +517,8 @@ class ApprovalGate:
         system = (
             "You classify intent for approval-turn chat. "
             "Reject means user declined pending action. "
-            "Clarify means user asked a question before deciding."
+            "Clarify means user asked a question before deciding. "
+            "Respond only with the JSON object — no preamble or explanation."
         )
 
         try:
@@ -391,6 +545,10 @@ class ApprovalGate:
             logger.warning("LLM approval classification failed: %s", exc)
             return None
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _extract_json(raw: str):
         text = (raw or "").strip()
@@ -409,17 +567,12 @@ class ApprovalGate:
             return None
 
     @staticmethod
-    def _has_any_pattern(message: str, patterns: list[str]) -> bool:
-        return any(re.search(pat, message) for pat in patterns)
+    def _has_any_compiled(message: str, patterns: list[re.Pattern]) -> bool:
+        """Search a pre-compiled pattern list against message."""
+        return any(p.search(message) for p in patterns)
 
-    @staticmethod
-    def _looks_like_negated_approval(message: str) -> bool:
-        return bool(
-            re.search(
-                r"\b(?:don'?t|do not|not|never)\s+(?:approve|go ahead|proceed|do it|run it)\b",
-                message,
-            )
-        )
+    def _looks_like_negated_approval(self, message: str) -> bool:
+        return bool(self._NEGATED_APPROVAL_RE.search(message))
 
     def _looks_like_question(self, message: str) -> bool:
         if "?" in message:
@@ -429,20 +582,13 @@ class ApprovalGate:
     def _looks_like_new_request(self, message: str) -> bool:
         if " instead" in message:
             return True
-        return any(re.search(rf"\b{re.escape(cue)}\b", message) for cue in self._NEW_REQUEST_CUES)
+        return any(p.search(message) for p in self._NEW_REQUEST_CUES_RES)
 
-    @staticmethod
-    def _has_explicit_alternate_request(message: str) -> bool:
+    def _has_explicit_alternate_request(self, message: str) -> bool:
         if any(marker in message for marker in ("instead", "rather", "also")):
             return True
-        if re.search(
-            r"\b(can you|could you|please)\b.*\b(check|investigate|look into|try|restart|disable|enable|fix)\b",
-            message,
-        ):
+        if self._EXPLICIT_ALTERNATE_RE.search(message):
             return True
-        if "," in message and re.search(
-            r"\b(check|investigate|look into|try|restart|disable|enable|fix)\b",
-            message,
-        ):
+        if "," in message and self._ALTERNATE_WITH_COMMA_RE.search(message):
             return True
         return False

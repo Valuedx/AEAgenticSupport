@@ -272,14 +272,34 @@ class AgentRouter:
                 )
 
                 # Compose: prepend original agent's partial response
-                if result.response.strip():
-                    combined_response = (
-                        f"{result.response}\n\n"
-                        f"---\n\n"
-                        f"{delegate_result.response}"
-                    )
+                r1 = result.response.strip()
+                r2 = delegate_result.response.strip()
+
+                # Heuristic to avoid duplicate greetings/intros
+                # If both responses start with common greeting phrases, try to remove the second one.
+                greetings = ["hello", "hi", "hey", "sure", "absolutely", "certainly", "happy to help", "i can help", "yes", "okay"]
+                r1_lower = r1.lower()
+                r2_lower = r2.lower()
+
+                # Check if both responses start with a greeting
+                r1_starts_with_greeting = any(r1_lower.startswith(g) for g in greetings)
+                r2_starts_with_greeting = any(r2_lower.startswith(g) for g in greetings)
+
+                combined_response = ""
+                if r1_starts_with_greeting and r2_starts_with_greeting:
+                    # If both start with a greeting, try to keep only the first one's greeting
+                    # and combine the rest, or just use the second response if it's more substantial.
+                    # For simplicity, if r1 is just a greeting, we might prioritize r2.
+                    # Otherwise, we'll combine with a separator.
+                    if len(r1) < 30 and any(r1_lower == g for g in greetings): # r1 is a short, exact greeting
+                        combined_response = r2
+                    else:
+                        # If r1 has more content than just a greeting, combine them
+                        combined_response = f"{r1}\n\n---\n\n{r2}"
+                elif r1:
+                    combined_response = f"{r1}\n\n---\n\n{r2}"
                 else:
-                    combined_response = delegate_result.response
+                    combined_response = r2
 
                 return AgentResult(
                     response=combined_response,

@@ -63,6 +63,7 @@ class ConversationState:
         self.pending_action: Optional[dict] = None
         self.pending_action_summary: str = ""
         self.param_collection: dict = {}
+        self.suspended_flow: dict = {}   # snapshot of a suspended param/approval flow
         self.rca_data: Optional[dict] = None
 
         # Feature 2.3: Metadata
@@ -149,6 +150,11 @@ class ConversationState:
         self.param_collection = {}
         logger.debug("Parameter collection cleared for conversation %s", self.conversation_id)
 
+    def clear_suspended_flow(self):
+        """Discard any suspended param-collection or approval flow."""
+        self.suspended_flow = {}
+        logger.debug("Suspended flow cleared for conversation %s", self.conversation_id)
+
     # ── Persistence ──
 
     def save(self):
@@ -188,6 +194,7 @@ class ConversationState:
                         "pending_action": self.pending_action,
                         "pending_action_summary": self.pending_action_summary,
                         "param_collection": self.param_collection,
+                        "suspended_flow": self.suspended_flow,
                         "preferred_language": self.preferred_language,
                         "user": {
                             "user_name": self.user_name,
@@ -255,6 +262,7 @@ class ConversationState:
                             "pending_action_summary", ""
                         )
                         state.param_collection = data.get("param_collection", {}) or {}
+                        state.suspended_flow = data.get("suspended_flow", {}) or {}
                         state.preferred_language = data.get("preferred_language", "en")
                         for f_data in data.get("findings", []):
                             state.findings.append(Finding(**f_data))

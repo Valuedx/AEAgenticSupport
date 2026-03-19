@@ -48,6 +48,7 @@ class Issue:
     status: IssueStatus = IssueStatus.ACTIVE
     workflows_involved: list[str] = field(default_factory=list)
     error_signatures: list[str] = field(default_factory=list)
+    execution_ids: list[str] = field(default_factory=list)
     root_cause: str = ""
     resolution: str = ""
     created_at: str = field(
@@ -226,6 +227,12 @@ class IssueTracker:
         for signal in signals["status_check"]:
             if signal in msg_lower:
                 return MessageClassification.STATUS_CHECK, None
+
+        for signal in ("resolve issue", "close issue", "issue resolved", "problem fixed"):
+            if signal in msg_lower:
+                if self.active_issue_id:
+                    self.resolve_issue(self.active_issue_id, "Resolved by user request")
+                    return MessageClassification.STATUS_CHECK, self.active_issue_id
 
         for signal in signals["new_issue"]:
             if signal in msg_lower:
@@ -493,6 +500,12 @@ If no issue_id applies: CLASSIFICATION|none"""
         if issue_id in self.issues:
             self.issues[issue_id].findings.append(finding)
             self._persist_issue(self.issues[issue_id])
+
+    def add_execution_id_to_issue(self, issue_id: str, exec_id: str):
+        if issue_id in self.issues:
+            if exec_id not in self.issues[issue_id].execution_ids:
+                self.issues[issue_id].execution_ids.append(exec_id)
+                self._persist_issue(self.issues[issue_id])
 
     def get_issue_findings(self, issue_id: str) -> list[dict]:
         if issue_id in self.issues:

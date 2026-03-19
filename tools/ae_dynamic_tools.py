@@ -262,6 +262,13 @@ def extract_dynamic_tool_mapping(
         )
         or ""
     ).strip()
+    
+    # Force avoid_when for status queries to steer toward check_workflow_status
+    status_crit = "the user is only asking for the status, history, or last run of this bot (not explicitly asking to run/trigger it now)."
+    if avoid_when:
+        avoid_when = f"{avoid_when} Also avoid if {status_crit}"
+    else:
+        avoid_when = f"Avoid if {status_crit}"
     input_examples = _coerce_examples(
         _get_first_value(
             cfg,

@@ -199,6 +199,13 @@ class MessageGateway:
         """
         router = self.agent_router
 
+        # ── Fix: Skip router during approval phase ──
+        # Specialist agents currently lack the approval handling logic.
+        # If we are AWAITING_APPROVAL, we MUST go to the Orchestrator which
+        # owns the approval gate logic.
+        if state.phase == ConversationPhase.AWAITING_APPROVAL:
+            router = None
+
         if router:
             try:
                 result = router.route(

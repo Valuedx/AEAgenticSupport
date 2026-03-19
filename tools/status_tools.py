@@ -14,27 +14,50 @@ logger = logging.getLogger("ops_agent.tools.status")
 def check_workflow_status(workflow_name: str = "", status: str = "") -> dict:
     """Check the status of bots/workflows, including a 24h summary and filtering.
     
-    If workflow_name is provided, checks that specific bot.
+    If workflow_name is provided, checks that specific bot using semantic resolution if needed.
     If workflow_name is empty, provides a global summary for all bots.
     """
     client = get_ae_client()
     status_filter = str(status or "").strip()
-    name_to_check = str(workflow_name or "").strip()
+    query_name = str(workflow_name or "").strip()
     
-    # Resolve endpoint variations via client fallback.
-    # Now fetches up to 100 to provide a good 24h history.
+    # 1. Detect if query_name is a numeric Request ID
+    if query_name.isdigit() and len(query_name) > 4:  # Likely a request ID, not a short workflow ID
+        try:
+            instance = client.get_workflow_instance_by_id(query_name)
+            if instance:
+                return _format_single_instance_response(instance)
+        except Exception as exc:
+            logger.warning(f"Direct request ID lookup failed for {query_name}: {exc}")
+
+    # 2. Resolve technical name
+    resolved_name = ""
+    if query_name:
+        # Try local cache first (exact/WF_ prefix variants)
+        resolved_name = client.resolve_cached_workflow_name(query_name)
+        
+        # If not found, try RAG/Semantic resolution for fuzzy/partial names
+        if not resolved_name:
+            logger.info(f"Fuzzy match not found for '{query_name}', trying RAG resolution...")
+            resolved_name = client.resolve_workflow_via_rag(query_name)
+            
+    name_to_check = resolved_name or query_name
+    
     try:
+        # Increase limit to 300 to find older executions
         instances = client.get_workflow_instances(
             name_to_check, 
-            limit=100,
+            limit=300,
             status_filter=status_filter if status_filter else None
         )
     except Exception as exc:
-        logger.warning("check_workflow_status fetch failed for %s: %s", name_to_check or "GLOBAL", exc)
+        msg = f"Failed to fetch status for '{name_to_check or 'All Bots'}': {exc}"
+        logger.warning(msg)
         return {
             "workflow_name": name_to_check or "All Bots",
             "status": "UNKNOWN",
             "error_message": str(exc),
+            "message": msg
         }
 
     if not instances:
@@ -49,12 +72,12 @@ def check_workflow_status(workflow_name: str = "", status: str = "") -> dict:
             "message": msg,
         }
 
-    # Latest instance details
+    # Latest instance details - ALWAYS present regardless of 24h
     latest = instances[0]
+    latest_ts = _parse_timestamp(latest.get("createdDate") or latest.get("started_at"))
     
     # 24-hour summary logic
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    # Full list of AE statuses as requested by user
     summary = {
         "New": 0, "InProgress": 0, "Complete": 0, "Failure": 0, 
         "ExecutionStarted": 0, "Retry": 0, "Expired": 0, "Diverted": 0, 
@@ -67,54 +90,96 @@ def check_workflow_status(workflow_name: str = "", status: str = "") -> dict:
         ts = _parse_timestamp(
             item.get("createdDate") or item.get("started_at")
         )
-        
         item_status = item.get("status", "Unknown")
-        
+        # Keep history of recent ones as requested by the user
+        if len(recent_list) < 50:
+            recent_list.append({
+                "id": item.get("id") or item.get("automationRequestId"),
+                "bot_name": item.get("workflowName") or (item.get("workflowConfiguration") or {}).get("name") or "Unknown Bot",
+                "status": item_status,
+                "time": str(ts) if ts else "Unknown",
+                "agent": item.get("agentName")
+            })
+
         if ts and ts >= cutoff:
             total_24h += 1
             if item_status in summary:
                 summary[item_status] += 1
             else:
                 summary[item_status] = summary.get(item_status, 0) + 1
-            
-            # Keep a small list of very recent ones for detail
-            if len(recent_list) < 5:
-                # Include workflow name for every entry for clarity
-                recent_list.append({
-                    "id": item.get("id") or item.get("automationRequestId"),
-                    "bot_name": item.get("workflowName") or (item.get("workflowConfiguration") or {}).get("name") or "Unknown Bot",
-                    "status": item_status,
-                    "time": str(ts) if ts else "Unknown",
-                    "agent": item.get("agentName")
-                })
 
-    # Clean up empty summary keys for cleaner output
     active_summary = {k: v for k, v in summary.items() if v > 0}
 
-    # Resolve actual bot name from instance configuration if possible (T4 support)
-    # If it's a global check, we call it "All Bots" to avoid confusion with the first matching bot.
-    resolved_name = "All Bots" if not name_to_check else (
-        latest.get("workflowName") or 
-        (latest.get("workflowConfiguration") or {}).get("name") or 
-        name_to_check
-    )
+    # Resolve display name
+    display_name = name_to_check if name_to_check else "All Bots"
+    if latest:
+        display_name = (
+            latest.get("workflowName") or 
+            (latest.get("workflowConfiguration") or {}).get("name") or 
+            display_name
+        )
+
+    # User message construction
+    if query_name:
+        latest_status = latest.get("status")
+        time_str = f"on {latest_ts.strftime('%Y-%m-%d %H:%M:%S UTC')}" if latest_ts else "recently"
+        msg = f"The absolute latest execution for bot '**{display_name}**' was {time_str} and its status is '**{latest_status}**'."
+        if latest_ts and latest_ts < cutoff:
+            msg += f" (Note: This run is older than 24 hours)."
+        msg += f" You can use execution ID `{latest.get('id') or latest.get('automationRequestId')}` to fetch logs if needed."
+    else:
+        msg = f"Global status summary for all bots (Last 24 hours)."
 
     return {
-        "bot_name": resolved_name,
-        "workflow_name": resolved_name,
-        "is_global_check": not bool(name_to_check),
+        "bot_name": display_name,
+        "workflow_name": display_name,
+        "is_global_check": not bool(query_name),
         "latest_status": latest.get("status"),
         "latest_execution": {
             "id": latest.get("id") or latest.get("automationRequestId"),
             "bot_name": latest.get("workflowName") or (latest.get("workflowConfiguration") or {}).get("name") or "Unknown Bot",
             "status": latest.get("status"),
+            "timestamp": str(latest_ts) if latest_ts else "Unknown"
         },
         "latest_execution_id": latest.get("id") or latest.get("automationRequestId"),
         "last_24h_summary": active_summary,
         "total_executions_24h": total_24h,
         "recent_executions": recent_list,
         "status_filter_applied": status_filter or "None",
-        "message": f"Results for {'bot ' + resolved_name if name_to_check else 'all bots'} (Last 24 hours)"
+        "message": msg
+    }
+
+
+def _format_single_instance_response(instance: dict) -> dict:
+    """Helper to format a single T4 instance into the standard status response."""
+    ts = _parse_timestamp(instance.get("createdDate") or instance.get("started_at"))
+    status = instance.get("status", "Unknown")
+    bot_name = (
+        instance.get("workflowName") or 
+        (instance.get("workflowConfiguration") or {}).get("name") or 
+        "Unknown Bot"
+    )
+    request_id = instance.get("id") or instance.get("automationRequestId")
+    
+    time_str = f"on {ts.strftime('%Y-%m-%d %H:%M:%S UTC')}" if ts else "recently"
+    # Ensure request_id is not empty
+    rid_str = f"`{request_id}`" if request_id else "unknown"
+    msg = f"Execution ID {rid_str} for bot '**{bot_name}**' was found. Its current status is '**{status}**' ({time_str})."
+    
+    return {
+        "bot_name": bot_name,
+        "workflow_name": bot_name,
+        "status": status,
+        "latest_status": status,
+        "latest_execution": {
+            "id": request_id,
+            "bot_name": bot_name,
+            "status": status,
+            "timestamp": str(ts) if ts else "Unknown"
+        },
+        "latest_execution_id": request_id,
+        "message": msg,
+        "is_single_search": True
     }
 
 
@@ -143,81 +208,68 @@ def _parse_timestamp(value):
 
 def list_recent_failures(
     hours: int = 24,
-    limit: int = 20,
+    limit: int = 300,  # Increased default for deep search
     workflow_name: str = "",
 ) -> dict:
     client = get_ae_client()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(hours, 1))
-    workflow_name = str(workflow_name or "").strip()
+    query_name = str(workflow_name or "").strip()
 
+    # 1. Resolve technical name if query_name provided
+    resolved_name = ""
+    if query_name:
+        resolved_name = client.resolve_cached_workflow_name(query_name)
+        if not resolved_name:
+            logger.info(f"Fuzzy match not found for '{query_name}' in failures check, trying RAG...")
+            resolved_name = client.resolve_workflow_via_rag(query_name)
+            
+    name_to_check = resolved_name or query_name
     data = []
     last_error = ""
 
-    if workflow_name:
+    if name_to_check:
         try:
+            # Benefiting from the new paging logic in AutomationEdgeClient
             data = client.get_workflow_instances(
-                workflow_name,
-                limit=max(limit * 3, 20),
+                name_to_check,
+                limit=limit,
+                status_filter="Failure"
             )
             last_error = ""
         except Exception as exc:
             last_error = str(exc)
 
     if not data:
-        try:
-            resp = client.request(
-                "GET",
-                "/api/v1/failures/recent",
-                use_rest_prefix=False,
-                silent_on_status=[400, 403, 404],
-            )
-            if isinstance(resp, dict):
-                data = (
-                    resp.get("failures")
-                    or resp.get("executions")
-                    or resp.get("data")
-                    or []
-                )
-            elif isinstance(resp, list):
-                data = resp
-            last_error = ""
-        except Exception as exc:
-            last_error = str(exc)
-
-    # T4-compatible fallbacks for workflow instances listing.
-    candidates = [
-        ("POST", "/workflowinstances", True),
-        ("GET", "/workflowinstances", True),
-        ("POST", "/workflowinstances", False),
-        ("GET", "/workflowinstances", False),
-    ]
-    client_org = str(getattr(client, "default_org_code", "") or "").strip()
-    if client_org:
-        candidates[1:1] = [
-            ("POST", f"/{client_org}/workflowinstances", True),
-            ("GET", f"/{client_org}/workflowinstances", True),
-        ]
-
-    if not data:
-        for method, path, use_rest_prefix in candidates:
+        # 2. Try global failures modern API if no specific name or previous search failed
+        if not name_to_check:
             try:
                 resp = client.request(
-                    method,
-                    path,
-                    params={"offset": 0, "size": max(limit * 3, 20), "order": "desc"},
-                    use_rest_prefix=use_rest_prefix,
+                    "GET",
+                    "/api/v1/failures/recent",
+                    use_rest_prefix=False,
                     silent_on_status=[400, 403, 404],
                 )
                 if isinstance(resp, dict):
-                    data = resp.get("data") or resp.get("instances") or resp.get("executions") or []
+                    data = resp.get("failures") or resp.get("executions") or resp.get("data") or []
                 elif isinstance(resp, list):
                     data = resp
-                if isinstance(data, list):
-                    last_error = ""
-                    break
+                last_error = ""
             except Exception as exc:
                 last_error = str(exc)
-                continue
+        
+        # 3. Use paging-aware global T4 check if still no data
+        if not data:
+            try:
+                # get_workflow_instances("") handles global listing with paging
+                data = client.get_workflow_instances(
+                    workflow_name="",
+                    limit=limit,
+                    status_filter="Failure"
+                )
+                last_error = ""
+            except Exception as exc:
+                if not last_error:
+                    last_error = str(exc)
 
     if not isinstance(data, list):
         data = []
@@ -313,10 +365,15 @@ def get_system_health() -> dict:
             pass
         raise last_error or RuntimeError("Could not fetch system health")
 
-    agents = resp.get("agents", [])
-    online = sum(1 for a in agents if a.get("status") == "online")
+    if resp is None or not isinstance(resp, dict):
+        agents = []
+        online = 0
+    else:
+        agents = resp.get("agents", [])
+        online = sum(1 for a in agents if a.get("status") == "online")
+
     return {
-        "status": resp.get("status", "unknown"),
+        "status": (resp or {}).get("status", "unknown"),
         "agents_online": online,
         "agents_offline": len(agents) - online,
         "agents": agents,
@@ -433,6 +490,27 @@ def t4_execute_and_poll(
     # Resolve the name first for accurate schema lookup
     resolved_name = client.resolve_cached_workflow_name(workflow_name) or workflow_name
     
+    # AE-77: Check for "File" type parameters. File upload is not supported in agentic chat yet.
+    schema = client.get_cached_workflow_parameters(resolved_name)
+    file_params = [
+        p.get("name") for p in schema 
+        if str(p.get("type", "")).strip().lower() in {"file", "attachment", "upload"}
+    ]
+    if file_params:
+        logger.info(f"Workflow '{resolved_name}' requires file upload. Rejecting agentic trigger in t4_execute_and_poll.")
+        return {
+            "success": False,
+            "error": (
+                f"I've identified that the **{resolved_name}** bot requires a **document upload** "
+                f"for the following parameter(s): `{', '.join(file_params)}`. \n\n"
+                "This action cannot be completed through the chat yet. "
+                "Please go to the **AutomationEdge (AE) server** to trigger this bot manually. "
+                "Thank you!"
+            ),
+            "reason": f"Workflow requires file upload for: {', '.join(file_params)}",
+            "workflow_name": resolved_name
+        }
+
     required = client.get_required_parameters(resolved_name)
     missing = [p for p in required if not (params or {}).get(p)]
 
@@ -525,20 +603,24 @@ def t4_execute_and_poll(
 
 def get_execution_status(execution_id: str) -> dict:
     """Get status of a specific workflow execution by ID.
-
-    Tries both global and org-scoped T4 workflowinstances paths.
-    Ref: code_ref.py t4_poll_status() dual-URL logic.
+    
+    Use this when you have a numeric request_id or execution_id.
+    Returns status, bot name, agent, timings, and any error message.
     """
     resp = get_ae_client().get_execution_status(execution_id)
+    status = resp.get("status", "UNKNOWN")
+    
+    # Enrich the response for LLM decision making
     return {
         "execution_id": execution_id,
-        "status": resp.get("status", "UNKNOWN"),
-        "workflow_name": resp.get("workflowName") or resp.get("workflow_name"),
+        "status": status,
+        "workflow_name": resp.get("workflowName") or resp.get("workflow_name") or (resp.get("workflowConfiguration") or {}).get("name"),
         "agent_name": resp.get("agentName"),
         "start_time": resp.get("startTime") or resp.get("createdDate"),
-        "end_time": resp.get("endTime"),
-        "error_message": resp.get("errorMessage") or resp.get("errorDetails"),
+        "end_time": resp.get("endTime") or resp.get("lastUpdatedDate"),
+        "error_message": resp.get("errorMessage") or resp.get("errorDetails") or resp.get("workflowResponse"),
         "raw": resp,
+        "recommendation": f"Use 'get_execution_logs' with execution_id '{execution_id}' to see technical details/errors." if status in ("Failure", "Error", "Complete") else "Execution is still in progress."
     }
 
 
@@ -632,17 +714,17 @@ tool_registry.register(
     ToolDefinition(
         name="check_workflow_status",
         description=(
-            "Check the current status and 24h history of bots (workflows). "
-            "If 'workflow_name' is provided, returns details for that specific bot. "
-            "If 'workflow_name' is omitted, returns a global summary for all bots in the tenant. "
-            "Includes bot/workflow name, latest status, request ID, and a 24-hour summary of runs."
+            "Check the CURRENT, HISTORICAL, or EXECUTION status/records of bots (workflows). "
+            "Returns the absolute latest execution details (even if old), request ID, "
+            "and a 24-hour summary. Use this to find out 'did my bot run', 'is it failing', "
+            "'what was the last status', 'what is the execution status', or 'how many times did it run today'."
         ),
         category="status",
         tier="read_only",
         parameters={
             "workflow_name": {
                 "type": "string",
-                "description": "Name of the workflow (bot) to check. Omit for all bots.",
+                "description": "Name of the workflow/bot to check (e.g. 'Maturity Claim' or 'Email Bot JD'). Handles natural language names.",
             },
             "status": {
                 "type": "string",
@@ -651,6 +733,8 @@ tool_registry.register(
         },
         required_params=[],
         always_available=True,
+        use_when="The user asks about the status, history, last run, or current state of any bot or workflow.",
+        avoid_when="The user explicitly wants to EXECUTE, RUN, or TRIGGER a new workflow instance.",
     ),
     check_workflow_status,
 )
