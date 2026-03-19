@@ -1,43 +1,58 @@
+"""Tests for the in-app analyze_agent_logs tool — discovery + extraction contract."""
 
-import sys
-import os
-import asyncio
-import json
-from unittest.mock import MagicMock, patch
+import pytest
+from unittest.mock import MagicMock, patch, ANY
 
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from tools.agent_debug_tools import analyze_agent_logs
-
-async def verify_debug_tools():
-    print("--- Verifying Agent Debug Tools (Fix Confirmation) ---")
-    
-    # Mock the client
-    mock_client = MagicMock()
-    mock_client.list_agents.return_value = [
-        {"agentId": "123", "agentName": "Test Agent", "agentState": "RUNNING", "uuid": "uuid-123"}
+def test_empty_agent_id_returns_running_agents():
+    """Empty agent_id should list running agents for discovery."""
+    client = MagicMock()
+    client.list_agents.return_value = [
+        {"agentId": "123", "agentName": "Test Agent", "agentState": "RUNNING", "uuid": "uuid-123"},
     ]
-    mock_client.request_agent_debug_logs.return_value = {"id": "req-456"}
-    mock_client.get_agent_debug_logs.return_value = {"status": "COMPLETE", "logFileLink": "http://link"}
-    
-    with patch("tools.agent_debug_tools.get_ae_client", return_value=mock_client), \
-         patch("time.sleep", return_value=None):
-        
-        print("\nTesting analyze_agent_logs with auto-selection...")
-        # Should auto-select Test Agent because it's the only one running
-        res = analyze_agent_logs(agent_id="")
-        
-        print(f"Result type: {type(res)}")
-        print(f"Result message: {res.get('message')}")
-        
-        # Verify calls
-        from unittest.mock import ANY
-        mock_client.list_agents.assert_called()
-        mock_client.request_agent_debug_logs.assert_called_with("uuid-123", ANY, ANY)
-        mock_client.get_agent_debug_logs.assert_called_with("req-456")
-        
-        print("\nSUCCESS: AttributeErrors resolved and logic flow confirmed.")
 
-if __name__ == "__main__":
-    asyncio.run(verify_debug_tools())
+    with patch("tools.agent_debug_tools.get_ae_client", return_value=client):
+        from tools.agent_debug_tools import analyze_agent_logs
+
+        result = analyze_agent_logs(agent_id="")
+
+    assert result["success"] is True
+    assert result["discovery"] is True
+    assert result["count"] == 1
+    assert result["running_agents"][0]["agent_id"] == "123"
+
+
+def test_agent_without_uuid_returns_error():
+    """Agent with no uuid field should return a clear error."""
+    client = MagicMock()
+    client.list_agents.return_value = [
+        {"agentId": "456", "agentName": "No UUID", "agentState": "RUNNING"},
+    ]
+
+    with patch("tools.agent_debug_tools.get_ae_client", return_value=client):
+        from tools.agent_debug_tools import analyze_agent_logs
+
+        result = analyze_agent_logs(agent_id="456")
+
+    assert result["success"] is False
+    assert "UUID" in result["error"]
+
+
+def test_reversed_dates_returns_error():
+    """from_date after to_date should return a validation error."""
+    client = MagicMock()
+    client.list_agents.return_value = [
+        {"agentId": "789", "agentName": "Agent", "agentState": "RUNNING", "uuid": "uuid-789"},
+    ]
+
+    with patch("tools.agent_debug_tools.get_ae_client", return_value=client):
+        from tools.agent_debug_tools import analyze_agent_logs
+
+        result = analyze_agent_logs(
+            agent_id="789",
+            from_date="2026-03-20T00:00:00",
+            to_date="2026-03-15T00:00:00",
+        )
+
+    assert result["success"] is False
+    assert "after" in result["error"].lower() or "swap" in result["error"].lower()

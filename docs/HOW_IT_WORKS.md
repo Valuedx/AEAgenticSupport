@@ -1,9 +1,11 @@
+> - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: New metadata-first diagnosis flow. `DiagnosticAgent` can now build structured evidence packs from AE execution data and run LLM-powered diagnosis with confidence scoring. See §5.6 and §6 below.
+>
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out, configurable embedding dimension, batched DB queries, shared MCP executor, AE path caching, coalesced state writes, capped execution polling. Details in §5.5 below.
 >
 > - **Documentation Update (2026-03-09)**: MCP server still exposes **106 tools** (71 P0 + 35 support-priority P1). The main-app bridge can now use either the local shared spec registry in co-located mode or a remote MCP server via `list_tools()`/`call_tool()` when `AE_MCP_SERVER_URL` is configured. Long-tail MCP and workflow-backed tools remain lazily hydrated on demand. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
->   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
+>   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status`/`diagnostics` tools; Remediation specialists to `remediation`/`config`.
 >   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.
 >   - **Agent Memory**: Added `SharedContext` memory buckets. Specialists now maintain short-term state (e.g., specific log patterns) across multi-turn delegation chains.
 >   - **Context-Aware RAG**: RAG queries now automatically ingest active issue metadata (error signatures, workflow names) to prioritize relevant SOPs and KB articles.
@@ -160,7 +162,7 @@ Responsibilities:
    - `AgentRouter` scores the user message against all registered agents (`Supervisor`, `Diagnostic`, `Remediation`, `RCA`).
    - If `Supervisor` is selected, it can proactively hand off to specialists:
      - **File:** `agents/orchestrator_agent.py` (Supervisor)
-     - Technical Investigate → `diagnostic_agent.py` (restricted to `status`, `logs`, `dependency`, `file` tools).
+     - Technical Investigate → `diagnostic_agent.py` (restricted to `status`, `logs`, `dependency`, `file`, `diagnostics` tools — the `diagnostics` category includes evidence-pack building and LLM diagnosis).
       - Fix/Restart → `remediation_agent.py` (restricted to `remediation`, `notification`, `config` tools).
       - RCA Generation → `rca_agent.py` (specialist for generating Root Cause Analysis reports via `generate_rca_report` tool).
     - Specialists use **Agent Memory** in `SharedContext` to persist state between turns without cluttering the global history.
@@ -309,6 +311,39 @@ Several hot‑path optimizations reduce per‑request latency:
 
 ---
 
+### 5.6 Evidence-Pack Diagnostic Pipeline
+
+When the `DiagnosticAgent` needs to determine root cause, it can leverage the evidence-pack pipeline rather than relying on raw log inspection alone.
+
+**File:** `tools/ae_diagnostic_tools.py`
+
+**Flow:**
+
+1. **Metadata collection** — `build_evidence_pack` calls `AutomationEdgeClient.get_normalized_instance_metadata()` and `get_workflow_step_timeline()` to capture workflow name, status, failed step, start/end times, and machine info.
+2. **Log retrieval** — existing `get_execution_logs()` fetches raw logs for the execution ID.
+3. **Deterministic filtering** — the pipeline applies, in order:
+   - Time-window extraction (narrows to failure window ± buffer).
+   - Request-ID and step-name filtering (if metadata identifies a failed step).
+   - Error block extraction (follows stack traces and `Caused by` chains).
+   - Exception chain parsing (structures nested Java/Python exceptions).
+   - Repeated-line collapse (deduplicates verbose log noise).
+   - Timestamp normalization (to ISO-8601 UTC).
+   - Multi-stream chronological merge.
+4. **Evidence pack assembly** — `ae_build_log_evidence_pack()` produces a compact JSON payload containing metadata, timeline, error blocks, exception chains, and a capped merged log.
+5. **LLM diagnosis** — `diagnose_from_evidence_pack` sends the pack to the LLM with a structured prompt. The LLM returns JSON with: `primary_diagnosis`, `confidence` (0–1), `alternatives`, `reasoning`, `next_fetches`, and `safe_remediation_candidates`.
+
+**Registered tools (category: `diagnostics`, tier: `read_only`):**
+
+| Tool | When to use |
+|------|-------------|
+| `build_evidence_pack` | Automatically builds a structured evidence pack from an execution ID |
+| `diagnose_from_evidence_pack` | Runs LLM diagnosis; returns root cause with confidence scoring |
+| `extract_exception_chain` | Parses exception chains from raw log text |
+
+All three tools are available to the `DiagnosticAgent` via the `diagnostics` allowed category.
+
+---
+
 ## 6. Step 6 — Tools: Typed Actions on AE & DB
 
 - **Directory:** `tools/`
@@ -316,6 +351,8 @@ Several hot‑path optimizations reduce per‑request latency:
   - `base.py` — `AEApiClient`, `ToolDefinition`, base utilities.
   - `registry.py` — registers tools and exposes them to orchestrator and RAG.
   - `status_tools.py`, `log_tools.py`, `file_tools.py`, `remediation_tools.py`, `dependency_tools.py`, `notification_tools.py`, `general_tools.py`.
+  - `ae_diagnostic_tools.py` — evidence-pack diagnostic pipeline: log filtering, exception chain parsing, noise collapse, evidence-pack builder, and LLM diagnosis (category: `diagnostics`).
+  - `automationedge_client.py` — AE REST client; includes `get_normalized_instance_metadata()` and `get_workflow_step_timeline()`.
 
 Tools are grouped into categories (read‑only vs write/risky) as documented in:
 - `SETUP_GUIDE.md` Section 11.3
@@ -464,6 +501,9 @@ Before sending the final response to the user:
      - `log_tools.get_execution_logs`
      - `file_tools.check_input_file`
      - Possibly `dependency_tools.get_workflow_dependencies`
+   - If delegated to `DiagnosticAgent`, additional diagnostic tools are available:
+     - `build_evidence_pack` — automatically builds a structured evidence pack for an execution ID.
+     - `diagnose_from_evidence_pack` — runs LLM diagnosis with confidence scoring and alternative hypotheses.
    - Tool calls executed via `tools/registry.py` and AE REST API (`tools/base.py`).
    - Findings recorded into `IssueTracker` (workflows + error signatures).
 

@@ -356,11 +356,12 @@ async def agent_analyze_logs(
     from_date: str | int = "",
     to_date: str | int = "",
     tail_lines: int = 100,
-    **kwargs: Any
 ) -> dict:
     """
     Extract and analyze agent logs for a specific period.
-    Handles multiple date-indexed log files within the ZIP and provides solution summaries.
+
+    Uses the same backward-scan, timestamp-gated extraction as the in-app
+    analyzer so that error detection quality is identical across surfaces.
     """
     import io
     import zipfile
@@ -368,61 +369,112 @@ async def agent_analyze_logs(
     import re
     import gzip
     from datetime import datetime, timedelta
-
-    client = get_ae_client()
-    
-    # 0. Resolve Agent
-    agents = client.list_agents()
-    match = next(
-        (a for a in agents 
-         if str(a.get("agentId") or a.get("id")) == agent_id 
-         or str(a.get("agentName") or a.get("name")).lower() == agent_id.lower()), 
-        None
+    from tools.agent_debug_tools import (
+        _extract_errors_from_file_lines,
+        _group_errors,
+        _build_ai_prompt,
+        _ts_in_window,
     )
 
-    # 1. Check Status
+    client = get_ae_client()
+
+    # ── 0. Resolve Agent (empty-ID → discovery) ──
+    agents = client.list_agents()
+
+    if not agent_id or not agent_id.strip():
+        running = [
+            a for a in agents
+            if (a.get("agentState") or a.get("state") or "").upper()
+            in ("RUNNING", "CONNECTED", "ACTIVE")
+        ]
+        return {
+            "success": True,
+            "discovery": True,
+            "running_agents": [
+                {
+                    "agent_id": str(a.get("agentId") or a.get("id")),
+                    "agent_name": a.get("agentName") or a.get("name"),
+                    "state": a.get("agentState") or a.get("state"),
+                }
+                for a in running
+            ],
+            "count": len(running),
+            "message": (
+                f"Found {len(running)} running agent(s). "
+                "Please provide an agent_id to analyze logs."
+            ),
+        }
+
+    match = next(
+        (
+            a for a in agents
+            if str(a.get("agentId") or a.get("id")) == agent_id
+            or str(a.get("agentName") or a.get("name")).lower() == agent_id.lower()
+        ),
+        None,
+    )
+
     if not match:
         return {"error": f"Agent '{agent_id}' not found"}
-    
+
     agent_uuid = match.get("uuid")
+    if not agent_uuid:
+        return {
+            "success": False,
+            "error": f"Agent '{agent_id}' resolved but has no UUID — cannot request logs.",
+        }
+
     state = (match.get("agentState") or match.get("state") or "UNKNOWN").upper()
-    
+
     if state not in ("RUNNING", "CONNECTED", "ACTIVE"):
         agent_name = match.get("agentName") or match.get("name") or agent_id
         return {
             "error": f"Please restart your agent {agent_name} first",
-            "agent_state": state
+            "agent_state": state,
         }
 
-    # 2. Parse Dates (milliseconds)
-    now_ms = int(time.time() * 1000)
-    retention_days = 14 # Use 14 instead of 15 to stay safely within server limits
+    # ── 1. Parse Dates ──
+    retention_days = 14
     min_date = datetime.now() - timedelta(days=retention_days)
     warning_retention = False
 
     try:
         if from_date:
-            f_dt = datetime.fromisoformat(from_date) if isinstance(from_date, str) else datetime.fromtimestamp(from_date/1000)
+            f_dt = (
+                datetime.fromisoformat(from_date)
+                if isinstance(from_date, str)
+                else datetime.fromtimestamp(from_date / 1000)
+            )
             if f_dt < min_date:
                 f_dt = min_date
                 warning_retention = True
         else:
             f_dt = datetime.now() - timedelta(hours=24)
-        
+
         if to_date:
-            t_dt = datetime.fromisoformat(to_date) if isinstance(to_date, str) else datetime.fromtimestamp(to_date/1000)
+            t_dt = (
+                datetime.fromisoformat(to_date)
+                if isinstance(to_date, str)
+                else datetime.fromtimestamp(to_date / 1000)
+            )
             if t_dt > datetime.now():
                 t_dt = datetime.now()
         else:
             t_dt = datetime.now()
-            
+
+        if f_dt > t_dt:
+            return {
+                "success": False,
+                "error": (
+                    f"from_date ({f_dt.isoformat()}) is after to_date ({t_dt.isoformat()}). "
+                    "Please swap them."
+                ),
+            }
+
         f_ms = int(f_dt.timestamp() * 1000)
         t_ms = int(t_dt.timestamp() * 1000)
-
-        # Store original dates for ZIP filtering (internal to this tool)
         orig_f_dt, orig_t_dt = f_dt, t_dt
 
-        # 2.5 Ensure span does not exceed 5 days (AE-1602)
         warning_span = False
         max_span = timedelta(days=5)
         if (t_dt - f_dt) > max_span:
@@ -430,216 +482,303 @@ async def agent_analyze_logs(
             f_ms = int(f_dt.timestamp() * 1000)
             warning_span = True
     except Exception as e:
-        return {"error": f"Invalid date format: {e}"}
+        return {"success": False, "error": f"Invalid date format: {e}"}
 
-    # 3. Request Logs
-    logger.info("Requesting logs for agent %s (%s) from %s to %s", agent_id, agent_uuid, f_ms, t_ms)
-    req_resp = client.request_agent_debug_logs(agent_uuid, f_ms, t_ms)
-    req_id = req_resp.get("id")
-    if not req_id:
-        return {"error": "Failed to initiate log extraction", "raw": req_resp}
-
-    # 4. Polling
-    logger.info("Polling for log request %s completion...", req_id)
-    max_polls = 15
-    log_file_link = None
-    for i in range(max_polls):
-        time.sleep(5)
-        status_resp = client.get_agent_debug_logs(str(req_id))
-        if status_resp.get("status") == "COMPLETE":
-            log_file_link = status_resp.get("logFileLink")
-            break
-        if status_resp.get("status") in ("FAILED", "ERROR"):
-            return {"error": "Log extraction failed on server", "details": status_resp}
-    
-    if not log_file_link:
-        return {"error": "Timed out waiting for logs to be ready", "request_id": req_id}
-
-    # 5. Download and Extract
-    logger.info("Downloading logs from %s", log_file_link)
-    zip_bytes = client.get(log_file_link, use_rest=False)
-    
-    if not isinstance(zip_bytes, bytes):
-        return {"error": "Failed to download log ZIP", "raw": str(zip_bytes)[:200]}
-
-    log_summary = []
-    error_found = False
-    all_errors = []
-    
-    # Date regex for filenames like agent.log.2026-03-16 or agent.log.20260316
-    date_pattern = re.compile(r"(\d{4}-?\d{2}-?\d{2})")
-
+    # ── 2. Request Logs ──
+    logger.info("Requesting logs for agent %s (%s) %s→%s", agent_id, agent_uuid, f_ms, t_ms)
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-            all_files_in_zip = z.namelist()
-            logger.info("Extracting %d files from log ZIP for agent %s", len(all_files_in_zip), agent_id)
+        req_resp = client.request_agent_debug_logs(agent_uuid, f_ms, t_ms)
+        req_id = req_resp.get("id")
+    except Exception as e:
+        return {"success": False, "error": f"Failed to initiate log extraction: {e}"}
 
-            eligible_files = [n for n in all_files_in_zip if ".log" in n or "stdout" in n or "stderr" in n]
-            
-            for name in eligible_files:
-                # Filter by date if filename contains one
-                match_dt = date_pattern.search(name)
-                if match_dt:
+    if not req_id:
+        return {"success": False, "error": "Failed to initiate log extraction", "raw": req_resp}
+
+    # ── 3. Poll ──
+    logger.info("Polling for log request %s...", req_id)
+    log_file_link = None
+    zip_bytes_direct = None
+
+    for _ in range(10):
+        time.sleep(10)
+        try:
+            status_resp = client.get_agent_debug_logs(str(req_id))
+            if isinstance(status_resp, dict) and status_resp.get("is_zip"):
+                zip_bytes_direct = status_resp.get("log_zip_content")
+                break
+            if isinstance(status_resp, dict) and status_resp.get("status") == "COMPLETE":
+                log_file_link = status_resp.get("logFileLink")
+                break
+            if isinstance(status_resp, dict) and status_resp.get("status") in ("FAILED", "ERROR"):
+                return {"success": False, "error": "Log extraction failed on server", "details": status_resp}
+        except Exception as e:
+            logger.warning("Poll error: %s", e)
+
+    if not log_file_link and not zip_bytes_direct:
+        return {"success": False, "error": "Timed out waiting for logs after 100s", "request_id": req_id}
+
+    # ── 4. Download ZIP ──
+    try:
+        if zip_bytes_direct:
+            zip_bytes = zip_bytes_direct
+        else:
+            zip_data = client._authorized_request("GET", log_file_link, use_rest_prefix=False)
+            zip_bytes = (
+                zip_data.get("log_zip_content")
+                if isinstance(zip_data, dict) and zip_data.get("is_zip")
+                else zip_data
+            )
+
+        if not isinstance(zip_bytes, (bytes, bytearray)):
+            return {"success": False, "error": "Failed to download log ZIP (unexpected format)"}
+
+        # ── 5. Process each file in ZIP ──
+        date_pattern = re.compile(r"(\d{4}-?\d{2}-?\d{2})")
+        results_by_date: dict[str, list[dict]] = {}
+        total_files_read = 0
+        total_error_files = 0
+        all_error_blocks: list[dict] = []
+
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+            eligible = [
+                n for n in z.namelist()
+                if ".log" in n.lower() or "stdout" in n.lower() or "stderr" in n.lower()
+            ]
+            logger.info("ZIP has %d eligible files for agent %s", len(eligible), agent_id)
+
+            for name in eligible:
+                dt_match = date_pattern.search(name)
+                file_date_str = "unknown"
+                if dt_match:
                     try:
-                        raw_date = match_dt.group(1).replace("-", "")
-                        file_dt = datetime.strptime(raw_date, "%Y%m%d")
-                        if file_dt.date() < (orig_f_dt.date() - timedelta(days=1)) or file_dt.date() > (orig_t_dt.date() + timedelta(days=1)):
+                        raw_d = dt_match.group(1).replace("-", "")
+                        file_dt = datetime.strptime(raw_d, "%Y%m%d")
+                        file_date_str = file_dt.strftime("%Y-%m-%d")
+                        if (
+                            file_dt.date() < (orig_f_dt.date() - timedelta(days=1))
+                            or file_dt.date() > (orig_t_dt.date() + timedelta(days=1))
+                        ):
                             continue
                     except ValueError:
                         pass
 
-                with z.open(name) as f:
-                    if name.lower().endswith(".gz"):
-                        with gzip.GzipFile(fileobj=f) as gz:
-                            text = gz.read().decode("utf-8", errors="ignore")
-                    else:
-                        text = f.read().decode("utf-8", errors="ignore")
-                        
-                    lines = text.splitlines()
-                    tail = lines[-tail_lines:]
-                    content = "\n".join(tail)
-                    
-                    errors = [l for l in tail if any(x in l.upper() for x in ("ERROR", "FATAL", "EXCEPTION"))]
-                    if errors:
-                        error_found = True
-                        all_errors.extend(errors)
-                    
-                    log_summary.append({
-                        "filename": name,
-                        "entries_analyzed": len(tail),
-                        "errors_found": len(errors),
-                        "content": content,
-                        "full_lines": tail # Store full lines for context extraction
-                    })
-    except Exception as e:
-        return {"error": f"Failed to process log ZIP: {e}"}
+                try:
+                    with z.open(name) as f:
+                        if name.lower().endswith(".gz"):
+                            with gzip.GzipFile(fileobj=f) as gz:
+                                text = gz.read().decode("utf-8", errors="ignore")
+                        else:
+                            text = f.read().decode("utf-8", errors="ignore")
+                    file_lines = text.splitlines()
+                    total_files_read += 1
+                except Exception as ef:
+                    logger.warning("Could not read %s: %s", name, ef)
+                    continue
 
-    # Generate report
-    report_lines = [f"### Log Analysis for Agent: {agent_id}"]
-    report_lines.append(f"**Period:** {f_dt.strftime('%Y-%m-%d %H:%M:%S')} to {t_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    if warning_retention or warning_span:
-        report_lines.append("\n> [!IMPORTANT]")
-        if warning_retention:
-            report_lines.append(f"> Requested start date was adjusted to {f_dt.strftime('%Y-%m-%d %H:%M:%S')} due to AutomationEdge's 14-day log retention policy.")
-        if warning_span:
-            report_lines.append(f"> The requested period was capped to 5 days ({f_dt.strftime('%Y-%m-%d %H:%M:%S')} to {t_dt.strftime('%Y-%m-%d %H:%M:%S')}) due to AutomationEdge platform limits.")
-    
-    report_lines.append(f"**Files Analyzed:** {len(log_summary)}")
-    
-    # Group by date and collect unique error snippets
-    by_date = {}
-    for entry in log_summary:
-        if not entry.get("errors_found"): continue
-        
-        # Extract date for grouping
-        dt_str = "Unknown Date"
-        match_dt = date_pattern.search(entry["filename"])
-        if match_dt:
-            dt_str = match_dt.group(1)
-        
-        if dt_str not in by_date: by_date[dt_str] = []
-        
-        # Extract unique snippets (first 3 unique) with 2 lines of context
-        unique_snippets = []
-        seen_snippets = set()
-        raw_lines = entry.get("full_lines", [])
-        for idx, line in enumerate(raw_lines):
-            if any(x in line.upper() for x in ("ERROR", "FATAL", "EXCEPTION")):
-                # Capture ERROR + next 2 lines for context
-                snippet = "\n".join(raw_lines[idx : idx + 3])
-                
-                # Basic normalization for deduplication
-                norm = re.sub(r"\d", "X", line[:100])
-                if norm not in seen_snippets:
-                    unique_snippets.append(snippet.strip())
-                    seen_snippets.add(norm)
-                if len(unique_snippets) >= 3: break
-        
-        by_date[dt_str].append({
-            "file": entry["filename"],
-            "count": entry["errors_found"],
-            "snippets": unique_snippets
-        })
-
-    # Generate AI Diagnostic Summary
-    ai_diagnostic = ""
-    if error_found:
-        all_snippets_for_ai = []
-        for dt_group in by_date.values():
-            for f_info in dt_group:
-                all_snippets_for_ai.extend(f_info["snippets"])
-        
-        if all_snippets_for_ai:
-            try:
-                logger.info("Generating AI diagnostic for %d snippets...", len(all_snippets_for_ai))
-                snippets_text = "\n---\n".join(all_snippets_for_ai[:5])
-                prompt = (
-                    "Analyze these AutomationEdge agent log snippets. "
-                    "Provide a 1-2 sentence plain-English summary of the issue "
-                    "and a direct recommendation.\n\n"
-                    f"Snippets:\n{snippets_text}"
+                extraction = _extract_errors_from_file_lines(
+                    file_lines, max_errors=10, context_lines=50, tail_fallback=tail_lines,
                 )
-                ai_diagnostic = llm_client.chat(prompt, system="You are an expert technical support engineer. Be extremely concise.", max_tokens=200)
-                logger.info("AI Diagnostic generated: %s", ai_diagnostic[:50])
+
+                # Per-line time-window filter
+                if extraction["had_errors"]:
+                    extraction["error_blocks"] = [
+                        b for b in extraction["error_blocks"]
+                        if _ts_in_window(b.get("timestamp", ""), orig_f_dt, orig_t_dt)
+                    ]
+                    if not extraction["error_blocks"]:
+                        extraction["had_errors"] = False
+                        extraction["tail_lines"] = (
+                            file_lines[-tail_lines:] if len(file_lines) > tail_lines else file_lines
+                        )
+
+                file_result = {
+                    "filename": name,
+                    "date": file_date_str,
+                    "total_lines": len(file_lines),
+                    "had_errors": extraction["had_errors"],
+                    "error_block_count": len(extraction["error_blocks"]),
+                    "error_blocks": extraction["error_blocks"],
+                    "tail_lines": extraction["tail_lines"],
+                }
+
+                if extraction["had_errors"]:
+                    total_error_files += 1
+                    all_error_blocks.extend(extraction["error_blocks"])
+
+                results_by_date.setdefault(file_date_str, []).append(file_result)
+
+        # ── 6. Group errors & AI Diagnostic ──
+        error_groups: list[dict] = []
+        ai_diagnostic = ""
+
+        if all_error_blocks:
+            error_groups = _group_errors(all_error_blocks)
+            try:
+                prompt = _build_ai_prompt(all_error_blocks)
+                logger.info(
+                    "AI diagnostic prompt: %d chars, %d unique groups",
+                    len(prompt), len(error_groups),
+                )
+                ai_diagnostic = llm_client.chat(
+                    prompt,
+                    system=(
+                        "You are an expert AutomationEdge Support Engineer. "
+                        "Be structured, concise, and actionable. "
+                        "Always follow the exact response format requested."
+                    ),
+                    max_tokens=600,
+                )
             except Exception as llm_err:
-                logger.error("Failed to generate AI diagnostic: %s", llm_err, exc_info=True)
+                logger.error("AI diagnostic failed: %s", llm_err)
+                ai_diagnostic = "(AI diagnostic unavailable)"
 
-    if not log_summary:
-        report_lines.append("\n> [!WARNING]")
-        report_lines.append("> No log files matching the date criteria were found in the retrieved ZIP.")
-        status_msg = f"No relevant logs found for period {f_dt.date()} to {t_dt.date()}."
-    elif not error_found:
-        report_lines.append("\n### ✅ Clean Trace")
-        report_lines.append("No critical errors (ERROR, FATAL, EXCEPTION) detected in the last 100 lines of the analyzed log files.")
-        status_msg = "No critical issues detected in the recent logs."
-    else:
+        # ── 7. Build Report ──
+        report_lines = [f"### Log Analysis for Agent: {agent_id}"]
+        report_lines.append(
+            f"**Period:** {f_dt.strftime('%Y-%m-%d %H:%M:%S')} → "
+            f"{t_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        report_lines.append(
+            f"**Files Analyzed:** {total_files_read} | "
+            f"**Files with Errors:** {total_error_files} | "
+            f"**Unique Error Types:** {len(error_groups)}"
+        )
+
+        if warning_retention or warning_span:
+            report_lines.append("\n> [!IMPORTANT]")
+            if warning_retention:
+                report_lines.append(
+                    f"> Start date adjusted to {f_dt.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"(14-day retention limit)."
+                )
+            if warning_span:
+                report_lines.append(
+                    f"> Period capped to 5 days "
+                    f"({f_dt.strftime('%Y-%m-%d')} → {t_dt.strftime('%Y-%m-%d')})."
+                )
+
         if ai_diagnostic:
-            report_lines.append("\n### 🤖 AI Diagnostic Summary")
-            report_lines.append(f"{ai_diagnostic}")
+            report_lines.append(f"\n### 🤖 AI Diagnostic & Summary\n{ai_diagnostic}")
 
-        report_lines.append("\n### ❌ Issues Detected (By Date)")
-        for dt_str in sorted(by_date.keys(), reverse=True):
-            report_lines.append(f"\n#### 📅 {dt_str}")
-            for item in by_date[dt_str]:
-                report_lines.append(f"- **{item['file']}** ({item['count']} errors):")
-                for snip in item["snippets"]:
-                    # Use code block for snippets - NO leading spaces for the backticks!
-                    report_lines.append(f"```log\n{snip}\n```")
-        
-        status_msg = f"Found {len(all_errors)} errors across {len([l for l in log_summary if l['errors_found'] > 0])} files."
+        if error_groups:
+            report_lines.append("\n### 📊 Error Group Overview")
+            for g in error_groups:
+                threads = ", ".join(g["affected_threads"]) or "unknown"
+                report_lines.append(
+                    f"- **{g['signature'][:80]}** — "
+                    f"{g['occurrence_count']}x | "
+                    f"{g['first_seen'][:19]} → {g['last_seen'][:19]} | "
+                    f"Thread(s): `{threads}`"
+                )
 
-    # Generate solutions
-    suggested_solutions = []
-    if error_found:
-        error_text = "\n".join(all_errors).upper()
-        if "CONNECTION" in error_text or "UNREACHABLE" in error_text:
-            suggested_solutions.append("Network check: Ensure the agent machine can reach the AutomationEdge server (check proxy/firewall).")
-        if "TIMEOUT" in error_text:
-            suggested_solutions.append("Resources check: The agent might be under heavy load or target application is slow. Increase timeout settings.")
-        if "AUTHENTICATION" in error_text or "401" in error_text:
-            suggested_solutions.append("Credential check: Update the agent credentials or refresh the session in AE console.")
-        if "DISK FULL" in error_text or "SPACE" in error_text:
-            suggested_solutions.append("Disk space: Clear temporary files on the agent host machine.")
-        if "MEMORY" in error_text or "HEAP" in error_text:
-            suggested_solutions.append("Memory: Increase the Java Heap Size (-Xmx) in AEAgent.bat / AEAgent.conf.")
-        
-        if suggested_solutions:
-            report_lines.append("\n### 💡 Suggested Solutions")
-            for sol in suggested_solutions:
-                report_lines.append(f"- {sol}")
+        if not results_by_date:
+            report_lines.append(
+                "\n> [!WARNING]\n> No log files matched the requested date range."
+            )
+        else:
+            report_lines.append("\n### 📂 File Details (Newest First)")
+            for date_str in sorted(results_by_date.keys(), reverse=True):
+                report_lines.append(f"\n---\n#### 📅 {date_str}")
+                for file_res in results_by_date[date_str]:
+                    fname = file_res["filename"]
+                    n_blocks = file_res["error_block_count"]
 
-    full_report = "\n".join(report_lines)
+                    if not file_res["had_errors"]:
+                        tail_preview = file_res["tail_lines"]
+                        report_lines.append(
+                            f"\n✅ **{fname}** — No errors detected "
+                            f"({file_res['total_lines']} lines). "
+                            f"Last {len(tail_preview)} lines:"
+                        )
+                        report_lines.append(
+                            f"```log\n{chr(10).join(tail_preview[-10:])}\n```"
+                        )
+                    else:
+                        report_lines.append(
+                            f"\n⚠️ **{fname}** — {n_blocks} error block(s):"
+                        )
+                        for block in file_res["error_blocks"]:
+                            report_lines.append(
+                                f"\n> **{block['error_label']}** | "
+                                f"`{block['timestamp']}` | "
+                                f"Thread: `{block['thread']}`\n"
+                                f"> 💬 _{block['error_message']}_"
+                            )
+                            preview = block["lines"][:10]
+                            report_lines.append(
+                                f"```log\n{chr(10).join(preview)}\n"
+                                f"... ({len(block['lines'])} lines total)\n```"
+                            )
 
-    # 6. Return Result
-    return {
-        "success": True,
-        "agent_id": agent_id,
-        "period": f"{f_dt.date()} to {t_dt.date()}",
-        "error_found": error_found,
-        "logs": log_summary,
-        "report": full_report,
-        "summary": f"Analyzed {len(log_summary)} files. {'Issues detected.' if error_found else 'No issues found.'}",
-        "suggested_solutions": suggested_solutions,
-        "message": status_msg
-    }
+        # Keyword-based suggestions (complements AI diagnostic)
+        suggested_solutions = []
+        if all_error_blocks:
+            all_msgs = " ".join(
+                b["error_message"] + " " + b["trigger_line"] for b in all_error_blocks
+            ).upper()
+            if "UNKNOWNHOSTEXCEPTION" in all_msgs or "NO SUCH HOST" in all_msgs:
+                suggested_solutions.append(
+                    "DNS/Network: Agent cannot resolve the AE server hostname. "
+                    "Check DNS settings, VPN status, or the hosts file."
+                )
+            if "CONNECTION RESET" in all_msgs or "UNREACHABLE" in all_msgs:
+                suggested_solutions.append(
+                    "Network: Agent connection is being reset/dropped. "
+                    "Check firewall rules, proxy settings, and AE server health."
+                )
+            if "TIMEOUT" in all_msgs:
+                suggested_solutions.append(
+                    "Timeout: Increase timeout settings or check server/target application load."
+                )
+            if "CREDENTIAL" in all_msgs or "AUTHENTICATION" in all_msgs or " 401 " in all_msgs:
+                suggested_solutions.append(
+                    "Credentials: Update agent credentials or refresh the session in AE console."
+                )
+            if "OUTOFMEMORY" in all_msgs or "HEAP" in all_msgs:
+                suggested_solutions.append(
+                    "Memory: Increase Java Heap (-Xmx) in AEAgent.bat / AEAgent.conf."
+                )
+            if suggested_solutions:
+                report_lines.append("\n### 💡 Suggested Solutions")
+                for sol in suggested_solutions:
+                    report_lines.append(f"- {sol}")
+
+        full_report = "\n".join(report_lines)
+        error_found = total_error_files > 0
+
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "period": f"{f_dt.date()} to {t_dt.date()}",
+            "files_analyzed": total_files_read,
+            "error_files": total_error_files,
+            "error_found": error_found,
+            "unique_error_types": len(error_groups),
+            "error_groups": [
+                {
+                    "signature": g["signature"],
+                    "occurrence_count": g["occurrence_count"],
+                    "first_seen": g["first_seen"],
+                    "last_seen": g["last_seen"],
+                    "affected_threads": g["affected_threads"],
+                }
+                for g in error_groups
+            ],
+            "results_by_date": results_by_date,
+            "report": full_report,
+            "suggested_solutions": suggested_solutions,
+            "summary": (
+                f"Analyzed {total_files_read} file(s). "
+                + (
+                    f"{total_error_files} file(s) had errors across "
+                    f"{len(error_groups)} unique error type(s)."
+                    if error_found
+                    else "No errors detected."
+                )
+            ),
+        }
+
+    except Exception as e:
+        logger.exception("Failed to process log ZIP")
+        return {"success": False, "error": f"Failed to process log ZIP: {e}"}

@@ -1,7 +1,7 @@
 # Tool Architecture Target
 
 **Status:** Target architecture and migration plan; core catalog, ranking, hydrator, executor, and startup bootstrap slices implemented  
-**Date:** 2026-03-08
+**Date:** 2026-03-19
 
 Implemented in the current codebase:
 
@@ -15,6 +15,7 @@ Implemented in the current codebase:
 - Startup tool import, dynamic workflow reload, agent-link sync, and RAG indexing now run through `tools/bootstrap.py` instead of being hard-wired inside `main.py`.
 - The existing `ToolRegistry` API remains in place as a compatibility facade.
 - Admin-managed tool overrides now sit on top of the catalog so business or operations owners can change labels, visibility, always-available status, and allowed-agent routing through the control center without editing Python modules.
+- A new `diagnostics` tool category has been added (in `tools/ae_diagnostic_tools.py`) containing composite evidence-pack and LLM-diagnosis tools. These tools demonstrate the "composite beats primitive" principle (§2.4): `build_evidence_pack` orchestrates metadata retrieval, log fetching, and multi-step filtering into a single high-value call, and `diagnose_from_evidence_pack` turns the pack into a structured root-cause diagnosis.
 
 ## 1. Why This Refactor Exists
 
@@ -308,7 +309,7 @@ Keep always available:
 
 - High-signal status tools
 - High-signal log tools
-- Composite diagnostic tools
+- Composite diagnostic tools (e.g., `build_evidence_pack`, `diagnose_from_evidence_pack` from `tools/ae_diagnostic_tools.py`)
 - Approval-safe coordination tools
 
 Reduce exposure of:

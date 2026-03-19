@@ -91,7 +91,7 @@ class DiagnosticAgent(BaseAgent):
             user_message=user_message,
             state=state,
             on_progress=on_progress,
-            allowed_categories=["status", "logs", "dependency", "file"],
+            allowed_categories=["status", "logs", "dependency", "file", "diagnostics"],
             feedback_agent_id=self.info.agent_id,
         )
 

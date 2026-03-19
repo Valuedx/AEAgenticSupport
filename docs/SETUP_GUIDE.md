@@ -1,5 +1,5 @@
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
->   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
+>   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status`/`diagnostics` tools; Remediation specialists to `remediation`/`config`.
 >   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.
 >   - **Agent Memory**: Added `SharedContext` memory buckets. Specialists now maintain short-term state (e.g., specific log patterns) across multi-turn delegation chains.
 >   - **Context-Aware RAG**: RAG queries now automatically ingest active issue metadata (error signatures, workflow names) to prioritize relevant SOPs and KB articles.
@@ -126,7 +126,7 @@ AEAgenticSupport/
 ├── agents/
 │   ├── agent_router.py                  #   Central agent dispatcher
 │   ├── orchestrator_agent.py            #   Supervisor agent (A2A gateway)
-│   ├── diagnostic_agent.py              #   Technical Specialist (logs/status)
+│   ├── diagnostic_agent.py              #   Technical Specialist (logs/status/diagnostics)
 │   ├── remediation_agent.py             #   Resolution Specialist (restarts/fixes)
 │   ├── approval_gate.py                 #   RBAC-aware approval logic
 │   ├── escalation.py                    #   Escalation agent
@@ -980,7 +980,7 @@ PostgreSQL (ops_agent database)
 └── custom_issuelink         ← Links between related cases
 ```
 
-### 11.3 Tool Catalog (23+ tools)
+### 11.3 Tool Catalog (26+ tools)
 
 | Category | Tools | Risk Tier | Notes |
 |---|---|---|---|
@@ -992,6 +992,7 @@ PostgreSQL (ops_agent database)
 | **Dependency** (2) | get_workflow_dependencies, check_agent_resources | read_only | |
 | **Remediation** (5) | restart_execution, trigger_workflow, requeue_item, bulk_retry_failures, disable_workflow | low_risk → high_risk | |
 | **Notification** (2) | send_notification, create_incident_ticket | medium_risk | |
+| **Diagnostics** (3) | build_evidence_pack, diagnose_from_evidence_pack, extract_exception_chain | read_only | Evidence-pack diagnostic pipeline: builds structured evidence from AE metadata + filtered logs, then runs LLM diagnosis with confidence scoring. Available to DiagnosticAgent |
 | **Meta** (1) | discover_tools | read_only | Search the tool catalog for tools matching a query or category; enables mid-conversation tool discovery when RAG filtering is active |
 
 ### 11.4 Progress Streaming
@@ -1417,6 +1418,7 @@ MCP tools are mapped into the existing agent categories so that specialist filte
 | MCP category | Main app category | Used by |
 |--------------|-------------------|--------|
 | request_read, request_diag, agent_read, task_read, credential_read, platform_read, result_read, support_composite | status, logs | Diagnostic agent |
+| *(custom)* evidence-pack pipeline, LLM diagnosis | diagnostics | Diagnostic agent |
 | request_mutate, workflow_mutate, agent_mutate, schedule_mutate | remediation | Remediation agent |
 | workflow_read, schedule_read, user_read, permission_read, **dependency** | dependency | Both (dependency/discovery) |
 

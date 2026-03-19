@@ -1,3 +1,5 @@
+> - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: Added metadata-first diagnosis flow with structured evidence packs. New `tools/ae_diagnostic_tools.py` provides log time-window extraction, request-ID/step-name filtering, Java exception chain parsing, repeated-line collapse, multi-stream chronological merge, and a compact evidence-pack builder. New `diagnose_from_evidence_pack` tool runs LLM diagnosis with confidence scoring, alternative hypotheses, and remediation suggestions. `AutomationEdgeClient` extended with `get_normalized_instance_metadata()` and `get_workflow_step_timeline()`. DiagnosticAgent now includes the `diagnostics` tool category. See §2, §4.2, and §7.
+>
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out (4 concurrent searches), configurable embedding dimension, batched workflow catalog queries, shared MCP executor, coalesced state writes, AE path caching, capped execution polling. See §4.2 and `SETUP_GUIDE.md` §10.
 >
 > - **Documentation Update (2026-03-09)**: MCP server still exposes **106 tools** (P0 + P1 support). The main-app bridge now supports both co-located shared-spec mode and remote MCP mode via `AE_MCP_SERVER_URL`, while still eagerly hydrating only a curated subset and exposing the rest through RAG and `discover_tools` with lazy runtime hydration. See `SETUP_GUIDE.md` §13 and `mcp_server/README.md`.
@@ -13,7 +15,7 @@
 > - **Tool Architecture Target (2026-03-07)**: Proposed scale-out refactor for unified catalog, turn-local tool hydration, ranking, and source-specific execution handling is documented in `TOOL_ARCHITECTURE_TARGET.md`.
 >
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
->   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status` tools; Remediation specialists to `remediation`/`config`.
+>   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status`/`diagnostics` tools; Remediation specialists to `remediation`/`config`.
 >   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.
 >   - **Agent Memory**: Added `SharedContext` memory buckets. Specialists now maintain short-term state (e.g., specific log patterns) across multi-turn delegation chains.
 >   - **Context-Aware RAG**: RAG queries now automatically ingest active issue metadata (error signatures, workflow names) to prioritize relevant SOPs and KB articles.
@@ -33,8 +35,8 @@
 >
 ## AutomationEdge Agentic Support — Technical Blueprint
 
-**Version:** 1.2  
-**Last updated:** 2026-03-08
+**Version:** 1.3  
+**Last updated:** 2026-03-19
 
 ---
 
@@ -73,7 +75,7 @@ Request path examples:
 - **`agents/`**
   - `agent_router.py`: Central dispatcher for scoring and routing messages to agents.
   - `orchestrator_agent.py`: The **Supervisor** Agent. Coordinates high-level planning and chooses specialists.
-  - `diagnostic_agent.py`: **Techncial Specialist**. Investigates logs, status, and infrastructure.
+  - `diagnostic_agent.py`: **Technical Specialist**. Investigates logs, status, infrastructure, and builds structured evidence packs for LLM diagnosis (categories: status, logs, dependency, file, diagnostics).
   - `remediation_agent.py`: **Resolution Specialist**. Restarts workflows and executes fixes.
   - `approval_gate.py`: RBAC-aware risk tiering and approval workflow.
   - `escalation.py`: Escalation logic and notifications.
@@ -83,6 +85,8 @@ Request path examples:
   - `base.py`: AE API client and `ToolDefinition`.
   - `registry.py`: Tool catalog, categories, and registration.
   - `*_tools.py`: Typed tools grouped by concern (status, logs, files, remediation, etc.).
+  - `ae_diagnostic_tools.py`: Evidence-pack diagnostic pipeline — log filtering (time window, request ID, step name), exception chain extraction, noise collapse, timestamp normalization, multi-stream merge, structured evidence-pack builder, and LLM diagnosis with confidence scoring.
+  - `automationedge_client.py`: AE REST client with normalized metadata (`get_normalized_instance_metadata`) and step-level timeline (`get_workflow_step_timeline`).
 - **`rag/`**
   - `engine.py`: Hybrid RAG engine (Vector + Keyword + RRF) using `pgvector` and `tsvector`.
   - `processor.py`: Advanced document processing for PDF (tables), MD, and JSON.
@@ -287,6 +291,68 @@ The following optimizations reduce request latency and DB/API round-trips:
 | **AE client fallback** | `_try_paths` caches the winning `(path_index, use_rest)` per `(method, paths)` key; evicts on failure | First-call unchanged; subsequent calls skip failed paths |
 | **State persistence** | `add_message` defers DB inserts; flushed in batch during `save()` at turn boundaries | Fewer Postgres round-trips per request |
 | **Execution polling** | Default `max_attempts` capped at 15 (~45 s); returns `in_progress` with hint instead of blocking 100+ iterations | Prevents worker threads from being held by long-running executions |
+
+---
+
+## 5.4 Evidence-Pack Diagnostic Pipeline
+
+The diagnostic pipeline implements a **metadata-first** approach: structured AE run metadata is used to narrow the diagnostic scope before any log processing or LLM reasoning begins.
+
+### Architecture
+
+```
+AE Instance ID
+    │
+    ├──▶ get_normalized_instance_metadata()   ─┐
+    ├──▶ get_workflow_step_timeline()          ─┤  ── Metadata layer
+    │                                           │     (AutomationEdgeClient)
+    │                                           ▼
+    ├──▶ get_execution_logs()                 ─── Log retrieval
+    │         │                                    (existing log_tools)
+    │         ▼
+    │    Log Processing Pipeline:
+    │    ├─ ae_extract_log_time_window()       ── Narrow to failure window
+    │    ├─ ae_extract_log_by_request_id()     ── Filter by request ID
+    │    ├─ ae_extract_log_by_step_name()      ── Filter by step name
+    │    ├─ ae_extract_error_blocks()          ── Extract errors + stack traces
+    │    ├─ ae_extract_exception_chain()       ── Parse Caused-by chains
+    │    ├─ ae_collapse_repeated_log_lines()   ── Deduplicate noise
+    │    ├─ ae_normalize_log_timestamps()      ── Convert to ISO-8601 UTC
+    │    └─ ae_merge_log_streams_chronologically()
+    │         │
+    │         ▼
+    ├──▶ ae_build_log_evidence_pack()          ── Structured evidence pack
+    │         │
+    │         ▼
+    └──▶ diagnose_from_evidence_pack()         ── LLM diagnosis with
+              │                                    confidence scoring
+              ▼
+         Structured JSON:
+         { primary_diagnosis, confidence, alternatives,
+           reasoning, next_fetches, safe_remediation_candidates }
+```
+
+### Key modules
+
+| Module | Responsibility |
+|--------|---------------|
+| `tools/ae_diagnostic_tools.py` | Log pipeline, evidence-pack builder, LLM diagnosis |
+| `tools/automationedge_client.py` | `get_normalized_instance_metadata()`, `get_workflow_step_timeline()` |
+| `tools/log_tools.py` | Raw log retrieval via `get_execution_logs()` |
+
+### Registered tools (category: `diagnostics`)
+
+| Tool | Purpose |
+|------|---------|
+| `build_evidence_pack` | Given an execution ID, fetches metadata + timeline + logs, runs the processing pipeline, and returns a compact evidence pack |
+| `diagnose_from_evidence_pack` | Sends the evidence pack to the LLM with a structured diagnosis prompt; returns root cause, confidence, alternatives, and remediation candidates |
+| `extract_exception_chain` | Parses Java/Python exception chains from raw log text, following nested Caused-by references |
+
+### Design principles
+
+1. **Deterministic filtering first** — time-window, request-ID, and step-name filters are applied before any LLM call, keeping context tokens low.
+2. **Structured output** — the LLM is instructed to return strict JSON, enabling downstream agents to act on diagnosis results programmatically.
+3. **Additive integration** — all new tools are registered via the existing `ToolRegistry` and are available to the `DiagnosticAgent` through the `diagnostics` category.
 
 ---
 

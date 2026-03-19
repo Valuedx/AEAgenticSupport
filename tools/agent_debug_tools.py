@@ -27,9 +27,13 @@ def _safe_json(data: Any) -> str:
 
 
 # ── Timestamp prefix — a valid AE log line MUST start with this ──
-# e.g. 2026-03-06T09:48:21.806+05:30
+# Accepts: 2026-03-06T09:48:21.806+05:30  (original AE format)
+#          2026-03-16 21:00:00             (space separator, no tz)
+#          2026-03-16T21:00:00Z            (Zulu)
+#          2026-03-16T21:00:00+05:30       (no fractional seconds)
+#          2026-03-16T09:48:21,806+0530    (comma decimal, offset without colon)
 TIMESTAMP_RE = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+\-]\d{2}:\d{2})"
+    r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+\-]\d{2}:?\d{2})?)"
 )
 
 # ── Error keywords — only matched AFTER confirming line has a timestamp ──
@@ -64,6 +68,31 @@ def _is_trigger_line(line: str) -> bool:
     up as triggers instead of the actual ERROR log line above them.
     """
     return bool(TIMESTAMP_RE.match(line)) and bool(ERROR_KEYWORDS.search(line))
+
+
+def _parse_log_timestamp(ts_str: str) -> datetime | None:
+    """Parse a log timestamp string to a datetime (naive, for window comparison)."""
+    if not ts_str:
+        return None
+    try:
+        s = ts_str.replace(",", ".")
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        if " " in s and "T" not in s:
+            s = s.replace(" ", "T", 1)
+        # +HHMM → +HH:MM
+        s = re.sub(r"([+\-]\d{2})(\d{2})$", r"\1:\2", s)
+        return datetime.fromisoformat(s).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def _ts_in_window(block_ts: str, start: datetime, end: datetime) -> bool:
+    """True if *block_ts* falls within [start, end] or is unparseable."""
+    ts = _parse_log_timestamp(block_ts)
+    if ts is None:
+        return True
+    return start.replace(tzinfo=None) <= ts <= end.replace(tzinfo=None)
 
 
 def _extract_errors_from_file_lines(
@@ -303,6 +332,31 @@ def analyze_agent_logs(
 
     # ── 0. Resolve Agent ──
     agents = client.list_agents()
+
+    if not agent_id or not agent_id.strip():
+        running = [
+            a for a in agents
+            if (a.get("agentState") or a.get("state") or "").upper()
+            in ("RUNNING", "CONNECTED", "ACTIVE")
+        ]
+        return {
+            "success": True,
+            "discovery": True,
+            "running_agents": [
+                {
+                    "agent_id": str(a.get("agentId") or a.get("id")),
+                    "agent_name": a.get("agentName") or a.get("name"),
+                    "state": a.get("agentState") or a.get("state"),
+                }
+                for a in running
+            ],
+            "count": len(running),
+            "message": (
+                f"Found {len(running)} running agent(s). "
+                "Please provide an agent_id to analyze logs."
+            ),
+        }
+
     agent_match = next(
         (
             a for a in agents
@@ -316,6 +370,12 @@ def analyze_agent_logs(
         return {"error": f"Agent '{agent_id}' not found"}
 
     agent_uuid = agent_match.get("uuid")
+    if not agent_uuid:
+        return {
+            "success": False,
+            "error": f"Agent '{agent_id}' resolved but has no UUID — cannot request logs.",
+        }
+
     state = (agent_match.get("agentState") or agent_match.get("state") or "UNKNOWN").upper()
 
     if state not in ("RUNNING", "CONNECTED", "ACTIVE"):
@@ -351,6 +411,15 @@ def analyze_agent_logs(
                 t_dt = datetime.now()
         else:
             t_dt = datetime.now()
+
+        if f_dt > t_dt:
+            return {
+                "success": False,
+                "error": (
+                    f"from_date ({f_dt.isoformat()}) is after to_date ({t_dt.isoformat()}). "
+                    "Please swap them."
+                ),
+            }
 
         f_ms = int(f_dt.timestamp() * 1000)
         t_ms = int(t_dt.timestamp() * 1000)
@@ -470,6 +539,20 @@ def analyze_agent_logs(
                     context_lines=50,
                     tail_fallback=tail_lines,
                 )
+
+                # Per-line time-window filter: drop blocks outside the requested range
+                if extraction["had_errors"]:
+                    extraction["error_blocks"] = [
+                        b for b in extraction["error_blocks"]
+                        if _ts_in_window(b.get("timestamp", ""), orig_f_dt, orig_t_dt)
+                    ]
+                    if not extraction["error_blocks"]:
+                        extraction["had_errors"] = False
+                        extraction["tail_lines"] = (
+                            file_lines[-tail_lines:]
+                            if len(file_lines) > tail_lines
+                            else file_lines
+                        )
 
                 file_result = {
                     "filename":         name,

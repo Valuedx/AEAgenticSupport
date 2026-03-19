@@ -983,6 +983,148 @@ class AutomationEdgeClient:
             raise last_exc
         return {}
 
+    def get_normalized_instance_metadata(self, instance_id: str | int) -> dict:
+        """Fetch workflow instance and normalize into a diagnostic-friendly shape.
+
+        Returns a dict with standardized keys regardless of AE version:
+        instance_id, workflow_name, status, failure_step, error_message,
+        start_time, end_time, bot_machine.
+        """
+        ident = str(instance_id).strip()
+        if not ident:
+            raise ValueError("instance_id is required")
+
+        data = self.get_execution_status(ident)
+        if not data or not isinstance(data, dict):
+            data = self.get_workflow_instance_by_id(ident)
+        if not data or not isinstance(data, dict):
+            data = {}
+
+        wf_config = data.get("workflowConfiguration") or {}
+        return {
+            "instance_id": str(ident),
+            "workflow_name": (
+                data.get("workflowName")
+                or wf_config.get("name")
+                or data.get("name")
+            ),
+            "status": data.get("status") or data.get("workflowStatus"),
+            "failure_step": (
+                data.get("failureStepName")
+                or data.get("failedStepName")
+                or data.get("currentStepName")
+            ),
+            "error_message": data.get("errorMessage") or data.get("message"),
+            "start_time": (
+                data.get("startTime")
+                or data.get("createdDate")
+                or data.get("createdTime")
+            ),
+            "end_time": (
+                data.get("endTime")
+                or data.get("updatedDate")
+                or data.get("lastUpdatedDate")
+                or data.get("endDate")
+            ),
+            "bot_machine": (
+                data.get("agentName")
+                or data.get("machineName")
+                or data.get("botName")
+                or data.get("runnerName")
+            ),
+            "raw": data,
+        }
+
+    def get_workflow_step_timeline(self, instance_id: str | int) -> dict:
+        """Fetch step-level execution timeline for a workflow instance.
+
+        Probes common AE endpoint variants for step/timeline data.
+        Returns a normalized dict:
+        { instance_id, failed_step, steps: [{ sequence, step_name, status, ... }] }
+        """
+        ident = str(instance_id).strip()
+        if not ident:
+            raise ValueError("instance_id is required")
+
+        org = self.default_org_code
+        candidate_paths = [
+            f"/workflowinstances/{ident}/steps",
+            f"/workflowinstances/{ident}/timeline",
+        ]
+        if org:
+            candidate_paths.extend([
+                f"/{org}/workflowinstances/{ident}/steps",
+                f"/{org}/workflowinstances/{ident}/timeline",
+            ])
+
+        last_exc: Optional[Exception] = None
+        data: Optional[dict] = None
+
+        for use_prefix in (True, False):
+            for path in candidate_paths:
+                try:
+                    result = self._authorized_request(
+                        "GET", path,
+                        use_rest_prefix=use_prefix,
+                        silent_on_status=[400, 404, 500],
+                    )
+                    if result:
+                        data = result if isinstance(result, dict) else {"steps": result}
+                        break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {400, 404, 500}:
+                        last_exc = exc
+                        continue
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if data:
+                break
+
+        if data is None:
+            if last_exc and isinstance(last_exc, Exception):
+                raise last_exc
+            raise RuntimeError(f"Could not fetch step timeline for instance {ident}")
+
+        steps_raw: Any = (
+            data.get("steps")
+            or data.get("timeline")
+            or data.get("data")
+            or data
+        )
+        if isinstance(steps_raw, dict):
+            steps_raw = steps_raw.get("items") or steps_raw.get("content") or [steps_raw]
+        if not isinstance(steps_raw, list):
+            steps_raw = []
+
+        steps: list[dict] = []
+        for idx, item in enumerate(steps_raw, start=1):
+            if not isinstance(item, dict):
+                continue
+            steps.append({
+                "sequence": item.get("sequence") or item.get("order") or idx,
+                "step_name": (
+                    item.get("stepName")
+                    or item.get("name")
+                    or item.get("label")
+                ),
+                "status": item.get("status") or item.get("stepStatus"),
+                "start_time": item.get("startTime") or item.get("startedAt"),
+                "end_time": item.get("endTime") or item.get("endedAt"),
+                "retry_count": item.get("retryCount") or item.get("retries") or 0,
+            })
+
+        failed = next(
+            (s for s in steps if str(s.get("status", "")).upper() in ("FAILED", "FAILURE", "ERROR")),
+            None,
+        )
+        return {
+            "instance_id": str(ident),
+            "failed_step": failed["step_name"] if failed else None,
+            "steps": steps,
+        }
+
     def get_workflow_instances(
         self, 
         workflow_name: str = "", 

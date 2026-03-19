@@ -14,7 +14,7 @@ if sys.stdout.encoding != 'utf-8':
 # Create a sample ZIP in memory
 buf = io.BytesIO()
 with zipfile.ZipFile(buf, 'w') as z:
-    z.writestr("agent.log", "2026-03-16 21:00:00 [INFO] Starting agent...\n2026-03-16 21:05:00 [ERROR] Connection lost!")
+    z.writestr("agent.log", "2026-03-16T21:00:00.000+05:30 [main] INFO - Starting agent...\n2026-03-16T21:05:00.000+05:30 [main] ERROR - Connection lost!")
 zip_content = buf.getvalue()
 
 # Mock AE Client
