@@ -1,3 +1,5 @@
+> - **V0.7 Observability & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. Compatible with parent project's `config/observability.py` pattern. TenantToolOverride now consumed by the tools endpoint to filter MCP tools per tenant.
+>
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
 >
 > - **V0.5 Production Hardening (2026-03-20)**: JWT-based auth with tenant claims (`app/security/jwt_auth.py`, dev-mode header fallback). Fernet-encrypted credential vault (`app/security/vault.py` + `TenantSecret` model). AST-based safe expression evaluator replaces `eval()` (`app/engine/safe_eval.py`). PostgreSQL RLS migration for tenant isolation (`alembic/versions/0001`). Per-tenant rate limiting via slowapi and execution quotas (`app/security/rate_limiter.py`). See §8 for updated security docs.
@@ -11,9 +13,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.6  
+**Version:** 0.7  
 **Last updated:** 2026-03-20  
-**Status:** V0.6 advanced agents (ReAct loop, SSE, scheduler, registry), V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Status:** V0.7 Langfuse observability + tenant tool overrides, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 
 ---
 
@@ -221,6 +223,7 @@ orchestrator/backend/
 └── app/
     ├── config.py                   # Pydantic Settings (env-driven)
     ├── database.py                 # SQLAlchemy engine, session, Base
+    ├── observability.py            # Langfuse v4 traces, spans, generations
     ├── api/
     │   ├── schemas.py              # Pydantic request/response models
     │   ├── workflows.py            # CRUD + execute + callback + status
@@ -597,7 +600,48 @@ returning HTTP 429 if the tenant has exceeded their limit.
 
 ---
 
-## 9. Integration with AI Studio (Sidecar Pattern)
+## 9. Observability (Langfuse)
+
+File: `app/observability.py`
+
+The orchestrator integrates with Langfuse v4 (OpenTelemetry-based) for full execution tracing.
+It shares the same `LANGFUSE_*` environment variables as the parent project's `config/observability.py`.
+
+### 9.1 Trace Hierarchy
+
+```
+workflow:My Workflow            ← root trace (trace_workflow)
+├── node:Webhook Trigger        ← child span (span_node)
+├── node:LLM Agent              ← child span
+│   └── llm:google/gemini-2.5   ← generation (record_generation)
+├── node:Condition              ← child span
+├── node:MCP Tool               ← child span
+│   └── tool:get_request_status  ← tool span (span_tool)
+└── node:HTTP Request           ← child span
+```
+
+### 9.2 What Gets Recorded
+
+| Observation | Type | Data |
+|-------------|------|------|
+| Workflow execution | Root trace | workflow_id, instance_id, tenant_id, trigger payload, final status |
+| Node execution | Span | node_id, node_type, input config, output/error |
+| LLM call | Generation | provider, model, system prompt, user message, response, token usage |
+| Tool call | Tool span | tool_name, arguments, result |
+| ReAct iteration | Nested generations + tool spans | Per-iteration tool calls and LLM responses |
+
+### 9.3 Compatibility
+
+The module follows the same patterns as the parent project:
+- Lazy singleton initialization via `get_langfuse()`
+- `_NoOpSpan` stub when Langfuse is disabled — callers never need null checks
+- All operations wrapped in try/except — Langfuse failures never break execution
+- `atexit` shutdown hook registered in `main.py`
+- `flush()` called after each workflow completes
+
+---
+
+## 10. Integration with AI Studio (Sidecar Pattern)
 
 The orchestrator is **not** embedded into AI Studio. It runs as an external sidecar:
 
@@ -621,7 +665,7 @@ AI Studio (existing)                    Orchestrator (new)
 
 ---
 
-## 10. Shared Schemas
+## 11. Shared Schemas
 
 File: `orchestrator/shared/node_registry.json`
 
@@ -633,20 +677,20 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 11. Known Limitations (V0.6)
+## 12. Known Limitations (V0.7)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
 | **MCP transport** | Backend calls `POST /call-tool` (REST) | Add REST bridge to existing stdio/SSE MCP server |
 | **Tenant auth** | JWT auth implemented; no external IdP integration yet | Add OIDC/SAML federation with enterprise identity providers |
-| **TenantToolOverride** | Model exists, not consumed | Filter tools endpoint by tenant overrides |
 | **Condition expressions** | Safe evaluator supports basic ops; no custom functions or regex | Add pluggable expression functions |
 | **Frontend validation** | Config validation runs server-side on save (logs warnings); no inline form validation | Generate dynamic property forms from registry schemas with client-side validation |
 | **ReAct tool discovery** | ReAct agent requires manually listing tool names in config | Auto-discover available tools from MCP registry |
+| **Langfuse in threads** | Parallel node execution may not propagate OTel context to worker threads | Use explicit span passing for parallel branches |
 
 ---
 
-## 12. Roadmap
+## 13. Roadmap
 
 **V0.2 — Wire Frontend to Backend (Implemented)**
 - Frontend API client for save/load/execute workflows.
@@ -678,12 +722,16 @@ A version-controlled JSON file defining all node types with their `config_schema
 - Celery Beat cron scheduler (`scheduler.py`) with croniter for schedule triggers.
 - Frontend palette hydrated from `shared/node_registry.json`; backend validates configs on save.
 
-**V0.7 — Enterprise Features**
+**V0.7 — Observability & Tenant Tools (Implemented)**
+- Langfuse v4 integration (`app/observability.py`): root traces per workflow, child spans per node, LLM generation recording with token usage, tool call spans.
+- Compatible with parent project's `config/observability.py` (same env vars, same `_NoOpSpan` pattern).
+- TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
+
+**V0.8 — Enterprise Features**
 - OIDC/SAML federation with enterprise identity providers.
 - Dynamic property form generation from registry config schemas.
-- TenantToolOverride consumption (filter tools endpoint per tenant).
 - Workflow versioning with diff/rollback UI.
-- Observability: OpenTelemetry traces per workflow execution.
+- Auto-discover available tools for ReAct agent from MCP registry.
 
 ---
 

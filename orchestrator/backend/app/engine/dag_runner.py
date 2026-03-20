@@ -106,6 +106,8 @@ def _detect_cycles(nodes_map: dict, forward: dict, in_degree: dict) -> None:
 
 def execute_graph(db: Session, instance_id: str) -> None:
     """Run a full workflow instance with branch-aware parallel execution."""
+    from app.observability import trace_workflow, flush
+
     instance: WorkflowInstance | None = (
         db.query(WorkflowInstance).filter_by(id=instance_id).first()
     )
@@ -125,10 +127,22 @@ def execute_graph(db: Session, instance_id: str) -> None:
     if instance.trigger_payload:
         context["trigger"] = instance.trigger_payload
 
-    _execute_ready_queue(
-        db, instance, nodes_map, forward, reverse, in_degree, context,
-        skipped=set(),
-    )
+    with trace_workflow(
+        workflow_id=str(instance.workflow_def_id),
+        instance_id=str(instance.id),
+        tenant_id=instance.tenant_id,
+        workflow_name=instance.definition.name,
+        trigger_payload=instance.trigger_payload,
+        tags=[f"nodes:{len(nodes_map)}"],
+    ) as trace:
+        context["_trace"] = trace
+        _execute_ready_queue(
+            db, instance, nodes_map, forward, reverse, in_degree, context,
+            skipped=set(),
+        )
+        trace.update(output={"status": instance.status, "nodes_executed": len([k for k in context if k.startswith("node_")])})
+
+    flush()
 
 
 def resume_graph(
@@ -323,14 +337,17 @@ def _execute_single_node(
     context: dict[str, Any],
 ) -> str:
     """Execute one node. Returns 'completed', 'suspended', or 'failed'."""
+    from app.observability import span_node
+
     node = nodes_map[node_id]
     node_data: dict = node.get("data", {})
     node_category: str = node_data.get("nodeCategory", "action")
+    node_label: str = node_data.get("label", "")
 
     log_entry = ExecutionLog(
         instance_id=instance.id,
         node_id=node_id,
-        node_type=f"{node_data.get('nodeCategory', 'unknown')}:{node_data.get('label', '')}",
+        node_type=f"{node_data.get('nodeCategory', 'unknown')}:{node_label}",
         status="running",
         input_json=_build_node_input(node_data, context),
         started_at=_utcnow(),
@@ -338,6 +355,8 @@ def _execute_single_node(
     db.add(log_entry)
     instance.current_node_id = node_id
     db.commit()
+
+    trace = context.get("_trace")
 
     if node_category == "action" and node_data.get("config", {}).get("approvalMessage") is not None:
         if "approval" not in context:
@@ -348,27 +367,36 @@ def _execute_single_node(
             logger.info("Workflow %s suspended at node %s for human approval", instance.id, node_id)
             return "suspended"
 
-    try:
-        output = dispatch_node(node_data, context, instance.tenant_id)
-        context[node_id] = output
+    with span_node(
+        trace,
+        node_id=node_id,
+        node_type=f"{node_category}:{node_label}",
+        node_label=node_label,
+        input_data=_build_node_input(node_data, context),
+    ) as span:
+        try:
+            output = dispatch_node(node_data, context, instance.tenant_id)
+            context[node_id] = output
 
-        log_entry.status = "completed"
-        log_entry.output_json = output
-        log_entry.completed_at = _utcnow()
-        db.commit()
-        return "completed"
+            log_entry.status = "completed"
+            log_entry.output_json = output
+            log_entry.completed_at = _utcnow()
+            db.commit()
+            span.update(output={"status": "completed", "has_output": output is not None})
+            return "completed"
 
-    except Exception as exc:
-        log_entry.status = "failed"
-        log_entry.error = str(exc)
-        log_entry.completed_at = _utcnow()
+        except Exception as exc:
+            log_entry.status = "failed"
+            log_entry.error = str(exc)
+            log_entry.completed_at = _utcnow()
 
-        instance.status = "failed"
-        instance.context_json = context
-        instance.completed_at = _utcnow()
-        db.commit()
-        logger.exception("Node %s failed in workflow %s", node_id, instance.id)
-        return "failed"
+            instance.status = "failed"
+            instance.context_json = context
+            instance.completed_at = _utcnow()
+            db.commit()
+            span.update(output={"status": "failed", "error": str(exc)})
+            logger.exception("Node %s failed in workflow %s", node_id, instance.id)
+            return "failed"
 
 
 # ---------------------------------------------------------------------------

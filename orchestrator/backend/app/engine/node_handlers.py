@@ -89,6 +89,18 @@ def _handle_agent(
         result["usage"]["output_tokens"],
     )
 
+    from app.observability import record_generation
+    record_generation(
+        context.get("_trace"),
+        name=f"llm:{provider}/{model}",
+        provider=provider,
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        response=result.get("response", ""),
+        usage=result.get("usage"),
+    )
+
     return result
 
 
@@ -113,18 +125,25 @@ def _call_mcp_tool(
     tool_name: str, parameters: dict, tenant_id: str
 ) -> dict[str, Any]:
     """Invoke a tool on the existing MCP server."""
-    try:
-        resp = httpx.post(
-            f"{settings.mcp_server_url}/call-tool",
-            json={"tool_name": tool_name, "arguments": parameters},
-            headers={"X-Tenant-Id": tenant_id},
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as exc:
-        logger.error("MCP tool call failed: %s", exc)
-        return {"error": str(exc)}
+    from app.observability import span_tool, _NoOpSpan
+    trace = _NoOpSpan()
+
+    with span_tool(trace, tool_name=tool_name, arguments=parameters) as span:
+        try:
+            resp = httpx.post(
+                f"{settings.mcp_server_url}/call-tool",
+                json={"tool_name": tool_name, "arguments": parameters},
+                headers={"X-Tenant-Id": tenant_id},
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            span.update(output=result)
+            return result
+        except httpx.HTTPError as exc:
+            logger.error("MCP tool call failed: %s", exc)
+            span.update(output={"error": str(exc)})
+            return {"error": str(exc)}
 
 
 def _call_http(config: dict) -> dict[str, Any]:

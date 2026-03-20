@@ -13,8 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
+from app.database import get_db
 from app.security.tenant import get_tenant_id
+from app.models.tenant import TenantToolOverride
 from app.api.schemas import ToolOut
 
 router = APIRouter(prefix="/api/v1/tools", tags=["tools"])
@@ -64,6 +67,31 @@ def _load_tool_specs() -> list[dict[str, Any]]:
 
 
 @router.get("", response_model=list[ToolOut])
-def list_tools(tenant_id: str = Depends(get_tenant_id)):
-    """Return the full MCP tool registry for the node palette."""
-    return _load_tool_specs()
+def list_tools(
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Return MCP tools filtered by tenant overrides.
+
+    If a TenantToolOverride exists for a tool with enabled=False, that
+    tool is excluded from the response for this tenant.
+    """
+    all_tools = _load_tool_specs()
+
+    overrides = (
+        db.query(TenantToolOverride)
+        .filter_by(tenant_id=tenant_id)
+        .all()
+    )
+
+    if not overrides:
+        return all_tools
+
+    override_map = {o.tool_name: o for o in overrides}
+    filtered = []
+    for tool in all_tools:
+        override = override_map.get(tool["name"])
+        if override and not override.enabled:
+            continue
+        filtered.append(tool)
+    return filtered

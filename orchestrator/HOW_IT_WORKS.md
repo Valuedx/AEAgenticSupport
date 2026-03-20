@@ -1,3 +1,5 @@
+> - **V0.7 Observability & Tenant Tools (2026-03-20)**: Langfuse v4 integration — root trace per workflow, child spans per node, LLM generation recording with token usage, tool call spans. Compatible with parent project's `config/observability.py`. TenantToolOverride consumed by tools endpoint.
+>
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop for agent nodes (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates replacing frontend polling. Celery Beat cron scheduler for schedule triggers. Frontend palette hydrated from `node_registry.json`; backend validates configs on save.
 >
 > - **V0.5 Production Hardening (2026-03-20)**: JWT-based auth with tenant claims (dev-mode header fallback). Fernet-encrypted credential vault per tenant. PostgreSQL RLS policies for DB-level tenant isolation. AST-based safe expression evaluator replaces `eval()`. Per-tenant rate limiting (slowapi) and hourly execution quotas.
@@ -13,7 +15,7 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.6  
+**Version:** 0.7  
 **Last updated:** 2026-03-20
 
 ---

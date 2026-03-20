@@ -1,0 +1,241 @@
+"""Langfuse observability for the orchestrator module.
+
+Compatible with the parent project's config/observability.py (Langfuse v4
+OpenTelemetry-based API). Shares the same LANGFUSE_* environment variables.
+
+Provides:
+  - trace_workflow()  — root trace per workflow execution
+  - span_node()       — child span per node execution
+  - record_generation() — LLM generation recording with token usage
+  - span_tool()       — tool execution span (ReAct loop, MCP calls)
+
+All operations are no-op safe: disabled Langfuse never breaks execution.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import contextmanager
+from typing import Any, Generator, Optional
+
+logger = logging.getLogger("orchestrator.observability")
+
+_langfuse_client = None
+_langfuse_available: Optional[bool] = None
+
+
+def _is_enabled() -> bool:
+    return os.environ.get("LANGFUSE_ENABLED", "false").lower() in ("1", "true", "yes")
+
+
+def get_langfuse():
+    global _langfuse_client, _langfuse_available
+
+    if _langfuse_available is False:
+        return None
+
+    if _langfuse_client is not None:
+        return _langfuse_client
+
+    if not _is_enabled():
+        _langfuse_available = False
+        logger.info("Langfuse observability disabled (LANGFUSE_ENABLED != true)")
+        return None
+
+    try:
+        from langfuse import Langfuse
+        _langfuse_client = Langfuse()
+        _langfuse_available = True
+        logger.info(
+            "Langfuse observability initialized (host=%s)",
+            os.environ.get("LANGFUSE_HOST", "default"),
+        )
+        return _langfuse_client
+    except Exception as exc:
+        _langfuse_available = False
+        logger.warning("Langfuse initialization failed: %s", exc)
+        return None
+
+
+def flush() -> None:
+    if _langfuse_client is not None:
+        try:
+            _langfuse_client.flush()
+        except Exception:
+            pass
+
+
+def shutdown() -> None:
+    global _langfuse_client, _langfuse_available
+    if _langfuse_client is not None:
+        try:
+            _langfuse_client.shutdown()
+        except Exception:
+            pass
+        _langfuse_client = None
+        _langfuse_available = None
+
+
+class _NoOpSpan:
+    def update(self, **_kw):
+        return self
+
+    def end(self, **_kw):
+        return None
+
+    def start_as_current_observation(self, **_kw):
+        return _noop_ctx()
+
+    def start_observation(self, **_kw):
+        return _NoOpSpan()
+
+
+@contextmanager
+def _noop_ctx() -> Generator:
+    yield _NoOpSpan()
+
+
+# ---------------------------------------------------------------------------
+# Trace & span helpers
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def trace_workflow(
+    *,
+    workflow_id: str,
+    instance_id: str,
+    tenant_id: str,
+    workflow_name: str = "",
+    trigger_payload: Any = None,
+    tags: list[str] | None = None,
+) -> Generator:
+    """Root trace for an entire workflow execution."""
+    lf = get_langfuse()
+    if lf is None:
+        yield _NoOpSpan()
+        return
+
+    try:
+        from langfuse import propagate_attributes
+
+        trace_tags = ["orchestrator", f"tenant:{tenant_id}"]
+        if tags:
+            trace_tags.extend(tags)
+
+        with propagate_attributes(
+            session_id=f"wf-{workflow_id}",
+            user_id=tenant_id,
+            tags=trace_tags,
+        ):
+            with lf.start_as_current_observation(
+                name=f"workflow:{workflow_name or workflow_id}",
+                as_type="span",
+                input={"trigger_payload": trigger_payload},
+                metadata={
+                    "workflow_id": workflow_id,
+                    "instance_id": instance_id,
+                    "tenant_id": tenant_id,
+                },
+            ) as root:
+                yield root
+    except Exception as exc:
+        logger.debug("Langfuse trace_workflow error: %s", exc)
+        yield _NoOpSpan()
+
+
+@contextmanager
+def span_node(
+    parent: Any,
+    *,
+    node_id: str,
+    node_type: str,
+    node_label: str = "",
+    input_data: Any = None,
+) -> Generator:
+    """Child span for a single node execution."""
+    if isinstance(parent, _NoOpSpan):
+        yield _NoOpSpan()
+        return
+
+    lf = get_langfuse()
+    if lf is None:
+        yield _NoOpSpan()
+        return
+
+    try:
+        with lf.start_as_current_observation(
+            name=f"node:{node_label or node_id}",
+            as_type="span",
+            input=input_data,
+            metadata={"node_id": node_id, "node_type": node_type},
+        ) as span:
+            yield span
+    except Exception as exc:
+        logger.debug("Langfuse span_node error: %s", exc)
+        yield _NoOpSpan()
+
+
+def record_generation(
+    parent: Any,
+    *,
+    name: str,
+    provider: str,
+    model: str,
+    system_prompt: str = "",
+    user_message: str = "",
+    response: str = "",
+    usage: dict[str, int] | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Record an LLM generation with token usage in the current context."""
+    if isinstance(parent, _NoOpSpan):
+        return
+
+    lf = get_langfuse()
+    if lf is None:
+        return
+
+    try:
+        gen = lf.start_observation(
+            name=name,
+            as_type="generation",
+            input={"system_prompt": system_prompt[:500], "user_message": user_message[:1000]},
+            output=response[:2000] if response else None,
+            model=model,
+            usage_details=usage,
+            metadata={"provider": provider, **(metadata or {})},
+        )
+        gen.end()
+    except Exception as exc:
+        logger.debug("Langfuse record_generation error: %s", exc)
+
+
+@contextmanager
+def span_tool(
+    parent: Any,
+    *,
+    tool_name: str,
+    arguments: Any = None,
+) -> Generator:
+    """Span for a tool execution (MCP call, HTTP request, ReAct tool)."""
+    if isinstance(parent, _NoOpSpan):
+        yield _NoOpSpan()
+        return
+
+    lf = get_langfuse()
+    if lf is None:
+        yield _NoOpSpan()
+        return
+
+    try:
+        with lf.start_as_current_observation(
+            name=f"tool:{tool_name}",
+            as_type="tool",
+            input=arguments,
+            metadata={"tool_name": tool_name},
+        ) as span:
+            yield span
+    except Exception as exc:
+        logger.debug("Langfuse span_tool error: %s", exc)
+        yield _NoOpSpan()

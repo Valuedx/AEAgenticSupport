@@ -1,5 +1,6 @@
 """AE AI Hub -- Orchestrator API Gateway."""
 
+import atexit
 import logging
 
 from fastapi import FastAPI, Request
@@ -39,6 +40,9 @@ app.add_middleware(
 app.include_router(workflows_router)
 app.include_router(tools_router)
 app.include_router(sse_router)
+
+from app.observability import shutdown as _shutdown_langfuse
+atexit.register(_shutdown_langfuse)
 
 
 @app.get("/health")

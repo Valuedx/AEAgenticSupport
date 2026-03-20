@@ -378,5 +378,5 @@ curl http://localhost:8001/api/v1/workflows \
 
 ---
 
-**Document version:** 0.6  
+**Document version:** 0.7  
 **Last updated:** 2026-03-20
