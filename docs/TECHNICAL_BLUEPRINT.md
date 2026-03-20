@@ -1,3 +1,5 @@
+> - **LangFuse Observability (2026-03-20)**: Optional LLM observability via LangFuse. New `config/observability.py` provides lazy-initialized client, `trace_context`/`span_context` context managers, and no-op stubs for zero-overhead when disabled. Instrumented: orchestrator turns (root traces), LLM generations (`chat`, `chat_with_tools` with token usage), tool executions (per-tool spans with latency), RAG searches (per-collection spans), embeddings, and approval classification. Thread-local trace propagation avoids signature changes. Fixed `MetricsCollector.record_turn_error` missing method bug. See §6 and `SETUP_GUIDE.md` §15.
+>
 > - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: Added metadata-first diagnosis flow with structured evidence packs. New `tools/ae_diagnostic_tools.py` provides log time-window extraction, request-ID/step-name filtering, Java exception chain parsing, repeated-line collapse, multi-stream chronological merge, and a compact evidence-pack builder. New `diagnose_from_evidence_pack` tool runs LLM diagnosis with confidence scoring, alternative hypotheses, and remediation suggestions. `AutomationEdgeClient` extended with `get_normalized_instance_metadata()` and `get_workflow_step_timeline()`. DiagnosticAgent now includes the `diagnostics` tool category. See §2, §4.2, and §7.
 >
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out (4 concurrent searches), configurable embedding dimension, batched workflow catalog queries, shared MCP executor, coalesced state writes, AE path caching, capped execution polling. See §4.2 and `SETUP_GUIDE.md` §10.
@@ -35,8 +37,8 @@
 >
 ## AutomationEdge Agentic Support — Technical Blueprint
 
-**Version:** 1.3  
-**Last updated:** 2026-03-19
+**Version:** 1.4  
+**Last updated:** 2026-03-20
 
 ---
 
@@ -69,8 +71,10 @@ Request path examples:
 
 - **`config/`**
   - `settings.py`: Central configuration and env loading (AE URLs, GCP, DB, safety limits).
-  - `llm_client.py`: Vertex AI Gemini client (chat + tools).
+  - `llm_client.py`: Vertex AI Gemini client (chat + tools). Records LLM generations to LangFuse. Provides thread-local trace propagation (`set_current_trace`/`get_current_trace`).
   - `logging_setup.py`: Application + audit loggers.
+  - `metrics.py`: In-memory metrics collector for turn latencies, token usage, and tool success rates.
+  - `observability.py`: Optional LangFuse integration — lazy client, `trace_context`/`span_context` context managers, `create_generation` helper, no-op stubs for zero overhead when disabled.
   - `classification_signals.py`: Heuristic patterns for classifiers.
 - **`agents/`**
   - `agent_router.py`: Central dispatcher for scoring and routing messages to agents.
@@ -367,12 +371,28 @@ AE Instance ID
   - On-shift roster in `custom/helpers/roster.py`.
   - `Approval` table persists pending decisions.
   - Typed approvals in Teams (text today; upgrade path to Adaptive Cards).
-- **Observability:**
+- **Observability (built-in):**
   - Structured app + audit logs via `logging_setup.py`.
+  - In-memory metrics collector (`config/metrics.py`) tracks turn latencies, token usage, and tool success rates. Exposed via `GET /api/metrics`.
   - Tool calls, errors, and RCA indexing all logged.
   - Health endpoints:
     - `agent_server.py` → `/health`.
     - Underlying AE tools expose additional telemetry via their own APIs.
+- **Observability (LangFuse — optional):**
+  - Enabled via `LANGFUSE_ENABLED=true` with `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST`.
+  - Self-hosted (Docker Compose) or LangFuse Cloud.
+  - **Traces**: Each `Orchestrator.handle_message()` call creates a root trace with session ID, user ID, input, phase, and final response.
+  - **Generations**: Every `VertexAIClient.chat()` and `chat_with_tools()` call records model name, truncated input/output, and token usage (`input`/`output`/`total`).
+  - **Tool spans**: `ToolExecutor.execute()` records tool name, sanitized parameters, success/error status, and latency.
+  - **RAG spans**: `PgVectorRAGEngine.search()` records collection, query, top_k, and result count.
+  - **Embedding spans**: `VertexEmbedder.embed()` records model, truncated text, and vector dimension.
+  - **Approval spans**: `ApprovalGate.classify_approval_turn()` records classification intent, confidence, and method (rule-based vs LLM).
+  - Implementation details:
+    - `config/observability.py` — lazy-initialized `Langfuse` singleton, `trace_context`/`span_context` context managers, `create_generation` helper.
+    - Thread-local propagation via `set_current_trace()`/`get_current_trace()` in `config/llm_client.py` — avoids changing any existing function signatures.
+    - No-op stubs (`_NoOpTrace`, `_NoOpSpan`) returned when disabled — zero runtime overhead, no conditional checks needed.
+    - All LangFuse calls wrapped in try/except — tracing failures never break agent pipeline.
+  - See `SETUP_GUIDE.md` §15 for full setup, architecture diagram, and troubleshooting.
 
 ---
 
