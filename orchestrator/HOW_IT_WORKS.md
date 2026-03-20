@@ -1,3 +1,5 @@
+> - **V0.8 Enterprise Features (2026-03-20)**: Step 4 updated — property forms now generated from registry schemas via DynamicConfigForm; no more hardcoded panels. Step 5 updated — each graph save creates a snapshot in workflow_snapshots. New Step 12 — Version History & Rollback. Step 13 MCP section updated — 5-minute TTL cache + invalidate-cache endpoint. New Step 14 — OIDC Authentication. ReAct section updated for auto-discovery.
+>
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration — root trace per workflow, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport — replaces raw REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions fetched live from MCP server. TenantToolOverride consumed by tools endpoint.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop for agent nodes (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates replacing frontend polling. Celery Beat cron scheduler for schedule triggers. Frontend palette hydrated from `node_registry.json`; backend validates configs on save.
@@ -15,7 +17,7 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.7  
+**Version:** 0.8
 **Last updated:** 2026-03-20
 
 ---
@@ -26,15 +28,17 @@
 2. [Step 1 — User Builds a Workflow on the Canvas](#2-step-1--user-builds-a-workflow-on-the-canvas)
 3. [Step 2 — Drag-and-Drop: Palette to Canvas](#3-step-2--drag-and-drop-palette-to-canvas)
 4. [Step 3 — Connecting Nodes with Edges](#4-step-3--connecting-nodes-with-edges)
-5. [Step 4 — Configuring Node Properties](#5-step-4--configuring-node-properties)
-6. [Step 5 — Saving the Workflow](#6-step-5--saving-the-workflow)
+5. [Step 4 — Configuring Node Properties (Dynamic Forms)](#5-step-4--configuring-node-properties-dynamic-forms)
+6. [Step 5 — Saving the Workflow (with Snapshots)](#6-step-5--saving-the-workflow-with-snapshots)
 7. [Step 6 — Executing the Workflow](#7-step-6--executing-the-workflow)
 8. [Step 7 — DAG Parsing and Topological Sort](#8-step-7--dag-parsing-and-topological-sort)
 9. [Step 8 — Node-by-Node Execution](#9-step-8--node-by-node-execution)
 10. [Step 9 — Human-in-the-Loop Suspension](#10-step-9--human-in-the-loop-suspension)
 11. [Step 10 — Completion and Callback](#11-step-10--completion-and-callback)
-12. [Step 11 — MCP Tool Bridge](#12-step-11--mcp-tool-bridge)
-13. [End-to-End Example](#13-end-to-end-example)
+12. [Step 11 — MCP Tool Bridge (Streamable HTTP)](#12-step-11--mcp-tool-bridge-streamable-http)
+13. [Step 12 — Version History and Rollback](#13-step-12--version-history-and-rollback)
+14. [Step 13 — OIDC Authentication Flow](#14-step-13--oidc-authentication-flow)
+15. [End-to-End Example](#15-end-to-end-example)
 
 ---
 
@@ -77,9 +81,11 @@ When the user opens the orchestrator at `http://localhost:8080`, they see a thre
 |-------|-----------|------|---------|
 | Left | `NodePalette` | `components/sidebar/NodePalette.tsx` | Draggable node list, grouped by category |
 | Center | `FlowCanvas` | `components/canvas/FlowCanvas.tsx` | React Flow canvas with background grid, minimap, controls |
-| Right | `PropertyInspector` | `components/sidebar/PropertyInspector.tsx` | Config form for the selected node |
+| Right | `PropertyInspector` | `components/sidebar/PropertyInspector.tsx` | Schema-driven config form for the selected node |
 
 The entire app is wrapped in `ReactFlowProvider` (required by React Flow for coordinate transforms) and `TooltipProvider` (required by shadcn tooltips).
+
+If `VITE_AUTH_MODE=oidc` and no token is stored in `localStorage`, the OIDC `LoginPage` is shown instead.
 
 ---
 
@@ -114,7 +120,7 @@ onDragStart                        │                             │
 The JSON payload in `dataTransfer` carries:
 - `nodeCategory`: `"trigger"`, `"agent"`, `"action"`, or `"logic"`
 - `label`: Display name (e.g. "LLM Agent")
-- `defaultConfig`: Category-specific defaults including the `icon` key
+- `defaultConfig`: Derived from the registry schema defaults
 
 The Zustand store generates a sequential ID (`node_1`, `node_2`, ...) and creates a React Flow node with type `"agenticNode"`.
 
@@ -133,34 +139,48 @@ Each edge records:
 
 ---
 
-## 5. Step 4 — Configuring Node Properties
+## 5. Step 4 — Configuring Node Properties (Dynamic Forms)
 
-**Code:** `components/sidebar/PropertyInspector.tsx`
+**Code:** `components/sidebar/PropertyInspector.tsx` → `components/sidebar/DynamicConfigForm.tsx` → `lib/registry.ts`
 
 When the user clicks a node on the canvas:
 
 1. `FlowCanvas.onNodeClick` calls `flowStore.selectNode(node.id)`.
 2. `PropertyInspector` reads `selectedNodeId` from the store and finds the matching node.
-3. Based on `data.nodeCategory`, it renders the appropriate config panel:
+3. It calls `getRegistryNodeType(data.label)` and `getConfigSchema(data.label)` from `lib/registry.ts` to load the node's schema from `shared/node_registry.json`.
+4. It renders `<DynamicConfigForm>` with the schema, current config, and an `onUpdate` callback.
 
-| Category | Panel | Key Fields |
-|----------|-------|------------|
-| Agent | `AgentConfigPanel` | Provider dropdown (Google/OpenAI/Anthropic), Model dropdown (6 models), System Prompt textarea, Temperature slider |
-| Trigger | `TriggerConfigPanel` | Webhook Path input *or* Cron Expression input |
-| Action | `ActionConfigPanel` | MCP Tool Name *or* URL + HTTP Method *or* Approval Message |
-| Logic | `LogicConfigPanel` | Condition Expression *or* Merge Strategy (waitAll/waitAny) |
+`DynamicConfigForm` renders one field per schema entry:
 
-Every field change calls `flowStore.updateNodeData(id, { config: { ...updated } })`, which merges the update into the node's data immutably.
+| Schema field type | Rendered as | Notes |
+|-------------------|-------------|-------|
+| `string` + `enum` | `<Select>` dropdown | Options from enum array |
+| `string` (`systemPrompt`, `approvalMessage`, `body`) | `<Textarea>` | Multi-line |
+| `string` (other) | `<Input type="text">` | |
+| `number` / `integer` | `<Input type="number">` | `min`/`max`/`step` from schema |
+| `boolean` | `<input type="checkbox">` | |
+| `object` | `<Textarea>` (JSON) | Validated on blur; red border on invalid JSON |
+| `array` + key is `tools` on `react_agent` | `ToolMultiSelect` | Fetches live tool list from `/api/v1/tools` |
+| `array` (other) | `<Textarea>` (JSON array) | |
+
+Every field change calls `flowStore.updateNodeData(id, { config: { ...updated } })`, merging the update immutably.
+
+### ToolMultiSelect (ReAct Agent)
+
+When configuring a **ReAct Agent** node's `tools` field, a special `ToolMultiSelect` sub-component:
+
+1. On mount, calls `api.listTools()` → `GET /api/v1/tools`.
+2. Renders tools grouped by category, each with a checkbox and safety tier badge.
+3. Selected tool names are stored in `config.tools` as a string array.
+4. If no tools are selected (empty array), the backend will **auto-discover** all available MCP tools at runtime.
 
 ---
 
-## 6. Step 5 — Saving the Workflow
+## 6. Step 5 — Saving the Workflow (with Snapshots)
 
-**Code:** `backend/app/api/workflows.py` → `POST /api/v1/workflows`
+**Code:** `backend/app/api/workflows.py` → `PATCH /{workflow_id}`
 
-*In V0.2, the frontend Toolbar persists workflows directly via the API client in `frontend/src/lib/api.ts`, using `frontend/src/store/workflowStore.ts` for save/load state.*
-
-To persist a workflow, the frontend will serialize the Zustand store's `nodes` and `edges` into a JSON object and POST it:
+To persist a workflow, the frontend serializes the Zustand store's `nodes` and `edges` into a JSON object:
 
 ```http
 POST /api/v1/workflows
@@ -177,7 +197,15 @@ Content-Type: application/json
 }
 ```
 
-The backend creates a `WorkflowDefinition` row with `version: 1`. Subsequent saves via `PATCH` increment the version.
+The backend creates a `WorkflowDefinition` row with `version: 1`.
+
+**On subsequent saves** (PATCH), before overwriting `graph_json`, the backend:
+
+1. Creates a `WorkflowSnapshot` row with the **current** `graph_json` and `version`.
+2. Replaces `graph_json` with the new content.
+3. Increments `version`.
+
+This gives every save an immutable point-in-time backup. The version badge in the Toolbar (`v{n}`) reflects the current version number.
 
 ---
 
@@ -185,7 +213,7 @@ The backend creates a `WorkflowDefinition` row with `version: 1`. Subsequent sav
 
 **Code:** `backend/app/api/workflows.py` → `POST /api/v1/workflows/{id}/execute`
 
-In V0.2, the frontend `Run` button calls this endpoint and the `ExecutionPanel` polls `GET /api/v1/workflows/{workflowId}/instances/{instanceId}` until the instance reaches `completed`, `failed`, or `suspended`.
+The frontend `Run` button calls this endpoint. Real-time status arrives via SSE stream (`/instances/{instanceId}/stream`).
 
 ```
 Client                          API Gateway                     Celery Worker
@@ -203,13 +231,13 @@ POST /execute                        │                               │
                                                          (DAG execution begins)
 ```
 
-The API immediately returns `202 Accepted` with the new instance ID. The actual execution happens asynchronously in the Celery worker, freeing the API to handle other requests.
+The API immediately returns `202 Accepted` with the new instance ID. The actual execution happens asynchronously in the Celery worker.
 
 ---
 
 ## 8. Step 7 — DAG Parsing and Topological Sort
 
-**Code:** `backend/app/engine/dag_runner.py` → `parse_graph()`, `topological_sort()`
+**Code:** `backend/app/engine/dag_runner.py` → `parse_graph()`, `_detect_cycles()`
 
 The worker loads the `WorkflowDefinition.graph_json` and processes it:
 
@@ -253,6 +281,7 @@ The engine uses a ready-queue model instead of a linear topological order:
 │     b. dispatch_node(node_data, context, tenant_id)          │
 │        ├── trigger  → pass through trigger_payload           │
 │        ├── agent    → render prompt + call LLM provider      │
+│        │              (or run ReAct loop for ReAct Agent)    │
 │        ├── action   → call MCP tool / HTTP request           │
 │        └── logic    → evaluate condition / merge branches    │
 │     c. Store output in context[node_id]                      │
@@ -280,32 +309,46 @@ context = {
 }
 ```
 
-Each node receives its config and all upstream outputs, so it can reference previous results.
+### LLM Agent Node
 
-### Agent Node Deep-Dive (V0.3)
-
-When `dispatch_node()` routes to an **agent** node, the following happens:
+When `dispatch_node()` routes to an **LLM Agent** node:
 
 ```
-Agent Node Execution
-────────────────────────────────────────────────────────
 1. Read config: provider, model, systemPrompt, temperature, maxTokens
-2. Render system prompt through Jinja2 engine:
+2. Render system prompt via Jinja2:
    "Analyze {{ trigger.user_query }}"  →  "Analyze Why did request 12345 fail?"
 3. Build user message from all upstream node outputs (JSON-formatted)
-4. Route to provider SDK:
-   ├── google  →  google-genai client  →  Gemini API
-   ├── openai  →  openai client        →  OpenAI / compatible API
-   └── anthropic → anthropic client    →  Claude API
-5. Return standardized response:
-   { "response": "...", "usage": { "input_tokens": 342, "output_tokens": 128 },
-     "model": "gemini-2.5-flash", "provider": "google" }
-6. Token counts are persisted in ExecutionLog.output_json
+4. Route to provider SDK (Google / OpenAI / Anthropic)
+5. Return: { "response": "...", "usage": {...}, "model": "...", "provider": "..." }
+6. Token counts persisted in ExecutionLog.output_json
 ```
 
-System prompts support full Jinja2 syntax with dot-access to all context keys.
-Missing variables resolve to empty strings, so prompts are reusable across
-different workflow topologies.
+### ReAct Agent Node
+
+When `dispatch_node()` routes to a **ReAct Agent** node (detected by `label == "ReAct Agent"`):
+
+```
+react_loop.py
+─────────────
+1. config.tools = ["ae.request.get_status"]  (explicit list)
+   OR
+   config.tools = []   →  auto-discover ALL tools from MCP via list_tools()
+
+2. Load tool definitions in OpenAI function-calling format
+
+3. Iterative loop (max maxIterations, hard cap 25):
+   a. Call LLM with system prompt + conversation history + tool schemas
+   b. If LLM returns tool_calls:
+      - Execute each tool via call_tool()
+      - Append tool results to conversation
+      - Continue loop
+   c. If LLM returns text (no tool calls):
+      - Return final response + token usage + iteration log
+
+4. If max iterations reached: return "Maximum iterations reached"
+```
+
+Auto-discovery means ReAct agents configured with an empty `tools` list will use every tool the MCP server exposes. Use the explicit list to restrict a ReAct agent to a safe subset.
 
 ---
 
@@ -339,8 +382,8 @@ resume_workflow_task.delay(instance_id)     │                             │
   │                                         │                             │
   ├─ Load context from DB                   │                             │
   ├─ Inject approval_payload                │                             │
-  ├─ Find current_node_id index + 1         │                             │
-  └─ Continue _run_from(start_index)        │                             │
+  ├─ Re-parse graph, skip executed nodes    │                             │
+  └─ Continue _execute_ready_queue()        │                             │
 ```
 
 This pattern allows the workflow to sleep indefinitely without holding a worker thread. The approval can come from any channel — WhatsApp, Teams, a web UI, or a direct API call.
@@ -349,7 +392,7 @@ This pattern allows the workflow to sleep indefinitely without holding a worker 
 
 ## 11. Step 10 — Completion and Callback
 
-**Code:** `backend/app/engine/dag_runner.py` → end of `_run_from()`
+**Code:** `backend/app/engine/dag_runner.py` → end of `_execute_ready_queue()`
 
 After the last node completes:
 
@@ -373,9 +416,9 @@ In the AI Studio sidecar pattern, the final Action node in the graph would be an
 
 ## 12. Step 11 — MCP Tool Bridge (Streamable HTTP)
 
-**Code:** `backend/app/engine/mcp_client.py` (SDK client), `backend/app/api/tools.py` (palette hydration), `backend/app/engine/node_handlers.py` → `_call_mcp_tool()` (runtime execution)
+**Code:** `backend/app/engine/mcp_client.py`, `backend/app/api/tools.py`, `backend/app/engine/node_handlers.py` → `_call_mcp_tool()`
 
-The orchestrator connects to the parent project's MCP server using the **MCP Python SDK** over **Streamable HTTP** transport — the standard MCP protocol.
+The orchestrator connects to the parent project's MCP server using the **MCP Python SDK** over **Streamable HTTP** transport.
 
 ### Design Time — Palette Hydration
 
@@ -383,14 +426,22 @@ The orchestrator connects to the parent project's MCP server using the **MCP Pyt
 GET /api/v1/tools                    mcp_client.py             MCP Server (:8000)
 X-Tenant-Id: acme-corp               │                         │
                                       ├─ list_tools()          │
-                                      │  ├─ streamablehttp     │
+                                      │  ├─ Check TTL cache    │
+                                      │  │   (5 min)           │
+                                      │  ├─ If stale:          │
+                                      │  │   streamablehttp    │
                                       │  │   _client(/mcp) ──▶ │ tools/list
-                                      │  └─ cache result       │
+                                      │  └─ Cache result       │
                                       ├─ Filter by tenant      │
                                       └─ Return JSON list      │
 ```
 
-This allows the frontend to show real MCP tools (like `ae.request.get_status`, `ae.request.restart`, `ae.request.get_execution_logs`) in the Action node palette alongside the built-in node types.
+Tools are cached for 5 minutes. To force an immediate refresh (e.g. after deploying new MCP tools):
+
+```bash
+curl -X POST http://localhost:8001/api/v1/tools/invalidate-cache \
+  -H "X-Tenant-Id: acme-corp"
+```
 
 ### Run Time — Tool Execution
 
@@ -413,42 +464,141 @@ dispatch_node("action", ...)
          └─ Returns parsed JSON result
 ```
 
-The MCP SDK handles session initialization, protocol negotiation, and response streaming automatically. No custom REST bridge needed.
+---
+
+## 13. Step 12 — Version History and Rollback
+
+**Code:** `backend/app/api/workflows.py` → `GET /{id}/versions`, `POST /{id}/rollback/{v}`, `frontend/src/components/toolbar/VersionHistoryDialog.tsx`
+
+Every time a workflow's graph is saved (PATCH with `graph_json`), the backend creates an immutable snapshot **before** overwriting:
+
+```
+PATCH /api/v1/workflows/{id}
+  body: { graph_json: <new graph> }
+
+Backend:
+  1. Create WorkflowSnapshot(version=wf.version, graph_json=wf.graph_json)
+  2. wf.graph_json = new graph
+  3. wf.version += 1
+  4. Commit
+```
+
+### Listing Snapshots
+
+```http
+GET /api/v1/workflows/{id}/versions
+X-Tenant-Id: acme-corp
+
+Response: [
+  {"id": "...", "workflow_def_id": "...", "version": 2, "saved_at": "2026-03-20T10:00:00Z"},
+  {"id": "...", "workflow_def_id": "...", "version": 1, "saved_at": "2026-03-20T09:50:00Z"}
+]
+```
+
+### Rolling Back
+
+```
+POST /api/v1/workflows/{id}/rollback/{version}
+
+Backend:
+  1. Snapshot current state (version N) → creates snapshot
+  2. wf.graph_json = snapshot[version].graph_json
+  3. wf.version = N + 1  (rollback is a forward operation, not a rewind)
+  4. Commit + refresh
+  5. Return updated WorkflowOut
+```
+
+Rollback **always increments** the version counter — version history is an append-only ledger. This prevents accidentally losing the current state when restoring an old snapshot.
+
+### Frontend
+
+The **History** (clock) button in the Toolbar opens `VersionHistoryDialog`. It shows:
+- The current live version (highlighted)
+- All snapshots with timestamps and version numbers
+- A **Restore** button per snapshot that calls rollback and reloads the canvas
 
 ---
 
-## 13. End-to-End Example
+## 14. Step 13 — OIDC Authentication Flow
 
-**Scenario:** An IT support agent that diagnoses a failed AE request.
+**Code:** `backend/app/api/auth.py`, `frontend/src/components/auth/LoginPage.tsx`, `frontend/src/lib/api.ts`
+
+The OIDC flow is opt-in. It activates when `ORCHESTRATOR_OIDC_ENABLED=true` (backend) and `VITE_AUTH_MODE=oidc` (frontend).
+
+```
+Browser                        FastAPI (/auth/oidc)        Identity Provider
+───────                        ───────────────────        ─────────────────
+App.tsx: no token in                  │                          │
+  localStorage → show LoginPage       │                          │
+                                      │                          │
+"Sign in with SSO" clicked            │                          │
+  └── GET /auth/oidc/login            │                          │
+                                      │                          │
+                              Generate state + nonce + PKCE      │
+                              Store in Redis (5-min TTL)          │
+                              Redirect to authorization_endpoint  │
+                              ─────────────────────────────────▶ │
+                                                                  │
+                                                         User authenticates
+                                                         Redirect to callback
+                              ◀───────────────────────────────── │
+                              GET /auth/oidc/callback             │
+                                ?code=...&state=...               │
+                                                                  │
+                              Validate state from Redis           │
+                              Exchange code for tokens            │
+                              ─────────────────────────────────▶ │
+                              ◀─ id_token ──────────────────────  │
+                                                                  │
+                              Validate ID token (authlib + JWKS)  │
+                              Extract tenant_id from claim         │
+                              Issue internal JWT                   │
+                              Return { access_token, tenant_id }  │
+                                                                  │
+  Frontend stores token in           │                            │
+    localStorage ("ae_access_token") │                            │
+  App renders normally               │                            │
+```
+
+Once stored, all API calls use `Authorization: Bearer <token>` instead of `X-Tenant-Id`. The backend validates the JWT via `app/security/jwt_auth.py`.
+
+---
+
+## 15. End-to-End Example
+
+**Scenario:** An IT support agent that diagnoses a failed AE request using a ReAct loop with auto-discovered tools.
 
 ### Graph Design
 
 ```
-[Webhook Trigger] ──▶ [LLM Agent] ──▶ [MCP: get_request_status] ──▶ [MCP: get_execution_logs] ──▶ [LLM Agent: Diagnosis] ──▶ [Human Approval] ──▶ [MCP: restart_request]
+[Webhook Trigger] ──▶ [ReAct Agent] ──▶ [Human Approval] ──▶ [MCP: restart_request]
 ```
+
+The ReAct Agent has `tools: []` (empty) — it will auto-discover all MCP tools at runtime.
 
 ### Execution Trace
 
-| Step | Node | Type | Input | Output |
-|------|------|------|-------|--------|
-| 1 | Webhook Trigger | trigger | `{request_id: "REQ-12345"}` | `{output: {request_id: "REQ-12345"}}` |
-| 2 | LLM Agent | agent | System prompt + trigger payload | `{response: "I'll investigate REQ-12345..."}` |
-| 3 | get_request_status | action | `{request_id: "REQ-12345"}` | `{status: "Failed", error: "Timeout"}` |
-| 4 | get_execution_logs | action | `{request_id: "REQ-12345"}` | `{logs: [...]}` |
-| 5 | Diagnosis Agent | agent | All upstream outputs + "Analyze the failure" | `{response: "Root cause: network timeout at step 3..."}` |
-| 6 | Human Approval | action | `{approvalMessage: "Restart REQ-12345?"}` | **SUSPENDED** — waiting for approval |
-| — | *(Human approves via Teams)* | — | `POST /callback {approved: true}` | — |
-| 7 | restart_request | action | `{request_id: "REQ-12345"}` | `{status: "Restarted"}` |
+| Step | Node | Type | Key Behavior |
+|------|------|------|-------------|
+| 1 | Webhook Trigger | trigger | Pass through `{request_id: "REQ-12345"}` |
+| 2 | ReAct Agent | agent | Auto-discovers 106 MCP tools. Calls `get_request_status(REQ-12345)`, then `get_execution_logs(REQ-12345)`, then reasons over the results and produces a diagnosis. |
+| 3 | Human Approval | action | Workflow suspended. Teams message sent with diagnosis. |
+| — | *(Human approves)* | — | `POST /callback {approved: true, action: "restart"}` |
+| 4 | restart_request | action | `call_tool("ae.request.restart", {request_id: "REQ-12345"})` |
+
+### Version History
+
+After editing this workflow (e.g. changing the ReAct system prompt), the user saves again. The previous version is automatically snapshotted. If the new prompt breaks the agent's behavior, they open the History dialog and click **Restore** on the previous version.
 
 ### Timing
 
-- Steps 1-5: ~10 seconds (async worker).
-- Step 6: Suspended for 2 hours (human reviewing).
-- Step 7: ~3 seconds (after resume).
-- Total wall clock: ~2 hours. Worker thread held: ~13 seconds.
+- Step 1-2: ~15 seconds (ReAct loop with 2-3 tool calls).
+- Step 3: Suspended for 2 hours (human reviewing).
+- Step 4: ~3 seconds (after resume).
+- Total worker thread held: ~18 seconds across all steps.
 
 ---
 
-For architecture details, see `orchestrator/TECHNICAL_BLUEPRINT.md`.  
-For installation and setup, see `orchestrator/SETUP_GUIDE.md`.  
+For architecture details, see `orchestrator/TECHNICAL_BLUEPRINT.md`.
+For installation and setup, see `orchestrator/SETUP_GUIDE.md`.
 For the parent project's architecture, see `docs/TECHNICAL_BLUEPRINT.md` and `docs/HOW_IT_WORKS.md`.
