@@ -119,6 +119,9 @@ function AgenticNodeComponent({ data, selected }: NodeProps) {
 
       {isCondition ? (
         <>
+          <div className="absolute right-[-4px] text-[8px] font-bold text-green-600 dark:text-green-400" style={{ top: "25%", transform: "translateX(100%) translateY(-50%)", paddingLeft: 6 }}>
+            Yes
+          </div>
           <Handle
             type="source"
             position={Position.Right}
@@ -126,6 +129,9 @@ function AgenticNodeComponent({ data, selected }: NodeProps) {
             className="!w-3 !h-3 !bg-green-500 !border-2 !border-background"
             style={{ top: "35%" }}
           />
+          <div className="absolute right-[-4px] text-[8px] font-bold text-red-600 dark:text-red-400" style={{ top: "57%", transform: "translateX(100%) translateY(-50%)", paddingLeft: 6 }}>
+            No
+          </div>
           <Handle
             type="source"
             position={Position.Right}

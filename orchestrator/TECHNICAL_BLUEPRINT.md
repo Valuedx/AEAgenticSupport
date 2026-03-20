@@ -1,3 +1,5 @@
+> - **V0.4 Branching & Parallel Execution (2026-03-20)**: Rewrote `dag_runner.py` with a ready-queue execution model. Condition nodes now prune non-matching branches (only `true` or `false` edges are followed). Independent branches execute in parallel via `ThreadPoolExecutor`. Merge nodes naturally wait for all upstream branches. Frontend edges from condition nodes show colored labels (green "Yes" / red "No") with arrow markers. See §6 for updated DAG engine docs.
+>
 > - **V0.3 Live LLM Integration (2026-03-20)**: Agent nodes now call real LLM providers (Google Gemini via `google-genai`, OpenAI, Anthropic). Added `app/engine/llm_providers.py` multi-provider abstraction, `app/engine/prompt_template.py` Jinja2 system-prompt templating with context variable injection (dot-accessible upstream outputs), and token usage tracking in execution logs. New config keys: `ORCHESTRATOR_GOOGLE_API_KEY`, `ORCHESTRATOR_OPENAI_API_KEY`, `ORCHESTRATOR_ANTHROPIC_API_KEY`. See `SETUP_GUIDE.md` §7 for configuration.
 >
 > - **V0.2 UI Wiring (2026-03-20)**: Added frontend API client + workflow toolbar (save/load/execute), a saved-workflow list dialog, and an execution log panel with polling against backend instance status. See `orchestrator/HOW_IT_WORKS.md` for runtime walkthrough.
@@ -5,9 +7,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.3  
+**Version:** 0.4  
 **Last updated:** 2026-03-20  
-**Status:** V0.3 live LLM integration (Google/OpenAI/Anthropic), V0.2 frontend wired to backend, V0.1 scaffold complete
+**Status:** V0.4 branch-aware parallel DAG execution, V0.3 live LLM integration, V0.2 frontend wired, V0.1 scaffold
 
 ---
 
@@ -406,51 +408,71 @@ Unique index: `(tenant_id, tool_name)`.
 
 File: `app/engine/dag_runner.py`
 
-### 6.1 Graph Parsing
+### 6.1 Graph Parsing (Handle-Aware)
 
-`parse_graph(graph_json)` converts React Flow JSON into three structures:
+`parse_graph(graph_json)` converts React Flow JSON into two structures:
 
 - `nodes_map`: `{node_id: node_dict}` — the full node object including `data`.
-- `adj`: `{source_id: [target_id, ...]}` — forward adjacency list built from `edges`.
-- `in_degree`: `{node_id: int}` — count of incoming edges per node.
+- `edges`: list of `_Edge(source, target, source_handle)` — preserves `sourceHandle` from React Flow edges (e.g. `"true"` / `"false"` for condition outputs).
 
-### 6.2 Topological Sort
+`_build_graph_structures()` derives forward adjacency, reverse adjacency, and in-degree maps from the parsed edges.
 
-`topological_sort()` implements Kahn's algorithm:
+### 6.2 Cycle Detection
 
-1. Enqueue all nodes with `in_degree == 0` (typically Trigger nodes).
-2. Dequeue each node, append to `order`, decrement in-degree of all neighbors.
-3. If `len(order) != len(nodes_map)`, raise `ValueError` identifying cycle nodes.
+`_detect_cycles()` runs Kahn's algorithm over the graph to verify it is a valid DAG before execution begins.
 
-### 6.3 Execution Flow
+### 6.3 Ready-Queue Execution Model
 
-`execute_graph(db, instance_id)`:
+Instead of a simple linear topological order, the engine uses a **ready-queue** model that naturally supports branching and parallelism:
 
-1. Load `WorkflowInstance` and set status to `running`.
-2. Parse the definition's `graph_json` and compute topological order.
-3. Initialize `context` dict with `trigger_payload` under key `"trigger"`.
-4. Call `_run_from()` starting at index 0.
+```
+┌───────────────────────────────────────────────────────────────┐
+│  1. Find all nodes with in_degree == 0 → initial ready set   │
+│  2. While ready set is non-empty:                             │
+│     a. If 1 ready node  → execute sequentially                │
+│     b. If N ready nodes → execute in parallel (ThreadPool)    │
+│     c. After each node completes:                             │
+│        - If CONDITION node → propagate only matching branch   │
+│          edges; prune the non-matching subtree                │
+│        - Otherwise → propagate all outgoing edges             │
+│     d. Recompute ready set (nodes with all incoming edges     │
+│        satisfied, not pruned, not yet executed)                │
+│  3. Mark instance completed/failed                            │
+└───────────────────────────────────────────────────────────────┘
+```
 
-`_run_from(db, instance, nodes_map, order, context, start_index)`:
+### 6.4 Branch Pruning
 
-For each node in order (from `start_index`):
+When a Condition node evaluates to `{"branch": "true"}`:
 
-1. Create an `ExecutionLog` entry with status `running`.
-2. **Suspension check:** If node is an Action with `approvalMessage` config and no `"approval"` key in context → set instance to `suspended`, serialize context, return.
-3. Call `dispatch_node(node_data, context, tenant_id)` to execute the node.
-4. Store output in `context[node_id]` and update the log entry.
-5. On exception: mark log as `failed`, mark instance as `failed`, return.
-6. After all nodes: mark instance as `completed`.
+1. Edges with `sourceHandle == "true"` → satisfied (downstream nodes may become ready).
+2. Edges with `sourceHandle == "false"` → target and its entire subtree are **pruned** (never executed).
+3. Pruned nodes are excluded from the ready-set and the completion check.
 
-### 6.4 Resume Flow
+This ensures only the chosen branch executes, matching the visual flow on the canvas.
+
+### 6.5 Parallel Execution
+
+When multiple nodes are ready simultaneously (e.g. two branches after a fan-out):
+
+- A `ThreadPoolExecutor` (max 8 workers) runs their handlers concurrently.
+- Each node writes to a unique key in the shared context dict (`context[node_id]`), so no locking is needed.
+- `ExecutionLog` entries are created before dispatch and updated after all futures complete.
+- If any parallel node fails or suspends, the engine stops after the current batch.
+
+### 6.6 Merge / Wait-All
+
+Merge nodes have multiple incoming edges. Under the ready-queue model, a merge node only becomes ready when **all** non-pruned upstream edges are satisfied — implementing wait-all semantics naturally without special-case code.
+
+### 6.7 Resume Flow
 
 `resume_graph(db, instance_id, approval_payload)`:
 
 1. Load suspended instance, inject `approval_payload` into context under key `"approval"`.
-2. Recompute topological order from graph JSON.
-3. Find the index of `current_node_id` + 1 and resume `_run_from()`.
+2. Re-parse the graph and mark already-executed nodes (from context keys) as skipped.
+3. Re-run `_execute_ready_queue()`, which finds the next ready nodes and continues.
 
-### 6.5 Node Handlers
+### 6.8 Node Handlers
 
 File: `app/engine/node_handlers.py`
 
@@ -459,9 +481,9 @@ File: `app/engine/node_handlers.py`
 | Category | Handler | Behavior |
 |----------|---------|----------|
 | `trigger` | `_handle_trigger` | Pass through `context["trigger"]` |
-| `agent` | `_handle_agent` | **Stub** — logs provider/model, returns placeholder. Production will call LLM API |
+| `agent` | `_handle_agent` | Render Jinja2 prompt, call LLM provider (Google/OpenAI/Anthropic), return response + token usage |
 | `action` | `_handle_action` | Routes to MCP tool call, HTTP request, or no-op based on config keys |
-| `logic` | `_handle_logic` | Evaluates condition expressions or merges upstream outputs |
+| `logic` | `_handle_logic` | Evaluates condition expressions (returns `{branch: "true"|"false"}`) or merges upstream outputs |
 
 **MCP tool invocation:** `_call_mcp_tool()` sends `POST {mcp_server_url}/call-tool` with `{"tool_name": ..., "arguments": ...}` and the `X-Tenant-Id` header.
 
@@ -544,12 +566,12 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 11. Known Limitations (V0.3)
+## 11. Known Limitations (V0.4)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
-| **LLM calls** | Live multi-provider LLM calls implemented (Google/OpenAI/Anthropic); ReAct tool-calling loop not yet implemented | Add iterative tool-calling ReAct loop for agent nodes |
-| **Condition branching** | DAG runner executes all nodes linearly | Implement edge-aware branch selection using `sourceHandle` |
+| **LLM calls** | Live multi-provider LLM calls; ReAct tool-calling loop not yet implemented | Add iterative tool-calling ReAct loop for agent nodes |
+| **Condition branching** | Branch pruning implemented; `eval()`-based condition expressions | Replace with safe expression parser |
 | **MCP transport** | Backend calls `POST /call-tool` (REST) | Add REST bridge to existing stdio/SSE MCP server |
 | **Frontend persistence** | Save/Load/Execute UI is wired, but still lacks tenant/session switching, schema validation, and graph-level validation/highlighting | Add tenant-aware session config, validate `graph_json` against node registry, and improve UX with WebSocket/SSE updates |
 | **Tenant auth** | Header-based `X-Tenant-Id` only | JWT validation with tenant claim |
@@ -573,10 +595,12 @@ A version-controlled JSON file defining all node types with their `config_schema
 - Jinja2 system prompt templating with dot-accessible context variables (`app/engine/prompt_template.py`).
 - Token usage tracking (input/output tokens) returned in execution logs.
 
-**V0.4 — Branching and Parallel Execution**
-- Condition-aware edge traversal (follow `true`/`false` handles).
-- Parallel node execution for independent branches.
-- Merge node waits for all/any upstream branches.
+**V0.4 — Branching and Parallel Execution (Implemented)**
+- Ready-queue execution model replaces linear topological traversal.
+- Condition nodes prune non-matching branch subtrees based on `sourceHandle`.
+- Independent nodes execute in parallel via `ThreadPoolExecutor` (max 8 workers).
+- Merge nodes wait for all upstream branches naturally via the ready-queue model.
+- Frontend edges from condition nodes show colored "Yes"/"No" labels with arrow markers.
 
 **V0.5 — Production Hardening**
 - JWT-based authentication with tenant claims.

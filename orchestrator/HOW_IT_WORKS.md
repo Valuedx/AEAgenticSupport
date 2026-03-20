@@ -1,3 +1,5 @@
+> - **V0.4 Branching & Parallel Execution (2026-03-20)**: DAG engine rewritten with ready-queue model. Condition nodes now prune non-matching branches; independent nodes execute in parallel. Merge nodes wait for all upstream branches. Condition edges show colored "Yes"/"No" labels on the canvas.
+>
 > - **V0.3 Live LLM Integration (2026-03-20)**: Agent nodes now call real LLM providers (Google Gemini, OpenAI, Anthropic). System prompts support Jinja2 templating with upstream context injection (`{{ trigger.user_query }}`, `{{ node_1.response }}`). Token usage tracked in execution logs.
 >
 > - **V0.2 UI Wiring (2026-03-20)**: Frontend now saves/loads/executes workflows via the FastAPI backend and shows execution logs using a polling execution panel. See `orchestrator/TECHNICAL_BLUEPRINT.md` for architecture and `orchestrator/SETUP_GUIDE.md` for setup.
@@ -7,7 +9,7 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.3  
+**Version:** 0.4  
 **Last updated:** 2026-03-20
 
 ---
@@ -205,56 +207,59 @@ The API immediately returns `202 Accepted` with the new instance ID. The actual 
 
 The worker loads the `WorkflowDefinition.graph_json` and processes it:
 
-**Step 7a — Parse:** Build three data structures from the React Flow JSON:
+**Step 7a — Parse (Handle-Aware):** Build data structures from the React Flow JSON, preserving `sourceHandle` info for condition branches:
 
 ```python
-nodes_map = {"node_1": {...}, "node_2": {...}, "node_3": {...}}
+nodes_map = {"node_1": {...}, "node_2": {...}, "node_3": {...}, "node_4": {...}}
 
-adj = {
-    "node_1": ["node_2"],       # Trigger → Agent
-    "node_2": ["node_3"],       # Agent → Action
-}
-
-in_degree = {
-    "node_1": 0,                # No incoming edges (Trigger)
-    "node_2": 1,                # One incoming from Trigger
-    "node_3": 1,                # One incoming from Agent
-}
+edges = [
+    Edge(source="node_1", target="node_2", source_handle=None),      # Trigger → Condition
+    Edge(source="node_2", target="node_3", source_handle="true"),    # Condition → Agent (Yes)
+    Edge(source="node_2", target="node_4", source_handle="false"),   # Condition → Action (No)
+]
 ```
 
-**Step 7b — Topological Sort (Kahn's Algorithm):**
+**Step 7b — Cycle Detection:**
 
-1. Start with all nodes where `in_degree == 0` (Trigger nodes).
-2. Process each node: add to execution order, decrement in-degree of downstream neighbors.
-3. Repeat until all nodes are ordered.
-4. If any nodes remain with non-zero in-degree, the graph has a cycle — raise an error.
+Kahn's algorithm validates the graph is a valid DAG before execution begins.
 
-Result: `["node_1", "node_2", "node_3"]` — a valid execution order.
+**Step 7c — Ready-Queue Initialization:**
+
+Nodes with `in_degree == 0` (no incoming edges, typically Trigger nodes) form the initial ready set.
 
 ---
 
-## 9. Step 8 — Node-by-Node Execution
+## 9. Step 8 — Ready-Queue Execution
 
-**Code:** `backend/app/engine/dag_runner.py` → `_run_from()`, `backend/app/engine/node_handlers.py` → `dispatch_node()`
+**Code:** `backend/app/engine/dag_runner.py` → `_execute_ready_queue()`, `backend/app/engine/node_handlers.py` → `dispatch_node()`
 
-For each node in topological order:
+The engine uses a ready-queue model instead of a linear topological order:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  For node_id in execution_order:                             │
+│  While ready_nodes is non-empty:                             │
 │                                                              │
-│  1. Create ExecutionLog (status: "running")                  │
-│  2. Build input from config + upstream outputs               │
-│  3. dispatch_node(node_data, context, tenant_id)             │
-│     ├── trigger  → pass through trigger_payload              │
-│     ├── agent    → render prompt + call LLM provider         │
-│     ├── action   → call MCP tool / HTTP request              │
-│     └── logic    → evaluate condition / merge branches       │
-│  4. Store output in context[node_id]                         │
-│  5. Update ExecutionLog (status: "completed", output_json)   │
+│  1. If 1 ready node → execute sequentially                   │
+│     If N ready nodes → execute in parallel (ThreadPool)      │
 │                                                              │
-│  On error:                                                   │
-│     Mark log and instance as "failed", stop execution.       │
+│  2. For each executed node:                                  │
+│     a. Create ExecutionLog (status: "running")               │
+│     b. dispatch_node(node_data, context, tenant_id)          │
+│        ├── trigger  → pass through trigger_payload           │
+│        ├── agent    → render prompt + call LLM provider      │
+│        ├── action   → call MCP tool / HTTP request           │
+│        └── logic    → evaluate condition / merge branches    │
+│     c. Store output in context[node_id]                      │
+│                                                              │
+│  3. Propagate edges:                                         │
+│     - CONDITION node → only matching branch edges satisfied  │
+│       Non-matching subtree is PRUNED (never executed)        │
+│     - Other nodes → all outgoing edges satisfied             │
+│                                                              │
+│  4. Recompute ready set (all incoming edges satisfied,       │
+│     not pruned, not yet executed)                            │
+│                                                              │
+│  On error: mark log and instance as "failed", stop.          │
 └──────────────────────────────────────────────────────────────┘
 ```
 

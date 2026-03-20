@@ -49,7 +49,20 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   },
 
   onConnect: (connection) => {
-    set({ edges: addEdge(connection, get().edges) });
+    const sourceNode = get().nodes.find((n) => n.id === connection.source);
+    const isCondition =
+      sourceNode?.data?.nodeCategory === "logic" &&
+      sourceNode?.data?.label === "Condition";
+
+    const edge = {
+      ...connection,
+      label: isCondition ? (connection.sourceHandle === "false" ? "No" : "Yes") : undefined,
+      style: isCondition
+        ? { stroke: connection.sourceHandle === "false" ? "#ef4444" : "#22c55e", strokeWidth: 2 }
+        : undefined,
+      animated: isCondition ? true : false,
+    };
+    set({ edges: addEdge(edge, get().edges) });
   },
 
   addNode: (nodeCategory, label, position, defaultConfig = {}) => {

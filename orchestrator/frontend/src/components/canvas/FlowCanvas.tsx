@@ -1,11 +1,13 @@
-import { useCallback, useRef, type DragEvent } from "react";
+import { useCallback, useMemo, useRef, type DragEvent } from "react";
 import {
   ReactFlow,
   Background,
   Controls,
   MiniMap,
   type ReactFlowInstance,
+  type DefaultEdgeOptions,
   BackgroundVariant,
+  MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -15,6 +17,11 @@ import { AgenticNode } from "@/components/nodes/AgenticNode";
 import type { NodeCategory } from "@/types/nodes";
 
 const nodeTypes = { agenticNode: AgenticNode };
+
+const defaultEdgeOptions: DefaultEdgeOptions = {
+  markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+  style: { strokeWidth: 1.5 },
+};
 
 export function FlowCanvas() {
   const reactFlowRef = useRef<ReactFlowInstance | null>(null);
@@ -99,6 +106,7 @@ export function FlowCanvas() {
         onNodeClick={(_, node) => selectNode(node.id)}
         onPaneClick={() => selectNode(null)}
         nodeTypes={nodeTypes}
+        defaultEdgeOptions={defaultEdgeOptions}
         fitView
         deleteKeyCode={["Backspace", "Delete"]}
         className="bg-background"
