@@ -38,7 +38,7 @@
 
 The orchestrator sits inside the `AEAgenticSupport` repository and depends on:
 
-- **MCP Server** (optional): If running, the tool bridge endpoint (`GET /api/v1/tools`) will import tool specs from `mcp_server/tool_specs.py`. If unavailable, the endpoint returns an empty list and the frontend uses its built-in palette.
+- **MCP Server** (optional): The orchestrator connects via MCP SDK over Streamable HTTP transport. Start the MCP server with `python -m mcp_server --transport streamable-http --port 8000`. If unavailable, the tools endpoint returns an empty list and the frontend uses its built-in palette.
 
 ### 1.3 Network Ports
 
@@ -48,7 +48,7 @@ The orchestrator sits inside the `AEAgenticSupport` repository and depends on:
 | Backend (FastAPI) | 8001 | `uvicorn` CLI argument |
 | PostgreSQL | 5432 | `ORCHESTRATOR_DATABASE_URL` |
 | Redis | 6379 | `ORCHESTRATOR_REDIS_URL` |
-| MCP Server (parent) | 3000 | `ORCHESTRATOR_MCP_SERVER_URL` |
+| MCP Server (parent) | 8000 | `ORCHESTRATOR_MCP_SERVER_URL` |
 
 ---
 
@@ -162,7 +162,7 @@ Create a `.env` file in `orchestrator/backend/` or set environment variables wit
 ```env
 ORCHESTRATOR_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ae_orchestrator
 ORCHESTRATOR_REDIS_URL=redis://localhost:6379/0
-ORCHESTRATOR_MCP_SERVER_URL=http://localhost:3000
+ORCHESTRATOR_MCP_SERVER_URL=http://localhost:8000/mcp
 ORCHESTRATOR_SECRET_KEY=your-secret-key-here
 ORCHESTRATOR_CORS_ORIGINS=["http://localhost:8080"]
 ```
@@ -270,7 +270,7 @@ Backend settings use the `ORCHESTRATOR_` prefix, while the frontend API client u
 |----------|----------|---------|-------------|
 | `ORCHESTRATOR_DATABASE_URL` | Yes | `postgresql://postgres:postgres@localhost:5432/ae_orchestrator` | PostgreSQL connection string |
 | `ORCHESTRATOR_REDIS_URL` | Yes | `redis://localhost:6379/0` | Redis connection for Celery |
-| `ORCHESTRATOR_MCP_SERVER_URL` | No | `http://localhost:3000` | Parent MCP server URL |
+| `ORCHESTRATOR_MCP_SERVER_URL` | No | `http://localhost:8000/mcp` | MCP server Streamable HTTP endpoint |
 | `ORCHESTRATOR_SECRET_KEY` | Yes | `change-me-in-production` | Signing key for future JWT support |
 | `ORCHESTRATOR_CORS_ORIGINS` | No | `["http://localhost:8080"]` | Allowed CORS origins (JSON array) |
 | `ORCHESTRATOR_GOOGLE_API_KEY` | No | `""` | Google AI API key for Gemini models |
@@ -373,7 +373,7 @@ curl http://localhost:8001/api/v1/workflows \
 | `401 Missing X-Tenant-Id` | No tenant header in request | Set `VITE_TENANT_ID` for the frontend or add `-H "X-Tenant-Id: your-tenant"` to API calls |
 | Celery tasks not executing | Redis not running | Start Redis with `redis-server` |
 | Migration fails | DB doesn't exist | Create it: `psql -U postgres -c "CREATE DATABASE ae_orchestrator;"` |
-| MCP tools endpoint empty | MCP server dir not found | Ensure `mcp_server/tool_specs.py` exists in parent project root |
+| MCP tools endpoint empty | MCP server not running | Start MCP server: `python -m mcp_server --transport streamable-http --port 8000` |
 | Canvas nodes not appearing | Drag-and-drop broken | Check browser console for JS errors; ensure `ReactFlowProvider` wraps the app |
 
 ---

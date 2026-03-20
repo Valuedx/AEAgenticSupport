@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     database_url: str = "postgresql://postgres:postgres@localhost:5432/ae_orchestrator"
     redis_url: str = "redis://localhost:6379/0"
-    mcp_server_url: str = "http://localhost:3000"
+    mcp_server_url: str = "http://localhost:8000/mcp"
     secret_key: str = "change-me-in-production"
     cors_origins: list[str] = ["http://localhost:8080"]
 

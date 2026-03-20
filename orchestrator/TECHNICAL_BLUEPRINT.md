@@ -1,4 +1,4 @@
-> - **V0.7 Observability & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. Compatible with parent project's `config/observability.py` pattern. TenantToolOverride now consumed by the tools endpoint to filter MCP tools per tenant.
+> - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
 >
@@ -234,6 +234,7 @@ orchestrator/backend/
     │   ├── node_handlers.py        # Per-type dispatch (trigger/agent/action/logic)
     │   ├── llm_providers.py        # Multi-provider LLM abstraction (Google/OpenAI/Anthropic)
     │   ├── react_loop.py           # ReAct iterative tool-calling loop for agent nodes
+    │   ├── mcp_client.py           # MCP SDK client (Streamable HTTP transport)
     │   ├── prompt_template.py      # Jinja2 system-prompt templating with context injection
     │   ├── safe_eval.py            # AST-based safe expression evaluator for conditions
     │   └── config_validator.py     # Validates node configs against node_registry.json
@@ -511,15 +512,45 @@ File: `app/engine/node_handlers.py`
 
 ---
 
-## 7. MCP Tool Bridge
+## 7. MCP Tool Bridge (Streamable HTTP)
 
-File: `app/api/tools.py`
+Files: `app/engine/mcp_client.py`, `app/api/tools.py`
 
-The `/api/v1/tools` endpoint dynamically imports `mcp_server.tool_specs.TOOL_SPECS` from the parent project's MCP server directory. It caches the result after first load and returns a list of `ToolOut` objects:
+The orchestrator connects to the parent project's MCP server using the **MCP Python SDK** over **Streamable HTTP** transport — the standard MCP protocol, not a custom REST bridge.
+
+### 7.1 Architecture
+
+```
+Orchestrator (FastAPI / Celery)          MCP Server (FastMCP)
+┌───────────────────────────┐           ┌──────────────────────┐
+│ mcp_client.call_tool()    │  HTTP     │ --transport           │
+│ mcp_client.list_tools()   │ ───────▶ │   streamable-http     │
+│                           │  /mcp     │   --port 8000         │
+│ Uses:                     │           │                       │
+│  streamablehttp_client()  │ ◀─────── │ SSE response stream   │
+│  ClientSession            │           │                       │
+└───────────────────────────┘           └──────────────────────┘
+```
+
+### 7.2 MCP Client Module
+
+`app/engine/mcp_client.py` provides:
+
+| Function | Purpose |
+|----------|---------|
+| `call_tool(name, args)` | Invoke an MCP tool; returns parsed JSON result |
+| `list_tools()` | List all available tools with schemas (cached) |
+| `get_openai_style_tool_defs(names)` | Convert MCP tool schemas to OpenAI function-calling format for LLM providers |
+
+All functions are synchronous wrappers around the async MCP SDK client, safe to call from Celery workers and FastAPI sync endpoints.
+
+### 7.3 Tool Listing API
+
+The `/api/v1/tools` endpoint uses `mcp_client.list_tools()` to fetch tools directly from the running MCP server:
 
 ```json
 {
-  "name": "get_request_status",
+  "name": "ae.request.get_status",
   "title": "Get Request Status",
   "description": "Retrieve the current status of an AE request",
   "category": "status",
@@ -528,7 +559,15 @@ The `/api/v1/tools` endpoint dynamically imports `mcp_server.tool_specs.TOOL_SPE
 }
 ```
 
-The frontend can use this endpoint to dynamically hydrate the Action node palette with real MCP tools, instead of relying solely on the hardcoded `NODE_PALETTE`.
+Tools are filtered per-tenant using `TenantToolOverride` records (V0.7). The frontend uses this endpoint to hydrate the Action node palette with real MCP tools.
+
+### 7.4 Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ORCHESTRATOR_MCP_SERVER_URL` | `http://localhost:8000/mcp` | MCP server Streamable HTTP endpoint |
+
+The MCP server must be running with `--transport streamable-http`.
 
 ---
 
@@ -681,7 +720,7 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
-| **MCP transport** | Backend calls `POST /call-tool` (REST) | Add REST bridge to existing stdio/SSE MCP server |
+| **MCP sessions** | New session per call; no connection pooling | Add session pool for high-throughput deployments |
 | **Tenant auth** | JWT auth implemented; no external IdP integration yet | Add OIDC/SAML federation with enterprise identity providers |
 | **Condition expressions** | Safe evaluator supports basic ops; no custom functions or regex | Add pluggable expression functions |
 | **Frontend validation** | Config validation runs server-side on save (logs warnings); no inline form validation | Generate dynamic property forms from registry schemas with client-side validation |
@@ -722,9 +761,10 @@ A version-controlled JSON file defining all node types with their `config_schema
 - Celery Beat cron scheduler (`scheduler.py`) with croniter for schedule triggers.
 - Frontend palette hydrated from `shared/node_registry.json`; backend validates configs on save.
 
-**V0.7 — Observability & Tenant Tools (Implemented)**
+**V0.7 — Observability, MCP Streaming & Tenant Tools (Implemented)**
 - Langfuse v4 integration (`app/observability.py`): root traces per workflow, child spans per node, LLM generation recording with token usage, tool call spans.
-- Compatible with parent project's `config/observability.py` (same env vars, same `_NoOpSpan` pattern).
+- MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`).
+- Tool listing, tool execution, and ReAct tool definitions all fetched live from MCP server via standard protocol.
 - TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 
 **V0.8 — Enterprise Features**

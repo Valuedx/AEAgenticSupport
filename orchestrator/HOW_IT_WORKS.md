@@ -1,4 +1,4 @@
-> - **V0.7 Observability & Tenant Tools (2026-03-20)**: Langfuse v4 integration — root trace per workflow, child spans per node, LLM generation recording with token usage, tool call spans. Compatible with parent project's `config/observability.py`. TenantToolOverride consumed by tools endpoint.
+> - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration — root trace per workflow, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport — replaces raw REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions fetched live from MCP server. TenantToolOverride consumed by tools endpoint.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop for agent nodes (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates replacing frontend polling. Celery Beat cron scheduler for schedule triggers. Frontend palette hydrated from `node_registry.json`; backend validates configs on save.
 >
@@ -371,45 +371,49 @@ In the AI Studio sidecar pattern, the final Action node in the graph would be an
 
 ---
 
-## 12. Step 11 — MCP Tool Bridge
+## 12. Step 11 — MCP Tool Bridge (Streamable HTTP)
 
-**Code:** `backend/app/api/tools.py` (palette hydration), `backend/app/engine/node_handlers.py` → `_call_mcp_tool()` (runtime execution)
+**Code:** `backend/app/engine/mcp_client.py` (SDK client), `backend/app/api/tools.py` (palette hydration), `backend/app/engine/node_handlers.py` → `_call_mcp_tool()` (runtime execution)
 
-The orchestrator bridges to the parent project's 106 MCP tools in two ways:
+The orchestrator connects to the parent project's MCP server using the **MCP Python SDK** over **Streamable HTTP** transport — the standard MCP protocol.
 
 ### Design Time — Palette Hydration
 
 ```
-GET /api/v1/tools                    tools.py
-X-Tenant-Id: acme-corp               │
-                                      ├─ Import mcp_server.tool_specs
-                                      ├─ Read TOOL_SPECS dict
-                                      ├─ Map to ToolOut schema
-                                      └─ Return JSON list
+GET /api/v1/tools                    mcp_client.py             MCP Server (:8000)
+X-Tenant-Id: acme-corp               │                         │
+                                      ├─ list_tools()          │
+                                      │  ├─ streamablehttp     │
+                                      │  │   _client(/mcp) ──▶ │ tools/list
+                                      │  └─ cache result       │
+                                      ├─ Filter by tenant      │
+                                      └─ Return JSON list      │
 ```
 
-This allows the frontend to show real MCP tools (like `get_request_status`, `restart_request`, `get_execution_logs`) in the Action node palette alongside the built-in node types.
+This allows the frontend to show real MCP tools (like `ae.request.get_status`, `ae.request.restart`, `ae.request.get_execution_logs`) in the Action node palette alongside the built-in node types.
 
 ### Run Time — Tool Execution
 
 ```
-DAG Runner                            MCP Server (port 3000)
-──────────                            ──────────────────────
+DAG Runner                            mcp_client.py          MCP Server (:8000)
+──────────                            ────────────           ──────────────────
 dispatch_node("action", ...)
   │
-  ├─ config.toolName = "get_request_status"
+  ├─ config.toolName = "ae.request.get_status"
   │
   └─ _call_mcp_tool()
        │
-       POST http://localhost:3000/call-tool
-       {
-         "tool_name": "get_request_status",
-         "arguments": {"request_id": "REQ-12345"}
-       }
-       X-Tenant-Id: acme-corp
-       │
-       └─ Returns tool result JSON
+       call_tool("ae.request.get_status",
+                 {"request_id": "REQ-12345"})
+         │
+         streamablehttp_client(/mcp) ──▶ tools/call
+         │                                │
+         ◀── SSE response stream ────────┘
+         │
+         └─ Returns parsed JSON result
 ```
+
+The MCP SDK handles session initialization, protocol negotiation, and response streaming automatically. No custom REST bridge needed.
 
 ---
 

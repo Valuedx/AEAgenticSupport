@@ -15,8 +15,6 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
 from app.config import settings
 from app.engine.prompt_template import render_prompt, build_user_message
 
@@ -116,60 +114,18 @@ def run_react_loop(
 # ---------------------------------------------------------------------------
 
 def _execute_tool(tool_name: str, arguments: dict, tenant_id: str) -> Any:
-    """Execute a tool by calling the MCP server."""
-    try:
-        resp = httpx.post(
-            f"{settings.mcp_server_url}/call-tool",
-            json={"tool_name": tool_name, "arguments": arguments},
-            headers={"X-Tenant-Id": tenant_id},
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        logger.error("ReAct tool execution failed: %s", exc)
-        return {"error": str(exc)}
+    """Execute a tool via MCP Streamable HTTP transport."""
+    from app.engine.mcp_client import call_tool
+    return call_tool(tool_name, arguments)
 
 
 def _load_tool_definitions(tool_names: list[str]) -> list[dict[str, Any]]:
-    """Load tool specs from the MCP registry for the given tool names.
+    """Load tool definitions from MCP server via Streamable HTTP.
 
     Returns OpenAI-style function definitions that can be adapted per provider.
     """
-    try:
-        import importlib
-        import sys
-        from pathlib import Path
-
-        mcp_path = Path(__file__).resolve().parents[3] / "mcp_server"
-        if not mcp_path.exists():
-            return []
-
-        sys.path.insert(0, str(mcp_path.parent))
-        try:
-            mod = importlib.import_module("mcp_server.tool_specs")
-            registry = getattr(mod, "TOOL_SPECS", {})
-        finally:
-            if str(mcp_path.parent) in sys.path:
-                sys.path.remove(str(mcp_path.parent))
-
-        tools = []
-        for name in tool_names:
-            spec = registry.get(name)
-            if not spec:
-                continue
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": spec.get("description", ""),
-                    "parameters": spec.get("parameters", {"type": "object", "properties": {}}),
-                },
-            })
-        return tools
-    except Exception:
-        logger.exception("Failed to load tool definitions for ReAct")
-        return []
+    from app.engine.mcp_client import get_openai_style_tool_defs
+    return get_openai_style_tool_defs(tool_names)
 
 
 # ---------------------------------------------------------------------------

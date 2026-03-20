@@ -12,8 +12,6 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
-
 logger = logging.getLogger(__name__)
 
 
@@ -124,26 +122,15 @@ def _handle_action(
 def _call_mcp_tool(
     tool_name: str, parameters: dict, tenant_id: str
 ) -> dict[str, Any]:
-    """Invoke a tool on the existing MCP server."""
+    """Invoke a tool on the MCP server via Streamable HTTP transport."""
+    from app.engine.mcp_client import call_tool
     from app.observability import span_tool, _NoOpSpan
     trace = _NoOpSpan()
 
     with span_tool(trace, tool_name=tool_name, arguments=parameters) as span:
-        try:
-            resp = httpx.post(
-                f"{settings.mcp_server_url}/call-tool",
-                json={"tool_name": tool_name, "arguments": parameters},
-                headers={"X-Tenant-Id": tenant_id},
-                timeout=60.0,
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            span.update(output=result)
-            return result
-        except httpx.HTTPError as exc:
-            logger.error("MCP tool call failed: %s", exc)
-            span.update(output={"error": str(exc)})
-            return {"error": str(exc)}
+        result = call_tool(tool_name, parameters)
+        span.update(output=result)
+        return result
 
 
 def _call_http(config: dict) -> dict[str, Any]:
