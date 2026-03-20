@@ -36,7 +36,8 @@ from agents.base_agent import (
     AgentStatus,
     BaseAgent,
 )
-from config.llm_client import llm_client
+from config.llm_client import llm_client, set_current_trace, get_current_trace
+from config.observability import trace_context, span_context
 from rag.engine import get_rag_engine
 from state.conversation_state import ConversationState
 
@@ -124,6 +125,27 @@ class RCAAgent(BaseAgent):
         if not state:
             return AgentResult(response="No conversation state provided.", success=False)
 
+        with trace_context(
+            "rca_agent",
+            session_id=state.conversation_id,
+            user_id=state.user_id or "",
+            input={"message": user_message[:500]},
+            tags=["rca"],
+        ) as trace:
+            set_current_trace(trace)
+            try:
+                return self._handle_inner(user_message, state, tracker, issue_id, trace)
+            finally:
+                set_current_trace(None)
+
+    def _handle_inner(
+        self,
+        user_message: str,
+        state: ConversationState,
+        tracker,
+        issue_id: str,
+        trace,
+    ) -> AgentResult:
         import tools  # noqa: F401 — ensures tool registrations are loaded
         from tools.registry import tool_registry
 
@@ -145,6 +167,11 @@ class RCAAgent(BaseAgent):
             payload.get("generated_at")
             or (state.rca_data or {}).get("generated_at")
         )
+
+        trace.update(output={
+            "success": tool_result.success,
+            "severity": payload.get("severity", "unknown"),
+        })
 
         return AgentResult(
             response=report,
@@ -208,19 +235,24 @@ class RCAAgent(BaseAgent):
 
         # 7. Generate role-appropriate report
         role = (state.user_role or "technical").lower()
+        trace = get_current_trace()
         try:
             if role == "business":
-                report = self._generate_business_rca(
-                    findings_text, past_text, affected_wfs,
-                    incident_summary, severity, prevention_steps,
-                )
+                with span_context(trace, "generate_business_rca", input={"role": role, "severity": severity}) as span:
+                    report = self._generate_business_rca(
+                        findings_text, past_text, affected_wfs,
+                        incident_summary, severity, prevention_steps,
+                    )
+                    span.update(output={"length": len(report)})
             else:
                 timeline = self._build_timeline(state.tool_call_log)
-                report = self._generate_technical_rca(
-                    findings_text, past_text, affected_wfs,
-                    incident_summary, state.tool_call_log,
-                    severity, prevention_steps, timeline,
-                )
+                with span_context(trace, "generate_technical_rca", input={"role": role, "severity": severity}) as span:
+                    report = self._generate_technical_rca(
+                        findings_text, past_text, affected_wfs,
+                        incident_summary, state.tool_call_log,
+                        severity, prevention_steps, timeline,
+                    )
+                    span.update(output={"length": len(report)})
         except Exception as exc:
             logger.error("llm_call_failed role=%s error=%s", role, exc, exc_info=True)
             report = self._fallback_report(incident_summary, affected_wfs, findings_text)
@@ -510,24 +542,34 @@ Instructions:
 
     def _index_as_past_incident(self, state: ConversationState, rca_report: str) -> None:
         """Fire-and-forget: index the resolved incident into the RAG store."""
-        try:
-            rag = get_rag_engine()
-            incident_id = f"INC-AUTO-{state.conversation_id}"
-            summary = " ".join(state.affected_workflows) + " — auto-generated"
-            root_cause_prompt = (
-                "Extract the root cause in one concise sentence from this RCA report:\n\n"
-                f"{rca_report[:1200]}"
-            )
-            root_cause = llm_client.chat(root_cause_prompt)
-            rag.index_past_incident(
-                incident_id=incident_id,
-                summary=summary,
-                root_cause=root_cause,
-                resolution=rca_report[: self.MAX_RCA_INDEX_CHARS],
-                workflows_involved=state.affected_workflows,
-                category="auto_resolved",
-            )
-            logger.info("rca_indexed incident_id=%s", incident_id)
-        except Exception as exc:
-            logger.warning("rca_index_failed incident_id=INC-AUTO-%s error=%s",
-                           state.conversation_id, exc)
+        with trace_context(
+            "rca_index_incident",
+            session_id=state.conversation_id,
+            tags=["rca", "indexing"],
+        ) as trace:
+            set_current_trace(trace)
+            try:
+                rag = get_rag_engine()
+                incident_id = f"INC-AUTO-{state.conversation_id}"
+                summary = " ".join(state.affected_workflows) + " — auto-generated"
+                root_cause_prompt = (
+                    "Extract the root cause in one concise sentence from this RCA report:\n\n"
+                    f"{rca_report[:1200]}"
+                )
+                root_cause = llm_client.chat(root_cause_prompt)
+                rag.index_past_incident(
+                    incident_id=incident_id,
+                    summary=summary,
+                    root_cause=root_cause,
+                    resolution=rca_report[: self.MAX_RCA_INDEX_CHARS],
+                    workflows_involved=state.affected_workflows,
+                    category="auto_resolved",
+                )
+                trace.update(output={"incident_id": incident_id})
+                logger.info("rca_indexed incident_id=%s", incident_id)
+            except Exception as exc:
+                logger.warning("rca_index_failed incident_id=INC-AUTO-%s error=%s",
+                               state.conversation_id, exc)
+                trace.update(output={"error": str(exc)[:300]}, level="ERROR")
+            finally:
+                set_current_trace(None)

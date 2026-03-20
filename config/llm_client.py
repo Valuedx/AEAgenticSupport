@@ -1,4 +1,5 @@
 import logging
+import threading
 import typing
 
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -13,9 +14,23 @@ except ImportError:
 
 from config.settings import CONFIG
 from config.metrics import metrics_collector, TokenUsage
+from config.observability import create_generation
 from state.app_config import get_runtime_value
 
+_active_trace: threading.local = threading.local()
+
 logger = logging.getLogger("ops_agent.llm")
+
+
+def set_current_trace(trace) -> None:
+    """Set the LangFuse trace for the current thread (called by orchestrator)."""
+    _active_trace.trace = trace
+
+
+def get_current_trace():
+    """Return the LangFuse trace for the current thread, or None."""
+    return getattr(_active_trace, "trace", None)
+
 
 class VertexAIClient:
     """LLM client using the newer google-genai SDK (v3)."""
@@ -70,8 +85,16 @@ class VertexAIClient:
         # Track tokens
         self._record_usage(resp)
 
-        # Extract text from the new response structure
-        return self._extract_text(resp)
+        text = self._extract_text(resp)
+
+        self._record_generation(
+            name="chat",
+            input={"prompt": prompt[:500], "system": system[:300]},
+            output=text[:1000],
+            resp=resp,
+        )
+
+        return text
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def chat_with_tools(self, messages: list, tools: list,
@@ -91,7 +114,6 @@ class VertexAIClient:
             tools=tools,
         )
 
-        # The SDK handles the message list (list of Content objects) directly
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=messages,
@@ -100,7 +122,17 @@ class VertexAIClient:
         
         # Track tokens
         self._record_usage(response)
-        
+
+        tool_names = self._extract_tool_call_names(response)
+        output_text = self._extract_text(response)
+        self._record_generation(
+            name="chat_with_tools",
+            input={"message_count": len(messages), "tool_count": len(tools)},
+            output={"text": output_text[:500], "tool_calls": tool_names} if tool_names else output_text[:1000],
+            resp=response,
+            metadata={"tool_calls": tool_names} if tool_names else None,
+        )
+
         return response
 
     def _record_usage(self, resp):
@@ -122,6 +154,45 @@ class VertexAIClient:
                     metric.token_usage.prompt_tokens += usage.prompt_tokens
                     metric.token_usage.candidate_tokens += usage.candidate_tokens
                     metric.token_usage.total_tokens += usage.total_tokens
+
+    def _record_generation(self, name: str, input: typing.Any,
+                           output: typing.Any, resp: typing.Any,
+                           metadata: dict | None = None) -> None:
+        """Send an LLM generation event to LangFuse (non-blocking)."""
+        trace = get_current_trace()
+        if trace is None:
+            return
+        usage_details = None
+        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+            u = resp.usage_metadata
+            usage_details = {
+                "input": u.prompt_token_count or 0,
+                "output": u.candidates_token_count or 0,
+                "total": u.total_token_count or 0,
+            }
+        create_generation(
+            trace,
+            name=name,
+            model=self.model_name,
+            input=input,
+            output=output,
+            usage_details=usage_details,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _extract_tool_call_names(resp) -> list[str]:
+        """Return tool/function names from a tool-calling response."""
+        names: list[str] = []
+        for candidate in getattr(resp, "candidates", []):
+            content = getattr(candidate, "content", None)
+            if not content:
+                continue
+            for part in getattr(content, "parts", []):
+                fc = getattr(part, "function_call", None)
+                if fc and getattr(fc, "name", None):
+                    names.append(fc.name)
+        return names
 
     def _extract_text(self, resp) -> str:
         """Helper to extract text from Candidate parts."""

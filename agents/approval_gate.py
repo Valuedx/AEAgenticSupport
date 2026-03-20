@@ -12,7 +12,8 @@ from enum import Enum
 from typing import Optional
 
 from config.settings import CONFIG
-from config.llm_client import llm_client
+from config.llm_client import llm_client, get_current_trace
+from config.observability import span_context
 from state.app_config import get_approval_tier_sets, get_runtime_value
 
 from config.db import get_conn
@@ -307,20 +308,38 @@ class ApprovalGate:
         method over parse_approval_response when they need to distinguish
         between clarify / cancel / new_request and a plain unknown.
         """
-        rule_based = self._classify_rule_based(user_message)
-        if rule_based.intent != ApprovalIntent.UNKNOWN and rule_based.confidence >= 0.9:
-            return rule_based
+        trace = get_current_trace()
+        with span_context(trace, "approval_classification", input={"message": user_message[:300]}) as span:
+            rule_based = self._classify_rule_based(user_message)
+            if rule_based.intent != ApprovalIntent.UNKNOWN and rule_based.confidence >= 0.9:
+                span.update(output={
+                    "intent": rule_based.intent.value,
+                    "confidence": rule_based.confidence,
+                    "method": "rule_based",
+                })
+                return rule_based
 
-        if not pending_action:
-            return rule_based
+            if not pending_action:
+                span.update(output={
+                    "intent": rule_based.intent.value,
+                    "confidence": rule_based.confidence,
+                    "method": "rule_based_fallback",
+                })
+                return rule_based
 
-        llm_based = self._classify_with_llm(
-            user_message=user_message,
-            pending_action=pending_action,
-            pending_summary=pending_summary,
-            conversation_messages=conversation_messages,
-        )
-        return llm_based if llm_based else rule_based
+            llm_based = self._classify_with_llm(
+                user_message=user_message,
+                pending_action=pending_action,
+                pending_summary=pending_summary,
+                conversation_messages=conversation_messages,
+            )
+            result = llm_based if llm_based else rule_based
+            span.update(output={
+                "intent": result.intent.value,
+                "confidence": result.confidence,
+                "method": "llm" if llm_based else "rule_based_fallback",
+            })
+            return result
 
     def parse_approval_response(self, user_message: str) -> Optional[ApprovalIntentResult]:
         """

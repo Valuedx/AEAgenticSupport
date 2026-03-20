@@ -72,6 +72,12 @@ class MetricsCollector:
                 
                 logger.info(f"Turn {turn_id} ended. Latency: {metric.latency_ms:.2f}ms. Tokens: {metric.token_usage.total_tokens}")
 
+    def record_turn_error(self, turn_id: str, error: str) -> None:
+        """Record an error against an active turn (logs only; turn is ended by end_turn)."""
+        with self._lock:
+            if turn_id in self.active_turns:
+                logger.warning("Turn %s error: %s", turn_id, error[:200])
+
     def record_tool_call(self, turn_id: str, tool_name: str, latency_ms: float, success: bool, error: str = None):
         with self._lock:
             if turn_id in self.active_turns:

@@ -1,3 +1,12 @@
+> - **LangFuse Observability — Full Coverage (2026-03-20)**:
+>   - Added optional LangFuse integration for full LLM observability (traces, generations, spans).
+>   - **Core path**: orchestrator turns, LLM calls (`chat`, `chat_with_tools`), tool executions, RAG searches, embeddings, approval classification.
+>   - **Extended coverage**: RCA agent (handle + generate + background indexing), message gateway intent classification, scheduler handlers (health check, daily summary), custom Cognibot issue classifier, MCP agent log analysis, conversation summary generation, admin tool test endpoint.
+>   - Every LLM call and tool execution in the codebase is now traced.
+>   - Zero-overhead when disabled — no-op stubs used throughout.
+>   - Fixed `MetricsCollector.record_turn_error` missing method bug.
+>   - See §15 for setup and configuration.
+>
 > - **Multi-Agent 2.0 (Patch 2026-03-06)**:
 >   - **Strict Tool Isolation**: Implemented role-based tool filtering. Diagnostic specialists are restricted to `logs`/`status`/`diagnostics` tools; Remediation specialists to `remediation`/`config`.
 >   - **Verification Loop**: Added mandatory specialist handoff. Remediation actions now trigger an automatic cross-agent verification turn to confirm resolution.
@@ -46,6 +55,7 @@ Complete step-by-step guide to deploy the Agentic Support Assistant on **Automat
 12. [Cognibot Integration Architecture (Deep Dive)](#12-cognibot-integration-architecture-deep-dive)
 13. [MCP Server and P0/P1 Tools Integration](#13-mcp-server-and-p0p1-tools-integration)
 14. [Operations Control Center](#14-operations-control-center)
+15. [LangFuse Observability (Optional)](#15-langfuse-observability-optional)
 
 ---
 
@@ -122,7 +132,9 @@ AEAgenticSupport/
 │   ├── settings.py                      #   Central configuration
 │   ├── classification_signals.py        #   Heuristic classification patterns
 │   ├── llm_client.py                    #   Vertex AI (Gemini) client
-│   └── logging_setup.py                 #   App + audit loggers
+│   ├── logging_setup.py                 #   App + audit loggers
+│   ├── metrics.py                       #   In-memory metrics collector
+│   └── observability.py                 #   LangFuse tracing integration (optional)
 ├── agents/
 │   ├── agent_router.py                  #   Central agent dispatcher
 │   ├── orchestrator_agent.py            #   Supervisor agent (A2A gateway)
@@ -1481,5 +1493,185 @@ Use the `Knowledge` tab in the control center to manage which markdown files app
 
 ---
 
-**Document version:** 3.2
-**Last updated:** 2026-03-08
+## 15. LangFuse Observability (Optional)
+
+The application supports optional **LangFuse** integration for LLM observability — giving you a full trace UI with LLM generation details, token costs, tool execution spans, RAG search visibility, and latency breakdowns.
+
+### 15.1 What Gets Traced
+
+**Core path (inside orchestrator):**
+
+| Component | Observation Type | What's Captured |
+|-----------|-----------------|-----------------|
+| `Orchestrator.handle_message` | **Trace** (root) | Session ID, user ID, input message, phase, final response |
+| `VertexAIClient.chat` | **Generation** | Prompt (truncated), system prompt, model, token usage, output |
+| `VertexAIClient.chat_with_tools` | **Generation** | Message count, tool count, model, token usage, tool call names |
+| `ToolExecutor.execute` | **Span** | Tool name, parameters (sanitized), success/error, latency |
+| `PgVectorRAGEngine.search` | **Span** | Query, collection, top_k, hybrid flag, result count |
+| `VertexEmbedder.embed` | **Span** | Text (truncated), model, output dimension |
+| `ApprovalGate.classify_approval_turn` | **Span** | User message, intent, confidence, classification method |
+
+**Extended coverage (independent trace roots):**
+
+| Component | Observation Type | What's Captured |
+|-----------|-----------------|-----------------|
+| `RCAAgent.handle` | **Trace** (root) | Session ID, user ID, RCA request; child spans for business/technical generation |
+| `RCAAgent._index_as_past_incident` | **Trace** (root) | Background indexing thread; LLM root-cause extraction + RAG indexing |
+| `MessageGateway._classify_message_intent` | **Trace** (root) | LLM intent classification when agents are already working |
+| `scheduler.health_check_handler` | **Trace** (root) | Background health check; tool calls and alert counts |
+| `scheduler.daily_summary_handler` | **Trace** (root) | Background daily summary; LLM generation + tool data gathering |
+| `issue_classifier._llm_classify` | **Trace** (root) | Custom Cognibot LLM-based issue classification |
+| `agent_analyze_logs` (MCP) | **Trace** (root) | MCP server AI diagnostic; LLM analysis of agent log errors |
+| `ConversationState.generate_summary` | **Trace** (root) | Admin-triggered conversation summary LLM call |
+| `api_tools_test` (admin endpoint) | **Trace** (root) | Admin tool testing; tool execution span |
+
+### 15.2 Setup — Self-Hosted (Docker Compose)
+
+LangFuse can run alongside your existing PostgreSQL or on a separate instance:
+
+```bash
+# Clone LangFuse
+git clone https://github.com/langfuse/langfuse.git
+cd langfuse
+
+# Start with Docker Compose
+docker compose up -d
+```
+
+The UI will be available at `http://localhost:3000`. Create a project and generate API keys.
+
+### 15.3 Setup — LangFuse Cloud
+
+Alternatively, sign up at [https://cloud.langfuse.com](https://cloud.langfuse.com) and create a project to get your API keys.
+
+### 15.4 Configuration
+
+Add these to your `.env` file:
+
+```env
+LANGFUSE_ENABLED=true
+LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key
+LANGFUSE_SECRET_KEY=sk-lf-your-secret-key
+LANGFUSE_HOST=http://localhost:3000    # or https://cloud.langfuse.com
+```
+
+Optional settings (set via environment variables):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LANGFUSE_ENABLED` | `false` | Master switch — set to `true` to enable tracing |
+| `LANGFUSE_PUBLIC_KEY` | — | Project public key from LangFuse dashboard |
+| `LANGFUSE_SECRET_KEY` | — | Project secret key from LangFuse dashboard |
+| `LANGFUSE_HOST` | `https://cloud.langfuse.com` | LangFuse server URL |
+| `LANGFUSE_RELEASE` | — | Optional release/version tag for filtering traces |
+
+### 15.5 Install Dependency
+
+```bash
+pip install -r requirements.txt
+# or individually:
+pip install langfuse
+```
+
+### 15.6 Architecture
+
+LangFuse integration is implemented as a non-intrusive layer using the **v4 OpenTelemetry-based API**:
+
+```
+─── Core path (orchestrator) ───────────────────────────────────
+
+Orchestrator.handle_message()
+  └─ trace_context("orchestrator_turn")        ← Root span + propagate_attributes
+       ├─ set_current_trace(span)              ← Thread-local for non-OTel callsites
+       │
+       ├─ VertexAIClient.chat_with_tools()
+       │    └─ create_generation(as_type="generation")  ← LLM generation
+       │
+       ├─ ToolExecutor.execute()
+       │    └─ span_context(as_type="tool")    ← Tool span (auto-nested)
+       │
+       ├─ RAGEngine.search()
+       │    └─ span_context(as_type="retriever") ← Retriever span
+       │
+       ├─ VertexEmbedder.embed()
+       │    └─ span_context(as_type="embedding") ← Embedding span
+       │
+       └─ ApprovalGate.classify()
+            └─ span_context(as_type="span")    ← Approval classification
+
+─── Extended coverage (independent root traces) ───────────────
+
+RCAAgent.handle()
+  └─ trace_context("rca_agent")                ← Root trace
+       ├─ tool_registry.execute("generate_rca_report")
+       │    └─ span_context("generate_business_rca" | "generate_technical_rca")
+       │         └─ llm_client.chat()           ← Generation (auto-nested)
+       └─ (background thread)
+            └─ trace_context("rca_index_incident")  ← Separate root trace
+                 └─ llm_client.chat()           ← Root-cause extraction
+
+MessageGateway._classify_message_intent()
+  └─ trace_context("gateway_classify_intent")  ← Root trace
+       └─ llm_client.chat()                    ← Intent classification
+
+scheduler.health_check_handler()
+  └─ trace_context("scheduler_health_check")   ← Root trace
+       └─ tool_registry.execute(...)            ← Tool spans
+
+scheduler.daily_summary_handler()
+  └─ trace_context("scheduler_daily_summary")  ← Root trace
+       ├─ tool_registry.execute(...)            ← Tool spans
+       └─ llm_client.chat()                    ← Summary generation
+
+issue_classifier._llm_classify()
+  └─ trace_context("cognibot_issue_classify")  ← Root trace
+       └─ llm_client.chat()                    ← Classification
+
+agent_analyze_logs() (MCP)
+  └─ trace_context("mcp_agent_log_analysis")   ← Root trace
+       └─ llm_client.chat()                    ← AI diagnostic
+
+ConversationState.generate_summary()
+  └─ trace_context("generate_conversation_summary")  ← Root trace
+       └─ llm_client.chat()                    ← Summary
+
+api_tools_test (admin)
+  └─ trace_context("admin_tool_test:<tool>")   ← Root trace
+       └─ tool_registry.execute(...)            ← Tool span
+```
+
+Key design decisions:
+- **LangFuse v4 (OTel-native)** — uses `start_as_current_observation()` context managers; nesting is automatic via the OpenTelemetry context stack.
+- **`propagate_attributes()`** injects `session_id`, `user_id`, and `tags` into the OTel context so all observations inherit them.
+- **Thread-local trace reference** via `set_current_trace()` / `get_current_trace()` — used by callsites that need explicit access (e.g. `create_generation`) to avoid passing span objects through every function signature.
+- **Independent root traces** — code paths that run outside the orchestrator (RCA agent, scheduler, gateway classification, MCP tools, admin endpoints) create their own `trace_context` roots and call `set_current_trace()` so child operations auto-nest.
+- **Background thread traces** — fire-and-forget operations (RCA indexing) create separate root traces since the parent's OTel context doesn't propagate across thread boundaries.
+- **`usage_details`** — token counts use LangFuse v4's `usage_details` dict (`input`/`output`/`total` keys) for accurate cost tracking.
+- **No-op stubs** (`_NoOpSpan`) when LangFuse is disabled — zero overhead, no conditional checks needed in instrumented code.
+- **Non-blocking** — all LangFuse calls are guarded with try/except so tracing failures never break the agent pipeline.
+- **Truncated payloads** — prompts and outputs are truncated before sending to LangFuse to control bandwidth.
+
+### 15.7 Verify It Works
+
+1. Start the agent server with LangFuse enabled:
+   ```bash
+   LANGFUSE_ENABLED=true python agent_server.py
+   ```
+2. Send a test message via webchat or API.
+3. Open the LangFuse dashboard at your configured host.
+4. You should see a trace named `orchestrator_turn` with nested generations and spans.
+
+### 15.8 Troubleshooting
+
+| Problem | Likely Cause | Solution |
+|---------|-------------|----------|
+| No traces appear | `LANGFUSE_ENABLED` not set to `true` | Check `.env` and restart |
+| Auth error in logs | Invalid API keys | Regenerate keys in LangFuse dashboard |
+| Connection refused | LangFuse server not running | Verify `LANGFUSE_HOST` and Docker status |
+| Missing spans | Trace not propagated | Ensure `set_current_trace` is called before instrumented code |
+| High latency | LangFuse flush blocking | Events are batched; check network to LangFuse host |
+
+---
+
+**Document version:** 3.4
+**Last updated:** 2026-03-20

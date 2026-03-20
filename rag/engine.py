@@ -24,10 +24,11 @@ try:
     from google import genai
     from google.genai import types as genai_types
 except ImportError:
-    # Error will be caught if used, for now just log
     logger.error("google-genai not installed. Run: pip install google-genai")
 
 from config.db import get_conn, get_readonly_conn
+from config.llm_client import get_current_trace
+from config.observability import span_context
 from config.settings import CONFIG
 from state.app_config import get_runtime_value
 
@@ -78,16 +79,21 @@ class VertexEmbedder:
         reraise=True
     )
     def embed(self, text: str) -> list[float]:
-        try:
-            res = self.client.models.embed_content(
-                model=self.model_name,
-                contents=[text],
-                config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-            )
-            return res.embeddings[0].values
-        except Exception as e:
-            logger.error(f"Embedding failed for '{text[:50]}...': {e}")
-            raise
+        trace = get_current_trace()
+        with span_context(trace, "embedding", as_type="embedding", input={"text": text[:200], "model": self.model_name}) as span:
+            try:
+                res = self.client.models.embed_content(
+                    model=self.model_name,
+                    contents=[text],
+                    config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+                )
+                vec = res.embeddings[0].values
+                span.update(output={"dimension": len(vec)})
+                return vec
+            except Exception as e:
+                logger.error(f"Embedding failed for '{text[:50]}...': {e}")
+                span.update(output={"error": str(e)[:300]})
+                raise
 
     @tenacity.retry(
         retry=tenacity.retry_if_exception_type((Exception)),
@@ -264,12 +270,22 @@ class PgVectorRAGEngine:
                top_k: int = 5,
                query_embedding: list[float] | None = None,
                hybrid: bool = True) -> list[dict]:
-        if self._use_pgvector:
-            if hybrid:
-                return self._search_hybrid(query, collection, top_k, query_embedding)
-            return self._search_pgvector(query, collection, top_k,
-                                         query_embedding)
-        return self._search_numpy(query, collection, top_k, query_embedding)
+        trace = get_current_trace()
+        with span_context(
+            trace,
+            f"rag_search:{collection}",
+            as_type="retriever",
+            input={"query": query[:300], "collection": collection, "top_k": top_k, "hybrid": hybrid},
+        ) as span:
+            if self._use_pgvector:
+                if hybrid:
+                    results = self._search_hybrid(query, collection, top_k, query_embedding)
+                else:
+                    results = self._search_pgvector(query, collection, top_k, query_embedding)
+            else:
+                results = self._search_numpy(query, collection, top_k, query_embedding)
+            span.update(output={"result_count": len(results)})
+            return results
 
     def _search_pgvector(self, query: str, collection: str,
                          top_k: int,
