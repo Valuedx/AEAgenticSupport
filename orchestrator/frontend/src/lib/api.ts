@@ -142,4 +142,32 @@ export const api = {
       `/api/v1/workflows/${workflowId}/instances/${instanceId}`,
     );
   },
+
+  streamInstance(
+    workflowId: string,
+    instanceId: string,
+    onLog: (log: Partial<ExecutionLogOut>) => void,
+    onStatus: (status: { instance_status: string; current_node_id?: string | null }) => void,
+    onDone: () => void,
+  ): () => void {
+    const url = `${API_BASE}/api/v1/workflows/${workflowId}/instances/${instanceId}/stream?x_tenant_id=${TENANT_ID}`;
+    const es = new EventSource(url);
+
+    es.addEventListener("log", (e) => {
+      onLog(JSON.parse(e.data));
+    });
+    es.addEventListener("status", (e) => {
+      onStatus(JSON.parse(e.data));
+    });
+    es.addEventListener("done", (e) => {
+      onDone();
+      es.close();
+    });
+    es.onerror = () => {
+      es.close();
+      onDone();
+    };
+
+    return () => es.close();
+  },
 };

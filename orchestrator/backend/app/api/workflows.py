@@ -39,6 +39,12 @@ def create_workflow(
     tenant_id: str = Depends(get_tenant_id),
     db: Session = Depends(get_db),
 ):
+    from app.engine.config_validator import validate_graph_configs
+    warnings = validate_graph_configs(body.graph_json)
+    if warnings:
+        import logging
+        logging.getLogger(__name__).warning("Graph config warnings on create: %s", warnings)
+
     wf = WorkflowDefinition(
         tenant_id=tenant_id,
         name=body.name,
@@ -100,6 +106,11 @@ def update_workflow(
     if body.description is not None:
         wf.description = body.description
     if body.graph_json is not None:
+        from app.engine.config_validator import validate_graph_configs
+        warnings = validate_graph_configs(body.graph_json)
+        if warnings:
+            import logging
+            logging.getLogger(__name__).warning("Graph config warnings on update: %s", warnings)
         wf.graph_json = body.graph_json
         wf.version += 1
 

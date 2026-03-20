@@ -238,7 +238,13 @@ cd orchestrator/backend
 celery -A app.workers.celery_app worker --loglevel=info
 ```
 
-**Terminal 4 — Redis** (if not already running):
+**Terminal 4 — Celery Beat (schedule triggers):**
+```bash
+cd orchestrator/backend
+celery -A app.workers.celery_app beat --loglevel=info
+```
+
+**Terminal 5 — Redis** (if not already running):
 ```bash
 redis-server
 ```
@@ -372,5 +378,5 @@ curl http://localhost:8001/api/v1/workflows \
 
 ---
 
-**Document version:** 0.5  
+**Document version:** 0.6  
 **Last updated:** 2026-03-20

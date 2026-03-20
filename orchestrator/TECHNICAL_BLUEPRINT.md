@@ -1,3 +1,5 @@
+> - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
+>
 > - **V0.5 Production Hardening (2026-03-20)**: JWT-based auth with tenant claims (`app/security/jwt_auth.py`, dev-mode header fallback). Fernet-encrypted credential vault (`app/security/vault.py` + `TenantSecret` model). AST-based safe expression evaluator replaces `eval()` (`app/engine/safe_eval.py`). PostgreSQL RLS migration for tenant isolation (`alembic/versions/0001`). Per-tenant rate limiting via slowapi and execution quotas (`app/security/rate_limiter.py`). See §8 for updated security docs.
 >
 > - **V0.4 Branching & Parallel Execution (2026-03-20)**: Rewrote `dag_runner.py` with a ready-queue execution model. Condition nodes now prune non-matching branches (only `true` or `false` edges are followed). Independent branches execute in parallel via `ThreadPoolExecutor`. Merge nodes naturally wait for all upstream branches. Frontend edges from condition nodes show colored labels (green "Yes" / red "No") with arrow markers. See §6 for updated DAG engine docs.
@@ -9,9 +11,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.5  
+**Version:** 0.6  
 **Last updated:** 2026-03-20  
-**Status:** V0.5 production hardening (JWT auth, vault, RLS, safe eval, rate limits), V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Status:** V0.6 advanced agents (ReAct loop, SSE, scheduler, registry), V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 
 ---
 
@@ -222,19 +224,23 @@ orchestrator/backend/
     ├── api/
     │   ├── schemas.py              # Pydantic request/response models
     │   ├── workflows.py            # CRUD + execute + callback + status
-    │   └── tools.py                # MCP tool bridge for palette
+    │   ├── tools.py                # MCP tool bridge for palette
+    │   └── sse.py                  # Server-Sent Events for real-time execution updates
     ├── engine/
     │   ├── dag_runner.py           # Ready-queue DAG executor with branching + parallelism
     │   ├── node_handlers.py        # Per-type dispatch (trigger/agent/action/logic)
     │   ├── llm_providers.py        # Multi-provider LLM abstraction (Google/OpenAI/Anthropic)
+    │   ├── react_loop.py           # ReAct iterative tool-calling loop for agent nodes
     │   ├── prompt_template.py      # Jinja2 system-prompt templating with context injection
-    │   └── safe_eval.py            # AST-based safe expression evaluator for conditions
+    │   ├── safe_eval.py            # AST-based safe expression evaluator for conditions
+    │   └── config_validator.py     # Validates node configs against node_registry.json
     ├── models/
     │   ├── workflow.py             # WorkflowDefinition, WorkflowInstance, ExecutionLog
     │   └── tenant.py              # TenantToolOverride
     ├── workers/
     │   ├── celery_app.py           # Celery configuration
-    │   └── tasks.py                # execute_workflow_task, resume_workflow_task
+    │   ├── tasks.py                # execute_workflow_task, resume_workflow_task
+    │   └── scheduler.py            # Celery Beat cron scheduler for schedule triggers
     └── security/
         ├── tenant.py              # Re-exports get_tenant_id for backward compat
         ├── jwt_auth.py            # JWT creation + validation with tenant claim
@@ -627,19 +633,16 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 11. Known Limitations (V0.5)
+## 11. Known Limitations (V0.6)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
-| **LLM calls** | Live multi-provider LLM calls; ReAct tool-calling loop not yet implemented | Add iterative tool-calling ReAct loop for agent nodes |
 | **MCP transport** | Backend calls `POST /call-tool` (REST) | Add REST bridge to existing stdio/SSE MCP server |
-| **Frontend persistence** | Save/Load/Execute UI is wired, but still lacks tenant/session switching, schema validation, and graph-level validation/highlighting | Add tenant-aware session config, validate `graph_json` against node registry, and improve UX with WebSocket/SSE updates |
 | **Tenant auth** | JWT auth implemented; no external IdP integration yet | Add OIDC/SAML federation with enterprise identity providers |
-| **Schedule triggers** | No cron scheduler backend | Add APScheduler or Celery Beat integration |
-| **ReAct loop** | Palette item exists, no iterative execution | Implement tool-calling loop in agent handler |
 | **TenantToolOverride** | Model exists, not consumed | Filter tools endpoint by tenant overrides |
 | **Condition expressions** | Safe evaluator supports basic ops; no custom functions or regex | Add pluggable expression functions |
-| **node_registry.json** | Not consumed by frontend/backend | Hydrate palette and validate config from registry |
+| **Frontend validation** | Config validation runs server-side on save (logs warnings); no inline form validation | Generate dynamic property forms from registry schemas with client-side validation |
+| **ReAct tool discovery** | ReAct agent requires manually listing tool names in config | Auto-discover available tools from MCP registry |
 
 ---
 
@@ -669,12 +672,18 @@ A version-controlled JSON file defining all node types with their `config_schema
 - AST-based safe expression evaluator replacing `eval()` (`safe_eval.py`).
 - Per-tenant rate limiting (slowapi + Redis) and hourly execution quotas.
 
-**V0.6 — Advanced Agent Capabilities**
-- ReAct iterative tool-calling loop for agent nodes.
+**V0.6 — Advanced Agent Capabilities (Implemented)**
+- ReAct iterative tool-calling loop (`react_loop.py`) with Google/OpenAI/Anthropic tool-calling APIs.
+- SSE real-time execution updates (`sse.py`) replacing frontend polling.
+- Celery Beat cron scheduler (`scheduler.py`) with croniter for schedule triggers.
+- Frontend palette hydrated from `shared/node_registry.json`; backend validates configs on save.
+
+**V0.7 — Enterprise Features**
 - OIDC/SAML federation with enterprise identity providers.
-- WebSocket/SSE real-time execution updates replacing polling.
-- Cron scheduler backend (APScheduler or Celery Beat) for schedule triggers.
-- Consume node_registry.json to hydrate palette and validate config.
+- Dynamic property form generation from registry config schemas.
+- TenantToolOverride consumption (filter tools endpoint per tenant).
+- Workflow versioning with diff/rollback UI.
+- Observability: OpenTelemetry traces per workflow execution.
 
 ---
 

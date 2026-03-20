@@ -39,17 +39,26 @@ def _handle_trigger(
 
 
 def _handle_agent(
-    node_data: dict, context: dict[str, Any], _tenant_id: str
+    node_data: dict, context: dict[str, Any], tenant_id: str
 ) -> dict[str, Any]:
-    """Execute an LLM agent node via the configured provider.
+    """Execute an LLM agent node.
 
-    Renders the system prompt through Jinja2 with context variable injection,
-    assembles upstream outputs into the user message, and calls the LLM.
+    Routes to the ReAct loop if the node has tools configured,
+    otherwise performs a single LLM call.
     """
+    config = node_data.get("config", {})
+    label = node_data.get("label", "")
+
+    has_tools = bool(config.get("tools"))
+    is_react = label == "ReAct Agent" or has_tools
+
+    if is_react:
+        from app.engine.react_loop import run_react_loop
+        return run_react_loop(node_data, context, tenant_id)
+
     from app.engine.llm_providers import call_llm
     from app.engine.prompt_template import render_prompt, build_user_message
 
-    config = node_data.get("config", {})
     provider = config.get("provider", "google")
     model = config.get("model", "gemini-2.5-flash")
     raw_prompt = config.get("systemPrompt", "")

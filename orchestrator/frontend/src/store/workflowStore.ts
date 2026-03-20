@@ -17,6 +17,8 @@ interface WorkflowState {
   loading: boolean;
   error: string | null;
 
+  _sseCleanup: (() => void) | null;
+
   fetchWorkflows: () => Promise<void>;
   loadWorkflow: (id: string) => Promise<void>;
   saveWorkflow: (name?: string) => Promise<void>;
@@ -26,6 +28,7 @@ interface WorkflowState {
 
   executeWorkflow: (triggerPayload?: Record<string, unknown>) => Promise<void>;
   pollInstance: (workflowId: string, instanceId: string) => Promise<void>;
+  streamInstance: (workflowId: string, instanceId: string) => void;
   clearExecution: () => void;
 }
 
@@ -37,6 +40,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   isExecuting: false,
   loading: false,
   error: null,
+  _sseCleanup: null,
 
   fetchWorkflows: async () => {
     set({ loading: true, error: null });
@@ -141,10 +145,46 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         activeInstance: { ...instance, logs: [] },
         isExecuting: true,
       });
-      get().pollInstance(wf.id, instance.id);
+      get().streamInstance(wf.id, instance.id);
     } catch (e) {
       set({ error: String(e), isExecuting: false });
     }
+  },
+
+  streamInstance: (workflowId, instanceId) => {
+    const prev = get()._sseCleanup;
+    if (prev) prev();
+
+    const cleanup = api.streamInstance(
+      workflowId,
+      instanceId,
+      (log) => {
+        const inst = get().activeInstance;
+        if (!inst) return;
+        const existing = inst.logs.find((l) => l.id === log.id);
+        const logs = existing
+          ? inst.logs.map((l) => (l.id === log.id ? { ...l, ...log } : l))
+          : [...inst.logs, log as InstanceDetailOut["logs"][number]];
+        set({ activeInstance: { ...inst, logs } });
+      },
+      (status) => {
+        const inst = get().activeInstance;
+        if (!inst) return;
+        set({ activeInstance: { ...inst, status: status.instance_status, current_node_id: status.current_node_id ?? inst.current_node_id } });
+      },
+      () => {
+        set({ isExecuting: false, _sseCleanup: null });
+        const wf = get().currentWorkflow;
+        const inst = get().activeInstance;
+        if (wf && inst) {
+          api.getInstanceDetail(wf.id, inst.id).then((detail) => {
+            set({ activeInstance: detail });
+          }).catch(() => {});
+        }
+      },
+    );
+
+    set({ _sseCleanup: cleanup });
   },
 
   pollInstance: async (workflowId, instanceId) => {
@@ -166,6 +206,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   clearExecution: () => {
-    set({ activeInstance: null, isExecuting: false });
+    const prev = get()._sseCleanup;
+    if (prev) prev();
+    set({ activeInstance: null, isExecuting: false, _sseCleanup: null });
   },
 }));

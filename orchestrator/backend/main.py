@@ -11,6 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from app.config import settings
 from app.api.workflows import router as workflows_router
 from app.api.tools import router as tools_router
+from app.api.sse import router as sse_router
 from app.security.rate_limiter import limiter
 
 logging.basicConfig(
@@ -37,6 +38,7 @@ app.add_middleware(
 
 app.include_router(workflows_router)
 app.include_router(tools_router)
+app.include_router(sse_router)
 
 
 @app.get("/health")
