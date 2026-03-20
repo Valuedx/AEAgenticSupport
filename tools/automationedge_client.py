@@ -1442,8 +1442,20 @@ class AutomationEdgeClient:
             return []
         return []
 
-    def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
-        """Get execution logs by execution id with T4 fallback paths and debug log flow."""
+    def get_execution_logs(
+        self,
+        execution_id: str,
+        tail: int = 100,
+        timeout_seconds: Optional[int] = None,
+    ) -> dict:
+        """Get execution logs by execution id with T4 fallback paths and debug log flow.
+
+        Args:
+            timeout_seconds: Max wall-clock seconds to spend on the T4 debug-log
+                polling loop (Phase 2).  ``None`` uses the legacy default (~90 s).
+                When the budget expires, a partial result with
+                ``log_retrieval_status="pending"`` is returned instead of blocking.
+        """
         if not execution_id:
             raise ValueError("execution_id is required")
 
@@ -1503,17 +1515,27 @@ class AutomationEdgeClient:
         # Phase 2: T4 Debug Log Flow (Request-Poll-Download)
         # This is the "fallback of last resort" for T4 where /logs is restricted
         logger.info(f"Phase 2: Initiating T4 debug log flow for execution {execution_id}")
+
+        import time as _time
+        phase2_deadline = (
+            _time.monotonic() + timeout_seconds
+            if timeout_seconds is not None
+            else None
+        )
+
+        def _budget_remaining() -> float:
+            if phase2_deadline is None:
+                return float("inf")
+            return max(0.0, phase2_deadline - _time.monotonic())
+
         try:
-            # 1. Check if a COMPLETE debug log request already exists for this execution_id
-            # This avoids creating redundant "NEW" requests which the server might pick first.
             existing_requests = self.get_agent_debug_logs()
             best_existing_id = None
             if existing_requests and isinstance(existing_requests, list):
-                # Sort by id descending to get the most recent one first
                 sorted_reqs = sorted(
-                    [r for r in existing_requests if isinstance(r, dict)], 
-                    key=lambda x: x.get("id") or 0, 
-                    reverse=True
+                    [r for r in existing_requests if isinstance(r, dict)],
+                    key=lambda x: x.get("id") or 0,
+                    reverse=True,
                 )
                 for r in sorted_reqs:
                     req_wf_id = str(r.get("workflowInstanceId") or "")
@@ -1522,74 +1544,78 @@ class AutomationEdgeClient:
                             best_existing_id = r.get("id")
                             logger.info(f"Found existing COMPLETE debug log request {best_existing_id} for execution {execution_id}")
                             break
-            
+
             req_id = best_existing_id
             if not req_id:
-                # 2. Get execution status for metadata (dates) only if we need to request a new one
                 status_data = self.get_execution_status(execution_id)
-                # T4 Date extraction
                 from_date = status_data.get("startTime") or status_data.get("createdDate")
                 to_date = status_data.get("endTime") or status_data.get("lastUpdatedDate")
-                
-                # Start/End dates are required for debug log post
+
                 if not from_date:
-                    # Fallback to current time - 1h if missing (in ms)
                     from_date = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
                 if not to_date:
                     to_date = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-                # 3. Request debug log generation
                 debug_req = self.request_debug_logs(execution_id, from_date, to_date)
                 req_id = debug_req.get("id")
                 if not req_id:
                      raise RuntimeError(f"T4 debug log request failed: {debug_req}")
                 logger.info(f"Created new T4 debug log request {req_id} for execution {execution_id}")
 
-            # 4. Poll for logFileLink (or download immediately if we found an existing one)
-            import time
-            for poll_attempt in range(10): # Max ~90s
-                # T4 can take several seconds to register a debug log request
-                # 10s initial wait avoids AE-1603 (Invalid log request id) on first poll
+            for poll_attempt in range(10):  # Max ~90 s with legacy default
                 wait = 10 if poll_attempt == 0 else 5
-                time.sleep(wait)
-                 # T4 SUCCESS PATH: /agent/debuglogs/{id} returns the ZIP bytes directly.
-                # _json_or_text encodes this as {"is_zip": True, "log_zip_content": <bytes>}
+
+                # Respect caller-supplied timeout budget
+                remaining = _budget_remaining()
+                if remaining <= 0:
+                    logger.warning(
+                        "Phase 2: timeout_seconds budget expired after %d polls for execution %s (debug request %s)",
+                        poll_attempt, execution_id, req_id,
+                    )
+                    return {
+                        "log_retrieval_status": "pending",
+                        "debug_log_request_id": req_id,
+                        "execution_id": execution_id,
+                        "source_info": f"T4 debug log request {req_id} still pending (timeout after {timeout_seconds}s)",
+                    }
+
+                _time.sleep(min(wait, remaining))
+
                 updated = self.get_debug_log_request(str(req_id))
                 if updated.get("is_zip") or updated.get("log_zip_content"):
                     logger.info(f"T4 debug log request {req_id}: received binary ZIP content directly.")
                     if isinstance(updated, dict):
-                        updated["source_info"] = f"T4 debug log request {req_id} (reused existing)" if best_existing_id else f"T4 debug log request {req_id} (newly created)"
+                        updated["source_info"] = (
+                            f"T4 debug log request {req_id} (reused existing)"
+                            if best_existing_id
+                            else f"T4 debug log request {req_id} (newly created)"
+                        )
                     return updated
 
                 link = updated.get("logFileLink")
                 if link:
                     logger.info(f"T4 debug log ready via link: {link}")
-                    # 4. Download (use rest prefix False as it's typically an absolute-ish or full path)
                     res = self._authorized_request("GET", link, use_rest_prefix=False)
                     if isinstance(res, dict):
                         res["source_info"] = f"T4 debug log request {req_id} (ready via link)"
                     return res
-                
+
                 if (updated.get("status") or "").upper() in ("FAILED", "ERROR"):
                     raise RuntimeError(f"T4 debug log request {req_id} failed on server.")
-                
-                # AE-1603: server hasn't registered the request yet - treat as retryable
+
                 error_code = str(updated.get("errorCode") or "").strip() if isinstance(updated, dict) else ""
                 if error_code == "AE-1603" and poll_attempt < 5:
                     logger.info(f"Poll {poll_attempt+1}: AE-1603 received, T4 hasn't registered request yet. Retrying...")
                     continue
-                
+
                 logger.debug(f"T4 debug log request {req_id} still not ready (attempt {poll_attempt+1}), polling again...")
-            
+
             raise RuntimeError(f"T4 debug log request {req_id} timed out waiting for link.")
 
         except Exception as flow_err:
              logger.error(f"Phase 2 Flow failed for {execution_id}: {flow_err}")
-             # If Phase 2 fails, raise the flow error but keep Phase 1 error as context
              if last_exc:
-                 # Check if last_exc is an actual exception type Pyre likes
                  if isinstance(last_exc, BaseException):
-                      # Use cast(Any, flow_err) to avoid possible type conflicts when chaining
                       raise cast(Any, flow_err) from last_exc
              raise flow_err
 

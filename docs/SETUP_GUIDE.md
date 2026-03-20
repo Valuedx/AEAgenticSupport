@@ -1004,7 +1004,7 @@ PostgreSQL (ops_agent database)
 | **Dependency** (2) | get_workflow_dependencies, check_agent_resources | read_only | |
 | **Remediation** (5) | restart_execution, trigger_workflow, requeue_item, bulk_retry_failures, disable_workflow | low_risk → high_risk | |
 | **Notification** (2) | send_notification, create_incident_ticket | medium_risk | |
-| **Diagnostics** (3) | build_evidence_pack, diagnose_from_evidence_pack, extract_exception_chain | read_only | Evidence-pack diagnostic pipeline: builds structured evidence from AE metadata + filtered logs, then runs LLM diagnosis with confidence scoring. Available to DiagnosticAgent |
+| **Diagnostics** (3) | build_evidence_pack, diagnose_from_evidence_pack, extract_exception_chain | read_only | Evidence-pack diagnostic pipeline: builds structured evidence from AE metadata + filtered logs, then runs LLM diagnosis with confidence scoring. Enforces a wall-clock budget (`max_wait_seconds`, default 45 s) — degrades gracefully to metadata-only diagnosis (confidence ≤ 0.5) when logs are unavailable in time, returning a `log_retrieval` hint with `debug_log_request_id` for agent follow-up. Progress callbacks stream phase-level status updates. Available to DiagnosticAgent |
 | **Meta** (1) | discover_tools | read_only | Search the tool catalog for tools matching a query or category; enables mid-conversation tool discovery when RAG filtering is active |
 
 ### 11.4 Progress Streaming

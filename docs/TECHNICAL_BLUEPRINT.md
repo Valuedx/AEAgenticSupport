@@ -1,6 +1,6 @@
 > - **LangFuse Observability — Full Coverage (2026-03-20)**: Optional LLM observability via LangFuse. `config/observability.py` provides lazy-initialized client, `trace_context`/`span_context` context managers, and no-op stubs for zero-overhead when disabled. **Core path**: orchestrator turns (root traces), LLM generations (`chat`, `chat_with_tools` with token usage), tool executions (per-tool spans with latency), RAG searches (per-collection spans), embeddings, and approval classification. **Extended coverage**: RCA agent (handle + generate + background indexing), message gateway intent classification, scheduler handlers (health check, daily summary), custom Cognibot issue classifier, MCP agent log analysis, conversation summary generation, and admin tool test endpoint. Every LLM call and tool execution in the codebase is now traced. Thread-local trace propagation avoids signature changes. Fixed `MetricsCollector.record_turn_error` missing method bug. See §6 and `SETUP_GUIDE.md` §15.
 >
-> - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: Added metadata-first diagnosis flow with structured evidence packs. New `tools/ae_diagnostic_tools.py` provides log time-window extraction, request-ID/step-name filtering, Java exception chain parsing, repeated-line collapse, multi-stream chronological merge, and a compact evidence-pack builder. New `diagnose_from_evidence_pack` tool runs LLM diagnosis with confidence scoring, alternative hypotheses, and remediation suggestions. `AutomationEdgeClient` extended with `get_normalized_instance_metadata()` and `get_workflow_step_timeline()`. DiagnosticAgent now includes the `diagnostics` tool category. See §2, §4.2, and §7.
+> - **Evidence-Pack Diagnostic Pipeline (2026-03-20)**: Added metadata-first diagnosis flow with structured evidence packs. New `tools/ae_diagnostic_tools.py` provides log time-window extraction, request-ID/step-name filtering, Java exception chain parsing, repeated-line collapse, multi-stream chronological merge, and a compact evidence-pack builder. New `diagnose_from_evidence_pack` tool runs LLM diagnosis with confidence scoring, alternative hypotheses, and remediation suggestions. `AutomationEdgeClient` extended with `get_normalized_instance_metadata()` and `get_workflow_step_timeline()`. DiagnosticAgent now includes the `diagnostics` tool category. **Timeout & graceful degradation (2026-03-20)**: `build_evidence_pack` now enforces a configurable `max_wait_seconds` wall-clock budget (default 45 s). Log retrieval runs in a bounded thread; when the budget expires or the T4 debug-log request is still pending, the pipeline returns a metadata-only evidence pack with a `log_retrieval` hint (including `debug_log_request_id`) so the agent can retry. `diagnose_from_evidence_pack` handles this degraded state by running metadata-only LLM diagnosis with confidence capped at 0.5. Progress callbacks stream phase-level status updates to the user during long operations. See §5.4.
 >
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out (4 concurrent searches), configurable embedding dimension, batched workflow catalog queries, shared MCP executor, coalesced state writes, AE path caching, capped execution polling. See §4.2 and `SETUP_GUIDE.md` §10.
 >
@@ -307,29 +307,40 @@ The diagnostic pipeline implements a **metadata-first** approach: structured AE 
 ```
 AE Instance ID
     │
-    ├──▶ get_normalized_instance_metadata()   ─┐
-    ├──▶ get_workflow_step_timeline()          ─┤  ── Metadata layer
+    │  ┌── Wall-clock budget: max_wait_seconds (default 45 s) ──────────┐
+    │  │                                                                 │
+    ├──▶ get_normalized_instance_metadata()   ─┐                         │
+    ├──▶ get_workflow_step_timeline()          ─┤  ── Metadata layer     │
     │                                           │     (AutomationEdgeClient)
-    │                                           ▼
-    ├──▶ get_execution_logs()                 ─── Log retrieval
-    │         │                                    (existing log_tools)
-    │         ▼
-    │    Log Processing Pipeline:
-    │    ├─ ae_extract_log_time_window()       ── Narrow to failure window
-    │    ├─ ae_extract_log_by_request_id()     ── Filter by request ID
-    │    ├─ ae_extract_log_by_step_name()      ── Filter by step name
-    │    ├─ ae_extract_error_blocks()          ── Extract errors + stack traces
-    │    ├─ ae_extract_exception_chain()       ── Parse Caused-by chains
-    │    ├─ ae_collapse_repeated_log_lines()   ── Deduplicate noise
-    │    ├─ ae_normalize_log_timestamps()      ── Convert to ISO-8601 UTC
-    │    └─ ae_merge_log_streams_chronologically()
-    │         │
-    │         ▼
-    ├──▶ ae_build_log_evidence_pack()          ── Structured evidence pack
+    │                                           ▼                        │
+    ├──▶ get_execution_logs()                 ─── Log retrieval          │
+    │    ╎   (runs in ThreadPoolExecutor(1)      (log_tools + AE client) │
+    │    ╎    with remaining-budget timeout)                              │
+    │    ╎                                                               │
+    │    ├─ Logs ready?  ──YES──▶  Log Processing Pipeline:             │
+    │    │                         ├─ ae_extract_log_time_window()       │
+    │    │                         ├─ ae_extract_log_by_request_id()     │
+    │    │                         ├─ ae_extract_log_by_step_name()      │
+    │    │                         ├─ ae_extract_error_blocks()          │
+    │    │                         ├─ ae_extract_exception_chain()       │
+    │    │                         ├─ ae_collapse_repeated_log_lines()   │
+    │    │                         ├─ ae_normalize_log_timestamps()      │
+    │    │                         └─ ae_merge_log_streams_chronologically()
+    │    │                                │                              │
+    │    │                                ▼                              │
+    │    │   ae_build_log_evidence_pack() ── Full evidence pack         │
+    │    │                                                               │
+    │    └─ Budget expired / pending?  ──▶  Graceful degradation:       │
+    │         return metadata-only pack      { evidence_pack: None,      │
+    │         + log_retrieval hint             log_retrieval: {           │
+    │                                           status, request_id } }   │
+    │  └─────────────────────────────────────────────────────────────────┘
     │         │
     │         ▼
     └──▶ diagnose_from_evidence_pack()         ── LLM diagnosis with
               │                                    confidence scoring
+              │  (metadata-only? → confidence
+              │   capped at 0.5, retry hint)
               ▼
          Structured JSON:
          { primary_diagnosis, confidence, alternatives,
@@ -340,23 +351,42 @@ AE Instance ID
 
 | Module | Responsibility |
 |--------|---------------|
-| `tools/ae_diagnostic_tools.py` | Log pipeline, evidence-pack builder, LLM diagnosis |
-| `tools/automationedge_client.py` | `get_normalized_instance_metadata()`, `get_workflow_step_timeline()` |
-| `tools/log_tools.py` | Raw log retrieval via `get_execution_logs()` |
+| `tools/ae_diagnostic_tools.py` | Log pipeline, evidence-pack builder, LLM diagnosis, timeout orchestration |
+| `tools/automationedge_client.py` | `get_normalized_instance_metadata()`, `get_workflow_step_timeline()`, `get_execution_logs(timeout_seconds=)` |
+| `tools/log_tools.py` | Raw log retrieval via `get_execution_logs(timeout_seconds=)` with pending-status passthrough |
+| `gateway/progress.py` | Progress messages for `build_evidence_pack`, `diagnose_from_evidence_pack`, `extract_exception_chain` |
 
 ### Registered tools (category: `diagnostics`)
 
 | Tool | Purpose |
 |------|---------|
-| `build_evidence_pack` | Given an execution ID, fetches metadata + timeline + logs, runs the processing pipeline, and returns a compact evidence pack |
-| `diagnose_from_evidence_pack` | Sends the evidence pack to the LLM with a structured diagnosis prompt; returns root cause, confidence, alternatives, and remediation candidates |
-| `extract_exception_chain` | Parses Java/Python exception chains from raw log text, following nested Caused-by references |
+| `build_evidence_pack` | Given an execution ID (+ optional `max_wait_seconds`), fetches metadata + timeline + logs within a wall-clock budget, runs the processing pipeline, and returns a compact evidence pack. Degrades gracefully to metadata-only when logs are unavailable in time. |
+| `diagnose_from_evidence_pack` | Sends the evidence pack to the LLM with a structured diagnosis prompt; returns root cause, confidence, alternatives, and remediation candidates. Handles metadata-only packs with capped confidence and retry hints. |
+| `extract_exception_chain` | Parses Java exception chains from raw log text, following nested Caused-by references |
+
+### Timeout and graceful degradation
+
+The evidence-pack pipeline enforces a configurable wall-clock budget to prevent synchronous bottlenecks:
+
+| Parameter | Where | Default | Effect |
+|-----------|-------|---------|--------|
+| `max_wait_seconds` | `build_evidence_pack` kwarg | 45 | Total budget for metadata + timeline + log retrieval + evidence reduction |
+| `timeout_seconds` | `AutomationEdgeClient.get_execution_logs` | `None` (legacy ~90 s) | Caps the T4 debug-log polling loop; returns `log_retrieval_status: "pending"` on expiry |
+
+**Degradation path:**
+
+1. Metadata + step timeline are fetched first (fast, single HTTP calls each).
+2. Log retrieval runs in a `ThreadPoolExecutor(1)`. The `timeout_seconds` budget propagates from `build_evidence_pack` → `log_tools.get_execution_logs` → `AutomationEdgeClient.get_execution_logs`, capping both the thread future and the T4 polling loop.
+3. If the budget expires or T4 returns a pending status, `build_evidence_pack` returns `success: True` with `evidence_pack: None` and a `log_retrieval` dict containing `log_retrieval_status` (`"pending"` or `"timed_out"`) and `debug_log_request_id`.
+4. `diagnose_from_evidence_pack` detects the missing evidence pack, synthesizes a metadata-only pack, instructs the LLM that confidence must not exceed 0.5, and programmatically caps the returned confidence. The `log_retrieval` hint is surfaced to the agent for follow-up.
+5. Progress callbacks (`on_progress`) emit phase-level status updates ("Fetching execution metadata...", "Retrieving execution logs...", "Processing and filtering log evidence...", "Evidence pack ready.") so users see activity during long operations.
 
 ### Design principles
 
 1. **Deterministic filtering first** — time-window, request-ID, and step-name filters are applied before any LLM call, keeping context tokens low.
 2. **Structured output** — the LLM is instructed to return strict JSON, enabling downstream agents to act on diagnosis results programmatically.
-3. **Additive integration** — all new tools are registered via the existing `ToolRegistry` and are available to the `DiagnosticAgent` through the `diagnostics` category.
+3. **Bounded execution** — all I/O is subject to a wall-clock budget; the pipeline always returns within `max_wait_seconds`, degrading gracefully rather than blocking.
+4. **Additive integration** — all new tools are registered via the existing `ToolRegistry` and are available to the `DiagnosticAgent` through the `diagnostics` category.
 
 ---
 

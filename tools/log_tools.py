@@ -1,6 +1,7 @@
 """
 Log & execution history tools.
 """
+from __future__ import annotations
 
 import logging
 import re
@@ -86,8 +87,14 @@ def extract_error_blocks(log_lines: list[str], context_lines: int = 50) -> list[
     return result
 
 
-def get_execution_logs(execution_id: str, tail: int = 100) -> dict:
-    resp = get_ae_client().get_execution_logs(execution_id=execution_id, tail=tail)
+def get_execution_logs(
+    execution_id: str,
+    tail: int = 100,
+    timeout_seconds: int | None = None,
+) -> dict:
+    resp = get_ae_client().get_execution_logs(
+        execution_id=execution_id, tail=tail, timeout_seconds=timeout_seconds,
+    )
 
     if not resp:
         return {
@@ -99,6 +106,17 @@ def get_execution_logs(execution_id: str, tail: int = 100) -> dict:
             ),
             "log_lines": [],
             "error_blocks": [],
+        }
+
+    # ── Pending response (T4 debug log still being prepared) ──
+    if isinstance(resp, dict) and resp.get("log_retrieval_status") == "pending":
+        return {
+            "execution_id": execution_id,
+            "log_retrieval_status": "pending",
+            "debug_log_request_id": resp.get("debug_log_request_id"),
+            "logs": [],
+            "error_blocks": [],
+            "note": resp.get("source_info", "Logs still being prepared by the server."),
         }
 
     # ── Phase 1: List response (direct API) ──

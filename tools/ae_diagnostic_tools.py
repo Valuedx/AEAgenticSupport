@@ -498,51 +498,148 @@ def ae_build_log_evidence_pack(
 # High-level orchestrated tool: build_evidence_pack
 # ---------------------------------------------------------------------------
 
+_DEFAULT_EVIDENCE_PACK_TIMEOUT = 45
+
+
+def _emit_progress(on_progress: Optional[Any], message: str) -> None:
+    """Safely call the progress callback if provided."""
+    if on_progress is None:
+        return
+    try:
+        if callable(getattr(on_progress, "_emit", None)):
+            on_progress._emit(message, force=True)
+        elif callable(on_progress):
+            on_progress(message)
+    except Exception:
+        pass
+
+
 def build_evidence_pack(execution_id: str, **kwargs: Any) -> dict:
     """Fetch metadata, step timeline, and logs for an execution, then build a structured evidence pack.
 
     This is the primary diagnostic entry point: metadata-first, then targeted log extraction,
     then evidence compaction into a clean payload suitable for LLM diagnosis.
+
+    Keyword args:
+        max_wait_seconds: Total wall-clock budget for the entire operation
+            (default 45 s).  Log retrieval is the most expensive phase; when
+            the budget is close to exhaustion the pipeline gracefully degrades
+            to a metadata-only evidence pack and returns a
+            ``debug_log_request_id`` so the agent can retry later.
+        on_progress: Optional ``ProgressCallback`` or ``Callable[[str], None]``
+            for streaming status updates to the user while this long-running
+            operation executes.
     """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+    max_wait: int = int(kwargs.get("max_wait_seconds", _DEFAULT_EVIDENCE_PACK_TIMEOUT))
+    on_progress = kwargs.get("on_progress")
+    deadline = _time.monotonic() + max_wait
+
     client = get_ae_client()
 
-    # Phase 1: Metadata
+    # ------------------------------------------------------------------
+    # Phase 1: Metadata (fast — single HTTP call)
+    # ------------------------------------------------------------------
+    _emit_progress(on_progress, "Fetching execution metadata...")
     try:
         instance_metadata = client.get_normalized_instance_metadata(execution_id)
     except Exception as exc:
         logger.error("Failed to fetch instance metadata for %s: %s", execution_id, exc)
         return {"success": False, "error": f"Could not fetch metadata for execution {execution_id}: {exc}"}
 
-    # Phase 2: Step Timeline
+    # ------------------------------------------------------------------
+    # Phase 2: Step Timeline (fast — single HTTP call)
+    # ------------------------------------------------------------------
     step_timeline: Optional[dict[str, Any]] = None
     try:
         step_timeline = client.get_workflow_step_timeline(execution_id)
     except Exception as exc:
         logger.warning("Step timeline unavailable for %s: %s", execution_id, exc)
 
-    # Phase 3: Logs — reuse existing get_execution_logs flow
+    # ------------------------------------------------------------------
+    # Phase 3: Logs — run inside a thread with remaining-budget timeout
+    # ------------------------------------------------------------------
     raw_log_text = ""
+    log_pending_meta: Optional[dict[str, Any]] = None
+
+    log_budget = max(1, int(deadline - _time.monotonic()))
+    _emit_progress(
+        on_progress,
+        f"Retrieving execution logs (up to {log_budget}s budget)...",
+    )
+
+    def _fetch_logs() -> dict:
+        from tools.log_tools import get_execution_logs as _get_logs
+        return _get_logs(execution_id, tail=0, timeout_seconds=log_budget)
+
     try:
-        from tools.log_tools import get_execution_logs
-        log_result = get_execution_logs(execution_id, tail=0)
-        log_lines = log_result.get("logs", [])
-        if isinstance(log_lines, list):
-            raw_log_text = "\n".join(str(l) for l in log_lines)
-        elif isinstance(log_lines, str):
-            raw_log_text = log_lines
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence_logs") as pool:
+            future = pool.submit(_fetch_logs)
+            log_timeout = max(1, int(deadline - _time.monotonic()))
+            try:
+                log_result = future.result(timeout=log_timeout)
+            except FuturesTimeout:
+                future.cancel()
+                logger.warning(
+                    "Log retrieval for %s exceeded %ds budget — degrading to metadata-only evidence pack",
+                    execution_id, max_wait,
+                )
+                log_pending_meta = {
+                    "log_retrieval_status": "timed_out",
+                    "timeout_seconds": max_wait,
+                }
+                log_result = {}
+
+        if log_result.get("log_retrieval_status") == "pending":
+            log_pending_meta = {
+                "log_retrieval_status": "pending",
+                "debug_log_request_id": log_result.get("debug_log_request_id"),
+            }
+        else:
+            log_lines = log_result.get("logs", [])
+            if isinstance(log_lines, list):
+                raw_log_text = "\n".join(str(l) for l in log_lines)
+            elif isinstance(log_lines, str):
+                raw_log_text = log_lines
     except Exception as exc:
         logger.warning("Log retrieval failed for %s: %s", execution_id, exc)
 
+    # ------------------------------------------------------------------
+    # Graceful degradation when logs are unavailable / still pending
+    # ------------------------------------------------------------------
     if not raw_log_text:
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "instance_metadata": instance_metadata,
             "step_timeline": step_timeline,
             "evidence_pack": None,
-            "note": "Logs unavailable; evidence pack built from metadata only.",
         }
+        if log_pending_meta:
+            result["log_retrieval"] = log_pending_meta
+            status = log_pending_meta.get("log_retrieval_status", "unavailable")
+            req_id = log_pending_meta.get("debug_log_request_id", "")
+            if status == "pending" and req_id:
+                result["note"] = (
+                    f"Logs still being prepared by the server (debug request {req_id}). "
+                    "Re-run build_evidence_pack or diagnose_from_evidence_pack in "
+                    "~30 seconds to include log evidence."
+                )
+            else:
+                result["note"] = (
+                    f"Log retrieval {status} after {max_wait}s. "
+                    "Evidence pack built from metadata and step timeline only. "
+                    "Re-run with a higher max_wait_seconds or fetch logs separately."
+                )
+        else:
+            result["note"] = "Logs unavailable; evidence pack built from metadata only."
+        return result
 
-    # Phase 4: Evidence reduction — apply time-window filtering if we know the failure time
+    # ------------------------------------------------------------------
+    # Phase 4: Evidence reduction — time-window filtering
+    # ------------------------------------------------------------------
+    _emit_progress(on_progress, "Processing and filtering log evidence...")
     end_time = instance_metadata.get("end_time")
     if end_time:
         try:
@@ -557,7 +654,9 @@ def build_evidence_pack(execution_id: str, **kwargs: Any) -> dict:
         except Exception as exc:
             logger.debug("Time-window filtering skipped: %s", exc)
 
+    # ------------------------------------------------------------------
     # Phase 5: Build evidence pack
+    # ------------------------------------------------------------------
     try:
         evidence_pack = ae_build_log_evidence_pack(
             instance_metadata=instance_metadata,
@@ -572,6 +671,7 @@ def build_evidence_pack(execution_id: str, **kwargs: Any) -> dict:
             "instance_metadata": instance_metadata,
         }
 
+    _emit_progress(on_progress, "Evidence pack ready.")
     return {
         "success": True,
         "evidence_pack": evidence_pack,
@@ -629,30 +729,77 @@ def diagnose_from_evidence_pack(
     """Run LLM diagnosis on a structured evidence pack.
 
     If no evidence_pack is provided but execution_id is given,
-    builds the evidence pack first.
+    builds the evidence pack first.  Accepts the same ``max_wait_seconds``
+    and ``on_progress`` kwargs as ``build_evidence_pack``.
+
+    When logs are unavailable (timed out or still pending on the server),
+    the function still attempts a metadata-only diagnosis with a capped
+    confidence and includes a ``log_retrieval`` field so the agent can
+    retry later with full evidence.
     """
     from config.llm_client import llm_client
 
+    log_retrieval_note: Optional[dict[str, Any]] = None
+
     if evidence_pack is None and execution_id:
-        pack_result = build_evidence_pack(execution_id)
+        pack_result = build_evidence_pack(execution_id, **kwargs)
         if not pack_result.get("success"):
             return pack_result
         evidence_pack = pack_result.get("evidence_pack")
+        log_retrieval_note = pack_result.get("log_retrieval")
+
         if evidence_pack is None:
-            return {
-                "success": False,
-                "error": "Could not build evidence pack (logs unavailable)",
-                "instance_metadata": pack_result.get("instance_metadata"),
-            }
+            metadata = pack_result.get("instance_metadata") or {}
+            step_tl = pack_result.get("step_timeline")
+            if metadata:
+                evidence_pack = {
+                    "instance_id": metadata.get("instance_id"),
+                    "workflow_name": metadata.get("workflow_name"),
+                    "run_status": metadata.get("status"),
+                    "failure_step": (
+                        metadata.get("failure_step")
+                        or (step_tl or {}).get("failed_step")
+                    ),
+                    "error_message": metadata.get("error_message"),
+                    "timestamps": {
+                        "start_time": metadata.get("start_time"),
+                        "end_time": metadata.get("end_time"),
+                    },
+                    "machine_context": {"bot_machine": metadata.get("bot_machine")},
+                    "step_timeline": (step_tl or {}).get("steps") if step_tl else None,
+                    "primary_error": None,
+                    "exception_chains": [],
+                    "evidence_blocks": [],
+                    "recommended_next_fetch": ["full execution logs (retry after ~30s)"],
+                    "_metadata_only": True,
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Could not build evidence pack (logs unavailable)",
+                    "instance_metadata": metadata,
+                    "log_retrieval": log_retrieval_note,
+                }
 
     if not evidence_pack:
         return {"success": False, "error": "No evidence pack provided and no execution_id given."}
 
+    is_metadata_only = bool(evidence_pack.get("_metadata_only"))
     serializable_pack = json.dumps(evidence_pack, indent=2, default=str)
+
+    metadata_caveat = ""
+    if is_metadata_only:
+        metadata_caveat = (
+            "\n\nIMPORTANT: This evidence pack was built from **metadata only** "
+            "because execution logs were not available in time.  Your confidence "
+            "MUST NOT exceed 0.5.  Always recommend fetching full execution logs "
+            "as the top item in recommended_next_fetch."
+        )
 
     prompt = (
         "Analyze this AutomationEdge workflow failure evidence pack and provide your diagnosis.\n\n"
         f"Evidence Pack:\n```json\n{serializable_pack}\n```"
+        f"{metadata_caveat}"
     )
 
     try:
@@ -680,7 +827,17 @@ def diagnose_from_evidence_pack(
                 "raw_response": raw_response,
             }
 
-        return {
+        if is_metadata_only:
+            conf = diagnosis.get("confidence", 1.0)
+            if isinstance(conf, (int, float)) and conf > 0.5:
+                diagnosis["confidence"] = 0.5
+            diagnosis.setdefault("reasoning_summary", "")
+            diagnosis["reasoning_summary"] += (
+                " [Note: diagnosis based on metadata only — "
+                "re-run with full logs for higher confidence.]"
+            )
+
+        result: dict[str, Any] = {
             "success": True,
             "diagnosis": diagnosis,
             "evidence_pack_summary": {
@@ -690,6 +847,11 @@ def diagnose_from_evidence_pack(
                 "failure_step": evidence_pack.get("failure_step"),
             },
         }
+        if log_retrieval_note:
+            result["log_retrieval"] = log_retrieval_note
+        if is_metadata_only:
+            result["metadata_only"] = True
+        return result
 
     except Exception as exc:
         logger.error("LLM diagnosis failed: %s", exc)
@@ -716,7 +878,10 @@ tool_registry.register(
             "evidence reduction (time-window filtering, noise collapse, error extraction, "
             "exception chain analysis) to produce a compact payload ready for LLM diagnosis. "
             "Use this as the first step when investigating a specific execution failure "
-            "before calling diagnose_from_evidence_pack."
+            "before calling diagnose_from_evidence_pack.  "
+            "If log retrieval takes longer than max_wait_seconds the tool returns a "
+            "metadata-only evidence pack with a log_retrieval.debug_log_request_id "
+            "so you can retry later."
         ),
         category="diagnostics",
         tier="read_only",
@@ -724,6 +889,13 @@ tool_registry.register(
             "execution_id": {
                 "type": "string",
                 "description": "The numeric execution/request ID to diagnose.",
+            },
+            "max_wait_seconds": {
+                "type": "integer",
+                "description": (
+                    "Maximum wall-clock seconds to wait for log retrieval "
+                    "(default 45). Reduce for faster degraded results."
+                ),
             },
         },
         required_params=["execution_id"],
@@ -749,7 +921,10 @@ tool_registry.register(
             "(metadata + step timeline + filtered logs) for the given execution ID, "
             "then sends it to the LLM for structured diagnosis. Returns JSON "
             "with primary_diagnosis, confidence (0-1), alternatives, reasoning, "
-            "and safe_remediation_candidates."
+            "and safe_remediation_candidates.  "
+            "If logs are unavailable within the time budget, the tool still "
+            "returns a metadata-only diagnosis (confidence capped at 0.5) "
+            "with a log_retrieval hint for follow-up."
         ),
         category="diagnostics",
         tier="read_only",
@@ -757,6 +932,13 @@ tool_registry.register(
             "execution_id": {
                 "type": "string",
                 "description": "The execution/request ID to diagnose.",
+            },
+            "max_wait_seconds": {
+                "type": "integer",
+                "description": (
+                    "Maximum wall-clock seconds to wait for log retrieval "
+                    "(default 45). Reduce for faster degraded results."
+                ),
             },
         },
         required_params=["execution_id"],

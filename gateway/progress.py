@@ -107,6 +107,18 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
         "Creating a support ticket...",
         "Creating incident ticket...",
     ),
+    "build_evidence_pack": (
+        "Gathering diagnostic evidence — this may take a moment...",
+        "Building evidence pack (metadata + logs + error extraction)...",
+    ),
+    "diagnose_from_evidence_pack": (
+        "Analyzing the failure — running AI diagnosis...",
+        "Running LLM diagnosis on structured evidence pack...",
+    ),
+    "extract_exception_chain": (
+        "Parsing error details...",
+        "Extracting exception chains from logs...",
+    ),
     "discover_tools": (
         "Looking for additional capabilities...",
         "Searching tool catalog...",
