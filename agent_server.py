@@ -1504,6 +1504,10 @@ def main() -> None:
     AI Studio / ops_support.py should NOT call this — import
     handle_chat_message (or call init_backend()) directly instead.
     """
+    import atexit
+    from config.observability import shutdown_langfuse
+    atexit.register(shutdown_langfuse)
+
     init_backend()
 
     port = int(os.environ.get("AGENT_SERVER_PORT", 5050))

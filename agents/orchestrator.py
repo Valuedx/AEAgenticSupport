@@ -18,8 +18,9 @@ from google.genai import types
 
 from agents.approval_gate import ApprovalGate, ApprovalIntent
 from agents.escalation import EscalationAgent
-from config.llm_client import llm_client
+from config.llm_client import llm_client, set_current_trace
 from config.metrics import metrics_collector
+from config.observability import trace_context, span_context
 from gateway.progress import ProgressCallback, create_noop_progress
 from rag.engine import get_rag_engine
 from state.app_config import get_runtime_value
@@ -66,7 +67,33 @@ class Orchestrator:
         import uuid
         turn_id = f"turn-{cast(Any, uuid.uuid4().hex)[:8]}"
         metrics_collector.start_turn(state.conversation_id, turn_id)
-        
+
+        with trace_context(
+            "orchestrator_turn",
+            session_id=state.conversation_id,
+            user_id=getattr(state, "user_id", ""),
+            input={"message": user_message[:500], "turn_id": turn_id},
+            metadata={"phase": state.phase.value if hasattr(state.phase, "value") else str(state.phase)},
+            tags=["orchestrator"],
+        ) as trace:
+            set_current_trace(trace)
+
+            try:
+                return self._handle_message_inner(
+                    user_message, state, progress, allowed_categories,
+                    feedback_agent_id, turn_id, trace,
+                )
+            finally:
+                set_current_trace(None)
+
+    def _handle_message_inner(self, user_message: str,
+                              state: ConversationState,
+                              progress: ProgressCallback,
+                              allowed_categories: list[str] | None,
+                              feedback_agent_id: str,
+                              turn_id: str,
+                              trace) -> str:
+        """Core message handling wrapped by handle_message's trace context."""
         try:
             state.add_message("user", user_message)
             tracker = self._get_issue_tracker(state.conversation_id)
@@ -285,11 +312,13 @@ class Orchestrator:
                 )
 
             state.save()
+            trace.update(output={"response": response[:1000]})
             return response
         except Exception as e:
             logger.exception(f"Error in handle_message: {e}")
-            metrics_collector.record_turn_error(turn_id, str(e))
-            return f"I encountered a technical problem: {cast(Any, str(e))[:100]}. Please try again or contact support."
+            trace.update(output={"error": str(e)[:500]})
+            error_msg = f"I encountered a technical problem: {cast(Any, str(e))[:100]}. Please try again or contact support."
+            return error_msg
         finally:
             metrics_collector.end_turn(turn_id)
 

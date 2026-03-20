@@ -1,3 +1,5 @@
+> - **LangFuse Observability (2026-03-20)**: Optional LLM observability via LangFuse. Traces orchestrator turns, LLM generations, tool executions, RAG searches, and approval classification. Zero overhead when disabled. See `SETUP_GUIDE.md` §15 and `config/observability.py`.
+>
 > - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: New metadata-first diagnosis flow. `DiagnosticAgent` can now build structured evidence packs from AE execution data and run LLM-powered diagnosis with confidence scoring. See §5.6 and §6 below.
 >
 > - **Performance Optimizations (2026-03-07)**: Parallel RAG fan-out, configurable embedding dimension, batched DB queries, shared MCP executor, AE path caching, coalesced state writes, capped execution polling. Details in §5.5 below.
@@ -46,6 +48,7 @@ Before any request flows through the system, the following must be in place:
     - Safety knobs: `MAX_AGENT_ITERATIONS`, `MAX_RAG_TOOLS`, `MAX_RESTARTS_PER_WORKFLOW`, `MAX_BULK_OPERATIONS`, `RECURRENCE_ESCALATION_THRESHOLD`, `PROTECTED_WORKFLOWS`
   - `config/llm_client.py` — initializes Gemini (Vertex AI) using `CONFIG`.
   - `config/logging_setup.py` — configures app + audit loggers and log file locations.
+  - `config/observability.py` — optional LangFuse integration for LLM observability (traces, spans, generations). Enabled via `LANGFUSE_ENABLED=true`. See **Section 15 of `SETUP_GUIDE.md`**.
   - `state/app_config.py`, `state/tool_overrides.py`, `state/scheduler_store.py`, `state/docs_catalog.py` — persisted control-center stores.
 
 - **Database & RAG:**
