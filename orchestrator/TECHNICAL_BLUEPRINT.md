@@ -1,3 +1,5 @@
+> - **V0.5 Production Hardening (2026-03-20)**: JWT-based auth with tenant claims (`app/security/jwt_auth.py`, dev-mode header fallback). Fernet-encrypted credential vault (`app/security/vault.py` + `TenantSecret` model). AST-based safe expression evaluator replaces `eval()` (`app/engine/safe_eval.py`). PostgreSQL RLS migration for tenant isolation (`alembic/versions/0001`). Per-tenant rate limiting via slowapi and execution quotas (`app/security/rate_limiter.py`). See §8 for updated security docs.
+>
 > - **V0.4 Branching & Parallel Execution (2026-03-20)**: Rewrote `dag_runner.py` with a ready-queue execution model. Condition nodes now prune non-matching branches (only `true` or `false` edges are followed). Independent branches execute in parallel via `ThreadPoolExecutor`. Merge nodes naturally wait for all upstream branches. Frontend edges from condition nodes show colored labels (green "Yes" / red "No") with arrow markers. See §6 for updated DAG engine docs.
 >
 > - **V0.3 Live LLM Integration (2026-03-20)**: Agent nodes now call real LLM providers (Google Gemini via `google-genai`, OpenAI, Anthropic). Added `app/engine/llm_providers.py` multi-provider abstraction, `app/engine/prompt_template.py` Jinja2 system-prompt templating with context variable injection (dot-accessible upstream outputs), and token usage tracking in execution logs. New config keys: `ORCHESTRATOR_GOOGLE_API_KEY`, `ORCHESTRATOR_OPENAI_API_KEY`, `ORCHESTRATOR_ANTHROPIC_API_KEY`. See `SETUP_GUIDE.md` §7 for configuration.
@@ -7,9 +9,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.4  
+**Version:** 0.5  
 **Last updated:** 2026-03-20  
-**Status:** V0.4 branch-aware parallel DAG execution, V0.3 live LLM integration, V0.2 frontend wired, V0.1 scaffold
+**Status:** V0.5 production hardening (JWT auth, vault, RLS, safe eval, rate limits), V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 
 ---
 
@@ -222,10 +224,11 @@ orchestrator/backend/
     │   ├── workflows.py            # CRUD + execute + callback + status
     │   └── tools.py                # MCP tool bridge for palette
     ├── engine/
-    │   ├── dag_runner.py           # Graph parser, topo sort, executor
+    │   ├── dag_runner.py           # Ready-queue DAG executor with branching + parallelism
     │   ├── node_handlers.py        # Per-type dispatch (trigger/agent/action/logic)
     │   ├── llm_providers.py        # Multi-provider LLM abstraction (Google/OpenAI/Anthropic)
-    │   └── prompt_template.py      # Jinja2 system-prompt templating with context injection
+    │   ├── prompt_template.py      # Jinja2 system-prompt templating with context injection
+    │   └── safe_eval.py            # AST-based safe expression evaluator for conditions
     ├── models/
     │   ├── workflow.py             # WorkflowDefinition, WorkflowInstance, ExecutionLog
     │   └── tenant.py              # TenantToolOverride
@@ -233,7 +236,10 @@ orchestrator/backend/
     │   ├── celery_app.py           # Celery configuration
     │   └── tasks.py                # execute_workflow_task, resume_workflow_task
     └── security/
-        └── tenant.py              # X-Tenant-Id header extraction
+        ├── tenant.py              # Re-exports get_tenant_id for backward compat
+        ├── jwt_auth.py            # JWT creation + validation with tenant claim
+        ├── vault.py               # Fernet-encrypted credential vault + TenantSecret model
+        └── rate_limiter.py        # Per-tenant rate limiting + execution quotas
 ```
 
 ### 4.2 Configuration
@@ -253,6 +259,11 @@ File: `app/config.py`
 | `openai_api_key` | `ORCHESTRATOR_OPENAI_API_KEY` | `""` |
 | `openai_base_url` | `ORCHESTRATOR_OPENAI_BASE_URL` | `https://api.openai.com/v1` |
 | `anthropic_api_key` | `ORCHESTRATOR_ANTHROPIC_API_KEY` | `""` |
+| `auth_mode` | `ORCHESTRATOR_AUTH_MODE` | `dev` |
+| `vault_key` | `ORCHESTRATOR_VAULT_KEY` | `""` |
+| `rate_limit_requests` | `ORCHESTRATOR_RATE_LIMIT_REQUESTS` | `100` |
+| `rate_limit_window` | `ORCHESTRATOR_RATE_LIMIT_WINDOW` | `1 minute` |
+| `execution_quota_per_hour` | `ORCHESTRATOR_EXECUTION_QUOTA_PER_HOUR` | `50` |
 
 ### 4.3 LLM Provider Abstraction
 
@@ -514,19 +525,69 @@ The frontend can use this endpoint to dynamically hydrate the Action node palett
 
 ## 8. Multi-Tenancy and Security
 
-### 8.1 Tenant Isolation
+### 8.1 Authentication
 
-File: `app/security/tenant.py`
+File: `app/security/jwt_auth.py`
 
-Every API endpoint depends on `get_tenant_id()`, which extracts the `X-Tenant-Id` header. All database queries filter by `tenant_id`, ensuring strict row-level data isolation.
+The `get_tenant_id()` dependency supports two modes controlled by `ORCHESTRATOR_AUTH_MODE`:
 
-### 8.2 Database Design
+| Mode | Header | Behavior |
+|------|--------|----------|
+| `dev` (default) | `X-Tenant-Id` | Extracts tenant from plain header — for local development only |
+| `jwt` | `Authorization: Bearer <token>` | Validates HS256-signed JWT, extracts `tenant_id` claim |
 
-All four tables include a `tenant_id` column with indexes. PostgreSQL Row-Level Security (RLS) policies can be layered on top of the application-level filtering for defense-in-depth.
+A development-only `/auth/token?tenant_id=xxx` endpoint generates test JWTs.
+In production, tokens are issued by the organization's identity provider.
 
-### 8.3 Credential Vaulting (Planned)
+### 8.2 Database-Level Tenant Isolation (RLS)
 
-In production, LLM API keys and SaaS credentials will be encrypted at rest and bound to specific `tenant_id`s, injected into node handlers only at execution time.
+Migration: `alembic/versions/0001_enable_rls_policies.py`
+
+PostgreSQL Row-Level Security policies enforce that every query only sees rows
+belonging to the current tenant. The application sets `app.tenant_id` via
+`SET LOCAL` at the start of each database session.
+
+Tables with RLS: `workflow_definitions`, `workflow_instances`, `tenant_tool_overrides`, `tenant_secrets`.
+
+This provides defense-in-depth on top of application-level `WHERE tenant_id = ...` filtering.
+
+### 8.3 Encrypted Credential Vault
+
+File: `app/security/vault.py`
+
+Per-tenant secrets (LLM API keys, SaaS credentials) are stored in the
+`tenant_secrets` table encrypted at rest using Fernet symmetric encryption.
+The vault key is set via `ORCHESTRATOR_VAULT_KEY`.
+
+```python
+from app.security.vault import encrypt_secret, decrypt_secret
+
+ciphertext = encrypt_secret("sk-my-openai-key")
+plaintext  = decrypt_secret(ciphertext)
+```
+
+### 8.4 Safe Expression Evaluator
+
+File: `app/engine/safe_eval.py`
+
+Condition node expressions are evaluated by an AST-walking evaluator that
+**only** allows: comparisons, boolean ops, arithmetic, variable lookups,
+attribute/subscript access on dict values, and literals. Function calls,
+imports, `exec`, `eval`, and all other code execution are rejected.
+
+### 8.5 Rate Limiting and Execution Quotas
+
+File: `app/security/rate_limiter.py`
+
+Two levels of protection:
+
+| Level | Mechanism | Config |
+|-------|-----------|--------|
+| API request rate | slowapi (backed by Redis) | `ORCHESTRATOR_RATE_LIMIT_REQUESTS` / `ORCHESTRATOR_RATE_LIMIT_WINDOW` |
+| Execution quota | DB count of recent instances | `ORCHESTRATOR_EXECUTION_QUOTA_PER_HOUR` |
+
+The execute endpoint checks the hourly quota before creating a new instance,
+returning HTTP 429 if the tenant has exceeded their limit.
 
 ---
 
@@ -566,19 +627,18 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 11. Known Limitations (V0.4)
+## 11. Known Limitations (V0.5)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
 | **LLM calls** | Live multi-provider LLM calls; ReAct tool-calling loop not yet implemented | Add iterative tool-calling ReAct loop for agent nodes |
-| **Condition branching** | Branch pruning implemented; `eval()`-based condition expressions | Replace with safe expression parser |
 | **MCP transport** | Backend calls `POST /call-tool` (REST) | Add REST bridge to existing stdio/SSE MCP server |
 | **Frontend persistence** | Save/Load/Execute UI is wired, but still lacks tenant/session switching, schema validation, and graph-level validation/highlighting | Add tenant-aware session config, validate `graph_json` against node registry, and improve UX with WebSocket/SSE updates |
-| **Tenant auth** | Header-based `X-Tenant-Id` only | JWT validation with tenant claim |
+| **Tenant auth** | JWT auth implemented; no external IdP integration yet | Add OIDC/SAML federation with enterprise identity providers |
 | **Schedule triggers** | No cron scheduler backend | Add APScheduler or Celery Beat integration |
 | **ReAct loop** | Palette item exists, no iterative execution | Implement tool-calling loop in agent handler |
 | **TenantToolOverride** | Model exists, not consumed | Filter tools endpoint by tenant overrides |
-| **Condition safety** | Uses `eval()` with restricted builtins | Replace with safe expression parser |
+| **Condition expressions** | Safe evaluator supports basic ops; no custom functions or regex | Add pluggable expression functions |
 | **node_registry.json** | Not consumed by frontend/backend | Hydrate palette and validate config from registry |
 
 ---
@@ -602,12 +662,19 @@ A version-controlled JSON file defining all node types with their `config_schema
 - Merge nodes wait for all upstream branches naturally via the ready-queue model.
 - Frontend edges from condition nodes show colored "Yes"/"No" labels with arrow markers.
 
-**V0.5 — Production Hardening**
-- JWT-based authentication with tenant claims.
-- Encrypted credential vault per tenant.
-- PostgreSQL RLS policies.
-- Safe expression evaluator replacing `eval()`.
-- Rate limiting and execution quotas per tenant.
+**V0.5 — Production Hardening (Implemented)**
+- JWT-based authentication with tenant claims (`jwt_auth.py`) + dev-mode fallback.
+- Fernet-encrypted credential vault per tenant (`vault.py` + `TenantSecret` model).
+- PostgreSQL RLS policies via Alembic migration (`0001_enable_rls_policies.py`).
+- AST-based safe expression evaluator replacing `eval()` (`safe_eval.py`).
+- Per-tenant rate limiting (slowapi + Redis) and hourly execution quotas.
+
+**V0.6 — Advanced Agent Capabilities**
+- ReAct iterative tool-calling loop for agent nodes.
+- OIDC/SAML federation with enterprise identity providers.
+- WebSocket/SSE real-time execution updates replacing polling.
+- Cron scheduler backend (APScheduler or Celery Beat) for schedule triggers.
+- Consume node_registry.json to hydrate palette and validate config.
 
 ---
 

@@ -273,6 +273,11 @@ Backend settings use the `ORCHESTRATOR_` prefix, while the frontend API client u
 | `ORCHESTRATOR_OPENAI_API_KEY` | No | `""` | OpenAI API key for GPT models |
 | `ORCHESTRATOR_OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `ORCHESTRATOR_ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for Claude models |
+| `ORCHESTRATOR_AUTH_MODE` | No | `dev` | Auth mode: `dev` (X-Tenant-Id header) or `jwt` (Bearer token) |
+| `ORCHESTRATOR_VAULT_KEY` | No | `""` | Fernet encryption key for credential vault |
+| `ORCHESTRATOR_RATE_LIMIT_REQUESTS` | No | `100` | Max API requests per tenant per window |
+| `ORCHESTRATOR_RATE_LIMIT_WINDOW` | No | `1 minute` | Rate limit time window |
+| `ORCHESTRATOR_EXECUTION_QUOTA_PER_HOUR` | No | `50` | Max workflow executions per tenant per hour |
 | `VITE_API_URL` | No | `http://localhost:8001` | Orchestrator backend base URL for the frontend API client |
 | `VITE_TENANT_ID` | No | `default` | Tenant id injected as `X-Tenant-Id` header in frontend requests |
 
@@ -367,5 +372,5 @@ curl http://localhost:8001/api/v1/workflows \
 
 ---
 
-**Document version:** 0.4  
+**Document version:** 0.5  
 **Last updated:** 2026-03-20

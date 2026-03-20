@@ -149,10 +149,17 @@ def _handle_logic(
     label = node_data.get("label", "")
 
     if "condition" in config:
+        from app.engine.safe_eval import safe_eval, SafeEvalError
+
         expr = config["condition"]
         upstream = {k: v for k, v in context.items() if k.startswith("node_")}
+        eval_env = {"output": upstream, "context": context, "trigger": context.get("trigger", {})}
+        eval_env.update(upstream)
         try:
-            result = bool(eval(expr, {"__builtins__": {}}, {"output": upstream, "context": context}))  # noqa: S307
+            result = bool(safe_eval(expr, eval_env))
+        except SafeEvalError as exc:
+            logger.warning("Condition expression rejected by safe evaluator: %s", exc)
+            result = False
         except Exception:
             result = False
         return {"branch": "true" if result else "false", "evaluated": expr}

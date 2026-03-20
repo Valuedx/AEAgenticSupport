@@ -136,6 +136,9 @@ def execute_workflow(
     tenant_id: str = Depends(get_tenant_id),
     db: Session = Depends(get_db),
 ):
+    from app.security.rate_limiter import check_execution_quota
+    check_execution_quota(db, tenant_id)
+
     wf = (
         db.query(WorkflowDefinition)
         .filter_by(id=workflow_id, tenant_id=tenant_id)

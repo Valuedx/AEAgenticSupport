@@ -1,3 +1,5 @@
+> - **V0.5 Production Hardening (2026-03-20)**: JWT-based auth with tenant claims (dev-mode header fallback). Fernet-encrypted credential vault per tenant. PostgreSQL RLS policies for DB-level tenant isolation. AST-based safe expression evaluator replaces `eval()`. Per-tenant rate limiting (slowapi) and hourly execution quotas.
+>
 > - **V0.4 Branching & Parallel Execution (2026-03-20)**: DAG engine rewritten with ready-queue model. Condition nodes now prune non-matching branches; independent nodes execute in parallel. Merge nodes wait for all upstream branches. Condition edges show colored "Yes"/"No" labels on the canvas.
 >
 > - **V0.3 Live LLM Integration (2026-03-20)**: Agent nodes now call real LLM providers (Google Gemini, OpenAI, Anthropic). System prompts support Jinja2 templating with upstream context injection (`{{ trigger.user_query }}`, `{{ node_1.response }}`). Token usage tracked in execution logs.
@@ -9,7 +11,7 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.4  
+**Version:** 0.5  
 **Last updated:** 2026-03-20
 
 ---
