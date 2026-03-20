@@ -1,4 +1,4 @@
-> - **LangFuse Observability (2026-03-20)**: Optional LLM observability via LangFuse. New `config/observability.py` provides lazy-initialized client, `trace_context`/`span_context` context managers, and no-op stubs for zero-overhead when disabled. Instrumented: orchestrator turns (root traces), LLM generations (`chat`, `chat_with_tools` with token usage), tool executions (per-tool spans with latency), RAG searches (per-collection spans), embeddings, and approval classification. Thread-local trace propagation avoids signature changes. Fixed `MetricsCollector.record_turn_error` missing method bug. See §6 and `SETUP_GUIDE.md` §15.
+> - **LangFuse Observability — Full Coverage (2026-03-20)**: Optional LLM observability via LangFuse. `config/observability.py` provides lazy-initialized client, `trace_context`/`span_context` context managers, and no-op stubs for zero-overhead when disabled. **Core path**: orchestrator turns (root traces), LLM generations (`chat`, `chat_with_tools` with token usage), tool executions (per-tool spans with latency), RAG searches (per-collection spans), embeddings, and approval classification. **Extended coverage**: RCA agent (handle + generate + background indexing), message gateway intent classification, scheduler handlers (health check, daily summary), custom Cognibot issue classifier, MCP agent log analysis, conversation summary generation, and admin tool test endpoint. Every LLM call and tool execution in the codebase is now traced. Thread-local trace propagation avoids signature changes. Fixed `MetricsCollector.record_turn_error` missing method bug. See §6 and `SETUP_GUIDE.md` §15.
 >
 > - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: Added metadata-first diagnosis flow with structured evidence packs. New `tools/ae_diagnostic_tools.py` provides log time-window extraction, request-ID/step-name filtering, Java exception chain parsing, repeated-line collapse, multi-stream chronological merge, and a compact evidence-pack builder. New `diagnose_from_evidence_pack` tool runs LLM diagnosis with confidence scoring, alternative hypotheses, and remediation suggestions. `AutomationEdgeClient` extended with `get_normalized_instance_metadata()` and `get_workflow_step_timeline()`. DiagnosticAgent now includes the `diagnostics` tool category. See §2, §4.2, and §7.
 >
@@ -37,7 +37,7 @@
 >
 ## AutomationEdge Agentic Support — Technical Blueprint
 
-**Version:** 1.4  
+**Version:** 1.5  
 **Last updated:** 2026-03-20
 
 ---
@@ -381,15 +381,28 @@ AE Instance ID
 - **Observability (LangFuse — optional):**
   - Enabled via `LANGFUSE_ENABLED=true` with `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST`.
   - Self-hosted (Docker Compose) or LangFuse Cloud.
-  - **Traces**: Each `Orchestrator.handle_message()` call creates a root trace with session ID, user ID, input, phase, and final response.
-  - **Generations**: Every `VertexAIClient.chat()` and `chat_with_tools()` call records model name, truncated input/output, and token usage (`input`/`output`/`total`).
-  - **Tool spans**: `ToolExecutor.execute()` records tool name, sanitized parameters, success/error status, and latency.
-  - **RAG spans**: `PgVectorRAGEngine.search()` records collection, query, top_k, and result count.
-  - **Embedding spans**: `VertexEmbedder.embed()` records model, truncated text, and vector dimension.
-  - **Approval spans**: `ApprovalGate.classify_approval_turn()` records classification intent, confidence, and method (rule-based vs LLM).
+  - **Core path (inside orchestrator trace)**:
+    - **Root trace**: `Orchestrator.handle_message()` — session ID, user ID, input, phase, final response.
+    - **Generations**: Every `VertexAIClient.chat()` and `chat_with_tools()` call — model name, truncated input/output, token usage.
+    - **Tool spans**: `ToolExecutor.execute()` — tool name, sanitized parameters, success/error, latency.
+    - **RAG spans**: `PgVectorRAGEngine.search()` — collection, query, top_k, result count.
+    - **Embedding spans**: `VertexEmbedder.embed()` — model, truncated text, vector dimension.
+    - **Approval spans**: `ApprovalGate.classify_approval_turn()` — intent, confidence, method.
+  - **Extended coverage (independent root traces for code paths outside the orchestrator)**:
+    - `RCAAgent.handle()` — root trace for RCA generation with child spans for business/technical report LLM calls.
+    - `RCAAgent._index_as_past_incident()` — separate root trace for background-thread RAG indexing with LLM root-cause extraction.
+    - `MessageGateway._classify_message_intent()` — root trace for LLM intent classification when agents are busy.
+    - `scheduler.health_check_handler()` — root trace for background health-check tool calls.
+    - `scheduler.daily_summary_handler()` — root trace for background daily summary LLM generation.
+    - `issue_classifier._llm_classify()` — root trace for custom Cognibot LLM-based issue classification.
+    - `agent_analyze_logs()` (MCP) — root trace for MCP server AI diagnostic LLM call.
+    - `ConversationState.generate_summary()` — root trace for admin-triggered conversation summary.
+    - `api_tools_test` (admin endpoint) — root trace for admin tool testing.
   - Implementation details:
     - `config/observability.py` — lazy-initialized `Langfuse` singleton, `trace_context`/`span_context` context managers, `create_generation` helper.
     - Thread-local propagation via `set_current_trace()`/`get_current_trace()` in `config/llm_client.py` — avoids changing any existing function signatures.
+    - Independent root traces for code running outside the orchestrator (RCA agent, scheduler, gateway, MCP, admin) — each calls `set_current_trace()` so child LLM generations and tool spans auto-nest.
+    - Background threads (RCA indexing) create separate root traces since OTel context doesn't propagate across thread boundaries.
     - No-op stubs (`_NoOpSpan`) returned when disabled — zero runtime overhead, no conditional checks needed.
     - All LangFuse calls wrapped in try/except — tracing failures never break agent pipeline.
   - See `SETUP_GUIDE.md` §15 for full setup, architecture diagram, and troubleshooting.

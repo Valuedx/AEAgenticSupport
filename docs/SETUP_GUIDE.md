@@ -1,6 +1,8 @@
-> - **LangFuse Observability (2026-03-20)**:
+> - **LangFuse Observability — Full Coverage (2026-03-20)**:
 >   - Added optional LangFuse integration for full LLM observability (traces, generations, spans).
->   - Instrumented: orchestrator turns, LLM calls (`chat`, `chat_with_tools`), tool executions, RAG searches, embeddings, approval classification.
+>   - **Core path**: orchestrator turns, LLM calls (`chat`, `chat_with_tools`), tool executions, RAG searches, embeddings, approval classification.
+>   - **Extended coverage**: RCA agent (handle + generate + background indexing), message gateway intent classification, scheduler handlers (health check, daily summary), custom Cognibot issue classifier, MCP agent log analysis, conversation summary generation, admin tool test endpoint.
+>   - Every LLM call and tool execution in the codebase is now traced.
 >   - Zero-overhead when disabled — no-op stubs used throughout.
 >   - Fixed `MetricsCollector.record_turn_error` missing method bug.
 >   - See §15 for setup and configuration.
@@ -1497,6 +1499,8 @@ The application supports optional **LangFuse** integration for LLM observability
 
 ### 15.1 What Gets Traced
 
+**Core path (inside orchestrator):**
+
 | Component | Observation Type | What's Captured |
 |-----------|-----------------|-----------------|
 | `Orchestrator.handle_message` | **Trace** (root) | Session ID, user ID, input message, phase, final response |
@@ -1506,6 +1510,20 @@ The application supports optional **LangFuse** integration for LLM observability
 | `PgVectorRAGEngine.search` | **Span** | Query, collection, top_k, hybrid flag, result count |
 | `VertexEmbedder.embed` | **Span** | Text (truncated), model, output dimension |
 | `ApprovalGate.classify_approval_turn` | **Span** | User message, intent, confidence, classification method |
+
+**Extended coverage (independent trace roots):**
+
+| Component | Observation Type | What's Captured |
+|-----------|-----------------|-----------------|
+| `RCAAgent.handle` | **Trace** (root) | Session ID, user ID, RCA request; child spans for business/technical generation |
+| `RCAAgent._index_as_past_incident` | **Trace** (root) | Background indexing thread; LLM root-cause extraction + RAG indexing |
+| `MessageGateway._classify_message_intent` | **Trace** (root) | LLM intent classification when agents are already working |
+| `scheduler.health_check_handler` | **Trace** (root) | Background health check; tool calls and alert counts |
+| `scheduler.daily_summary_handler` | **Trace** (root) | Background daily summary; LLM generation + tool data gathering |
+| `issue_classifier._llm_classify` | **Trace** (root) | Custom Cognibot LLM-based issue classification |
+| `agent_analyze_logs` (MCP) | **Trace** (root) | MCP server AI diagnostic; LLM analysis of agent log errors |
+| `ConversationState.generate_summary` | **Trace** (root) | Admin-triggered conversation summary LLM call |
+| `api_tools_test` (admin endpoint) | **Trace** (root) | Admin tool testing; tool execution span |
 
 ### 15.2 Setup — Self-Hosted (Docker Compose)
 
@@ -1560,6 +1578,8 @@ pip install langfuse
 LangFuse integration is implemented as a non-intrusive layer using the **v4 OpenTelemetry-based API**:
 
 ```
+─── Core path (orchestrator) ───────────────────────────────────
+
 Orchestrator.handle_message()
   └─ trace_context("orchestrator_turn")        ← Root span + propagate_attributes
        ├─ set_current_trace(span)              ← Thread-local for non-OTel callsites
@@ -1578,12 +1598,54 @@ Orchestrator.handle_message()
        │
        └─ ApprovalGate.classify()
             └─ span_context(as_type="span")    ← Approval classification
+
+─── Extended coverage (independent root traces) ───────────────
+
+RCAAgent.handle()
+  └─ trace_context("rca_agent")                ← Root trace
+       ├─ tool_registry.execute("generate_rca_report")
+       │    └─ span_context("generate_business_rca" | "generate_technical_rca")
+       │         └─ llm_client.chat()           ← Generation (auto-nested)
+       └─ (background thread)
+            └─ trace_context("rca_index_incident")  ← Separate root trace
+                 └─ llm_client.chat()           ← Root-cause extraction
+
+MessageGateway._classify_message_intent()
+  └─ trace_context("gateway_classify_intent")  ← Root trace
+       └─ llm_client.chat()                    ← Intent classification
+
+scheduler.health_check_handler()
+  └─ trace_context("scheduler_health_check")   ← Root trace
+       └─ tool_registry.execute(...)            ← Tool spans
+
+scheduler.daily_summary_handler()
+  └─ trace_context("scheduler_daily_summary")  ← Root trace
+       ├─ tool_registry.execute(...)            ← Tool spans
+       └─ llm_client.chat()                    ← Summary generation
+
+issue_classifier._llm_classify()
+  └─ trace_context("cognibot_issue_classify")  ← Root trace
+       └─ llm_client.chat()                    ← Classification
+
+agent_analyze_logs() (MCP)
+  └─ trace_context("mcp_agent_log_analysis")   ← Root trace
+       └─ llm_client.chat()                    ← AI diagnostic
+
+ConversationState.generate_summary()
+  └─ trace_context("generate_conversation_summary")  ← Root trace
+       └─ llm_client.chat()                    ← Summary
+
+api_tools_test (admin)
+  └─ trace_context("admin_tool_test:<tool>")   ← Root trace
+       └─ tool_registry.execute(...)            ← Tool span
 ```
 
 Key design decisions:
 - **LangFuse v4 (OTel-native)** — uses `start_as_current_observation()` context managers; nesting is automatic via the OpenTelemetry context stack.
 - **`propagate_attributes()`** injects `session_id`, `user_id`, and `tags` into the OTel context so all observations inherit them.
 - **Thread-local trace reference** via `set_current_trace()` / `get_current_trace()` — used by callsites that need explicit access (e.g. `create_generation`) to avoid passing span objects through every function signature.
+- **Independent root traces** — code paths that run outside the orchestrator (RCA agent, scheduler, gateway classification, MCP tools, admin endpoints) create their own `trace_context` roots and call `set_current_trace()` so child operations auto-nest.
+- **Background thread traces** — fire-and-forget operations (RCA indexing) create separate root traces since the parent's OTel context doesn't propagate across thread boundaries.
 - **`usage_details`** — token counts use LangFuse v4's `usage_details` dict (`input`/`output`/`total` keys) for accurate cost tracking.
 - **No-op stubs** (`_NoOpSpan`) when LangFuse is disabled — zero overhead, no conditional checks needed in instrumented code.
 - **Non-blocking** — all LangFuse calls are guarded with try/except so tracing failures never break the agent pipeline.
@@ -1611,5 +1673,5 @@ Key design decisions:
 
 ---
 
-**Document version:** 3.3
+**Document version:** 3.4
 **Last updated:** 2026-03-20

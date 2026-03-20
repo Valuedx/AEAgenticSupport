@@ -1,4 +1,4 @@
-> - **LangFuse Observability (2026-03-20)**: Optional LLM observability via LangFuse. Traces orchestrator turns, LLM generations, tool executions, RAG searches, and approval classification. Zero overhead when disabled. See `SETUP_GUIDE.md` §15 and `config/observability.py`.
+> - **LangFuse Observability — Full Coverage (2026-03-20)**: Optional LLM observability via LangFuse. **Core path**: orchestrator turns, LLM generations, tool executions, RAG searches, embeddings, and approval classification. **Extended coverage**: RCA agent (handle + generate + background indexing), message gateway intent classification, scheduler handlers, custom Cognibot issue classifier, MCP agent log analysis, conversation summaries, and admin tool tests. Every LLM call and tool execution is traced. Zero overhead when disabled. See `SETUP_GUIDE.md` §15 and `config/observability.py`.
 >
 > - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: New metadata-first diagnosis flow. `DiagnosticAgent` can now build structured evidence packs from AE execution data and run LLM-powered diagnosis with confidence scoring. See §5.6 and §6 below.
 >
