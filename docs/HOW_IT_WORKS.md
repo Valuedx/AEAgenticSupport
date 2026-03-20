@@ -1,3 +1,5 @@
+> - **AE AI Hub — Agentic Orchestrator (2026-03-20)**: New visual no-code workflow builder in `orchestrator/`. For how the DAG builder and execution engine work step-by-step, see `orchestrator/HOW_IT_WORKS.md`.
+>
 > - **LangFuse Observability — Full Coverage (2026-03-20)**: Optional LLM observability via LangFuse. **Core path**: orchestrator turns, LLM generations, tool executions, RAG searches, embeddings, and approval classification. **Extended coverage**: RCA agent (handle + generate + background indexing), message gateway intent classification, scheduler handlers, custom Cognibot issue classifier, MCP agent log analysis, conversation summaries, and admin tool tests. Every LLM call and tool execution is traced. Zero overhead when disabled. See `SETUP_GUIDE.md` §15 and `config/observability.py`.
 >
 > - **Evidence-Pack Diagnostic Pipeline (2026-03-19)**: New metadata-first diagnosis flow. `DiagnosticAgent` can now build structured evidence packs from AE execution data and run LLM-powered diagnosis with confidence scoring. See §5.6 and §6 below.
@@ -561,3 +563,11 @@ What the control center adds:
 - conversation-history search, summary refresh, export preview, and human handoff actions
 
 The documentation library at `/docs` now reads its title, subtitle, and document manifest from persisted stores rather than hardcoded page constants.
+
+---
+
+## 13. AE AI Hub — Visual Workflow Orchestrator
+
+The `orchestrator/` directory contains a new add-on module: a visual no-code DAG builder where users drag-and-drop LLM agents, MCP tools, and logic nodes to construct workflows on a React Flow canvas. Workflows are executed asynchronously by a FastAPI + Celery backend.
+
+For a step-by-step walkthrough of how the visual builder and execution engine work, see `orchestrator/HOW_IT_WORKS.md`. For architecture, see `orchestrator/TECHNICAL_BLUEPRINT.md`.

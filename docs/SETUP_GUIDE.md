@@ -1673,5 +1673,21 @@ Key design decisions:
 
 ---
 
-**Document version:** 3.4
+---
+
+## 16. AE AI Hub — Orchestrator Setup
+
+The visual workflow orchestrator is a separate add-on module in the `orchestrator/` directory with its own frontend and backend. It does not affect the setup described in sections 1–15 above.
+
+For orchestrator-specific installation and configuration, see:
+
+- **Setup:** `orchestrator/SETUP_GUIDE.md`
+- **Architecture:** `orchestrator/TECHNICAL_BLUEPRINT.md`
+- **Runtime walkthrough:** `orchestrator/HOW_IT_WORKS.md`
+
+Quick start: `cd orchestrator/frontend && npm install && npm run dev` to launch the visual builder on port 8080.
+
+---
+
+**Document version:** 3.5  
 **Last updated:** 2026-03-20

@@ -1,0 +1,133 @@
+{
+  "version": "1.0.0",
+  "categories": [
+    {
+      "id": "trigger",
+      "label": "Triggers",
+      "description": "Entry points that start a workflow execution"
+    },
+    {
+      "id": "agent",
+      "label": "AI Agents",
+      "description": "LLM-powered reasoning nodes"
+    },
+    {
+      "id": "action",
+      "label": "Actions",
+      "description": "Tool calls, HTTP requests, and side-effect operations"
+    },
+    {
+      "id": "logic",
+      "label": "Logic",
+      "description": "Branching, merging, and flow control nodes"
+    }
+  ],
+  "node_types": [
+    {
+      "type": "webhook_trigger",
+      "category": "trigger",
+      "label": "Webhook Trigger",
+      "description": "Start workflow on HTTP POST",
+      "icon": "webhook",
+      "config_schema": {
+        "method": { "type": "string", "default": "POST", "enum": ["POST", "PUT"] },
+        "path": { "type": "string", "default": "/webhook" }
+      }
+    },
+    {
+      "type": "schedule_trigger",
+      "category": "trigger",
+      "label": "Schedule Trigger",
+      "description": "Start workflow on a cron schedule",
+      "icon": "clock",
+      "config_schema": {
+        "cron": { "type": "string", "default": "0 * * * *" }
+      }
+    },
+    {
+      "type": "llm_agent",
+      "category": "agent",
+      "label": "LLM Agent",
+      "description": "AI reasoning node with prompt and model selection",
+      "icon": "brain",
+      "config_schema": {
+        "provider": { "type": "string", "default": "google", "enum": ["google", "openai", "anthropic"] },
+        "model": { "type": "string", "default": "gemini-2.5-flash" },
+        "systemPrompt": { "type": "string", "default": "" },
+        "temperature": { "type": "number", "default": 0.7, "min": 0, "max": 2 },
+        "maxTokens": { "type": "integer", "default": 4096 }
+      }
+    },
+    {
+      "type": "react_agent",
+      "category": "agent",
+      "label": "ReAct Agent",
+      "description": "Iterative tool-calling agent loop",
+      "icon": "repeat",
+      "config_schema": {
+        "provider": { "type": "string", "default": "google" },
+        "model": { "type": "string", "default": "gemini-2.5-flash" },
+        "systemPrompt": { "type": "string", "default": "" },
+        "maxIterations": { "type": "integer", "default": 10 },
+        "tools": { "type": "array", "items": { "type": "string" }, "default": [] }
+      }
+    },
+    {
+      "type": "mcp_tool",
+      "category": "action",
+      "label": "MCP Tool",
+      "description": "Execute an MCP server tool",
+      "icon": "wrench",
+      "config_schema": {
+        "toolName": { "type": "string", "default": "" },
+        "parameters": { "type": "object", "default": {} }
+      }
+    },
+    {
+      "type": "http_request",
+      "category": "action",
+      "label": "HTTP Request",
+      "description": "Make an external HTTP call",
+      "icon": "globe",
+      "config_schema": {
+        "url": { "type": "string", "default": "" },
+        "method": { "type": "string", "default": "GET", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+        "headers": { "type": "object", "default": {} },
+        "body": { "type": "string", "default": "" }
+      }
+    },
+    {
+      "type": "human_approval",
+      "category": "action",
+      "label": "Human Approval",
+      "description": "Pause and wait for human approval",
+      "icon": "user-check",
+      "config_schema": {
+        "approvalMessage": { "type": "string", "default": "" },
+        "timeout": { "type": "integer", "default": 3600 }
+      }
+    },
+    {
+      "type": "condition",
+      "category": "logic",
+      "label": "Condition",
+      "description": "Branch based on a condition expression",
+      "icon": "git-branch",
+      "config_schema": {
+        "condition": { "type": "string", "default": "" },
+        "trueLabel": { "type": "string", "default": "Yes" },
+        "falseLabel": { "type": "string", "default": "No" }
+      }
+    },
+    {
+      "type": "merge",
+      "category": "logic",
+      "label": "Merge",
+      "description": "Merge multiple branches",
+      "icon": "git-merge",
+      "config_schema": {
+        "strategy": { "type": "string", "default": "waitAll", "enum": ["waitAll", "waitAny"] }
+      }
+    }
+  ]
+}

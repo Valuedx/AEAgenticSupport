@@ -1,3 +1,5 @@
+> - **AE AI Hub — Agentic Orchestrator (2026-03-20)**: New add-on module in `orchestrator/`. Visual no-code DAG builder (React Flow + Zustand + shadcn/ui) with FastAPI execution engine, Celery workers, SQLAlchemy data models (`WorkflowDefinition`, `WorkflowInstance`, `ExecutionLog`), and MCP tool bridge. Runs as a sidecar — does not modify existing codebase. See `orchestrator/TECHNICAL_BLUEPRINT.md`, `orchestrator/SETUP_GUIDE.md`, and `orchestrator/HOW_IT_WORKS.md`.
+>
 > - **LangFuse Observability — Full Coverage (2026-03-20)**: Optional LLM observability via LangFuse. `config/observability.py` provides lazy-initialized client, `trace_context`/`span_context` context managers, and no-op stubs for zero-overhead when disabled. **Core path**: orchestrator turns (root traces), LLM generations (`chat`, `chat_with_tools` with token usage), tool executions (per-tool spans with latency), RAG searches (per-collection spans), embeddings, and approval classification. **Extended coverage**: RCA agent (handle + generate + background indexing), message gateway intent classification, scheduler handlers (health check, daily summary), custom Cognibot issue classifier, MCP agent log analysis, conversation summary generation, and admin tool test endpoint. Every LLM call and tool execution in the codebase is now traced. Thread-local trace propagation avoids signature changes. Fixed `MetricsCollector.record_turn_error` missing method bug. See §6 and `SETUP_GUIDE.md` §15.
 >
 > - **Evidence-Pack Diagnostic Pipeline (2026-03-20)**: Added metadata-first diagnosis flow with structured evidence packs. New `tools/ae_diagnostic_tools.py` provides log time-window extraction, request-ID/step-name filtering, Java exception chain parsing, repeated-line collapse, multi-stream chronological merge, and a compact evidence-pack builder. New `diagnose_from_evidence_pack` tool runs LLM diagnosis with confidence scoring, alternative hypotheses, and remediation suggestions. `AutomationEdgeClient` extended with `get_normalized_instance_metadata()` and `get_workflow_step_timeline()`. DiagnosticAgent now includes the `diagnostics` tool category. **Timeout & graceful degradation (2026-03-20)**: `build_evidence_pack` now enforces a configurable `max_wait_seconds` wall-clock budget (default 45 s). Log retrieval runs in a bounded thread; when the budget expires or the T4 debug-log request is still pending, the pipeline returns a metadata-only evidence pack with a `log_retrieval` hint (including `debug_log_request_id`) so the agent can retry. `diagnose_from_evidence_pack` handles this degraded state by running metadata-only LLM diagnosis with confidence capped at 0.5. Progress callbacks stream phase-level status updates to the user during long operations. See §5.4.
@@ -482,6 +484,24 @@ The evidence-pack pipeline enforces a configurable wall-clock budget to prevent 
   - Azure Bot + MS Teams channel.
 - Data flow:
   - Teams → Azure Bot → Cognibot (Extension hooks) → Agent logic → AE APIs/DB/RAG → Cognibot → Teams.
+
+---
+
+## 9. AE AI Hub — Agentic Orchestrator (Add-on Module)
+
+A visual no-code workflow builder that runs as a **sidecar** to the existing agent system. Users drag-and-drop LLM agents, MCP tools, and logic nodes onto a React Flow canvas to build executable DAGs.
+
+- **Frontend:** React 19, `@xyflow/react`, Zustand, Tailwind CSS, shadcn/ui — port 8080.
+- **Backend:** FastAPI, SQLAlchemy, Celery, PostgreSQL — port 8001.
+- **Integration:** Consumes the existing 106 MCP tools via a bridge endpoint. Does not modify any parent codebase files.
+
+Full documentation in the `orchestrator/` directory:
+
+- Architecture: `orchestrator/TECHNICAL_BLUEPRINT.md`
+- Setup: `orchestrator/SETUP_GUIDE.md`
+- Runtime walkthrough: `orchestrator/HOW_IT_WORKS.md`
+
+---
 
 This blueprint is intended as the single technical reference for architects and senior engineers; implementation details and step-by-step instructions remain in `SETUP_GUIDE.md` and the implementation guides.
 
