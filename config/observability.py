@@ -1,5 +1,5 @@
 """
-LangFuse observability integration.
+LangFuse observability integration (v4 / OpenTelemetry-based API).
 
 Provides a lazy-initialized LangFuse client and helper utilities for
 creating traces and spans across the agent pipeline.  All LangFuse
@@ -50,7 +50,10 @@ def get_langfuse():
         from langfuse import Langfuse
         _langfuse_client = Langfuse()
         _langfuse_available = True
-        logger.info("LangFuse observability initialized (host=%s)", os.environ.get("LANGFUSE_HOST", "default"))
+        logger.info(
+            "LangFuse observability initialized (host=%s)",
+            os.environ.get("LANGFUSE_HOST", "default"),
+        )
         return _langfuse_client
     except Exception as exc:
         _langfuse_available = False
@@ -80,7 +83,13 @@ def shutdown_langfuse() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Trace / span helpers
+# Trace / span helpers  (LangFuse v4 — OpenTelemetry context-based)
+#
+# In v4 nesting is automatic: the outermost ``start_as_current_observation``
+# becomes the root trace, and any inner ``start_as_current_observation`` calls
+# (even in different functions) become child spans of the active context.
+# ``propagate_attributes`` injects session_id / user_id / tags into the
+# active OTel context so all observations within the block inherit them.
 # ---------------------------------------------------------------------------
 
 @contextmanager
@@ -93,58 +102,61 @@ def trace_context(
     metadata: dict | None = None,
     tags: list[str] | None = None,
 ) -> Generator:
-    """Context manager that creates a LangFuse trace.
+    """Context manager that creates a LangFuse root trace (v4 API).
 
-    Yields a ``trace`` object (or a no-op stub when LangFuse is disabled)
-    so callers can create child spans / generations inside the block.
-    The trace is automatically ended on exit.
+    Yields a span object (or a no-op stub when LangFuse is disabled)
+    so callers can call ``span.update(output=...)`` at the end.
 
     Usage::
 
         with trace_context("orchestrator_turn", session_id=cid) as trace:
-            # ... agent logic ...
+            # ... agent logic (child spans auto-nest) ...
             trace.update(output={"response": "..."})
     """
     lf = get_langfuse()
     if lf is None:
-        yield _NoOpTrace()
+        yield _NoOpSpan()
         return
 
-    trace = None
     try:
-        kwargs: dict[str, Any] = {"name": name}
+        from langfuse import propagate_attributes
+
+        attr_kwargs: dict[str, Any] = {}
         if session_id:
-            kwargs["session_id"] = session_id
+            attr_kwargs["session_id"] = session_id
         if user_id:
-            kwargs["user_id"] = user_id
-        if input is not None:
-            kwargs["input"] = input
-        if metadata:
-            kwargs["metadata"] = metadata
+            attr_kwargs["user_id"] = user_id
         if tags:
-            kwargs["tags"] = tags
-        trace = lf.trace(**kwargs)
-        yield trace
+            attr_kwargs["tags"] = tags
+
+        with propagate_attributes(**attr_kwargs):
+            with lf.start_as_current_observation(
+                name=name,
+                as_type="span",
+                input=input,
+                metadata=metadata,
+            ) as root_span:
+                yield root_span
     except Exception as exc:
         logger.debug("LangFuse trace_context error: %s", exc)
-        yield _NoOpTrace()
-    finally:
-        if trace is not None:
-            try:
-                lf.flush()
-            except Exception:
-                pass
+        yield _NoOpSpan()
 
 
 @contextmanager
 def span_context(
-    trace: Any,
+    _parent: Any,
     name: str,
     *,
+    as_type: str = "span",
     input: Any = None,
     metadata: dict | None = None,
 ) -> Generator:
-    """Context manager that creates a child span on *trace*.
+    """Context manager that creates a child observation in the active OTel context.
+
+    ``_parent`` is accepted for API compatibility but is ignored in v4 —
+    nesting is determined by the OTel context stack, not explicit parent refs.
+    When LangFuse is disabled, ``_parent`` will be a ``_NoOpSpan`` and
+    a no-op stub is returned immediately.
 
     Usage::
 
@@ -152,83 +164,72 @@ def span_context(
             results = rag.search(...)
             span.update(output=results)
     """
-    if isinstance(trace, _NoOpTrace):
+    if isinstance(_parent, _NoOpSpan):
         yield _NoOpSpan()
         return
 
-    span = None
+    lf = get_langfuse()
+    if lf is None:
+        yield _NoOpSpan()
+        return
+
     try:
-        kwargs: dict[str, Any] = {"name": name}
-        if input is not None:
-            kwargs["input"] = input
-        if metadata:
-            kwargs["metadata"] = metadata
-        span = trace.span(**kwargs)
-        yield span
+        with lf.start_as_current_observation(
+            name=name,
+            as_type=as_type,
+            input=input,
+            metadata=metadata,
+        ) as span:
+            yield span
     except Exception as exc:
         logger.debug("LangFuse span_context error: %s", exc)
         yield _NoOpSpan()
-    finally:
-        if span is not None:
-            try:
-                span.end()
-            except Exception:
-                pass
 
 
 def create_generation(
-    trace: Any,
+    _parent: Any,
     *,
     name: str,
     model: str = "",
     input: Any = None,
     output: Any = None,
-    usage: dict | None = None,
+    usage_details: dict[str, int] | None = None,
     metadata: dict | None = None,
 ) -> None:
-    """Record an LLM generation (non-blocking, fire-and-forget)."""
-    if isinstance(trace, _NoOpTrace):
+    """Record an LLM generation in the current OTel context (non-blocking).
+
+    ``_parent`` is kept for API compatibility but ignored in v4.
+    """
+    if isinstance(_parent, _NoOpSpan):
         return
+
+    lf = get_langfuse()
+    if lf is None:
+        return
+
     try:
-        kwargs: dict[str, Any] = {"name": name}
-        if model:
-            kwargs["model"] = model
-        if input is not None:
-            kwargs["input"] = input
-        if output is not None:
-            kwargs["output"] = output
-        if usage:
-            kwargs["usage"] = usage
-        if metadata:
-            kwargs["metadata"] = metadata
-        trace.generation(**kwargs)
+        gen = lf.start_observation(
+            name=name,
+            as_type="generation",
+            input=input,
+            output=output,
+            model=model or None,
+            usage_details=usage_details,
+            metadata=metadata,
+        )
+        gen.end()
     except Exception as exc:
         logger.debug("LangFuse create_generation error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
-# No-op stubs — used when LangFuse is disabled so callers don't need
+# No-op stub — used when LangFuse is disabled so callers don't need
 # to sprinkle ``if trace:`` checks everywhere.
+# Mirrors the subset of LangfuseSpan methods we actually call.
 # ---------------------------------------------------------------------------
 
-class _NoOpTrace:
-    """Drop-in stub returned when LangFuse is disabled."""
-
-    def span(self, **_kw):
-        return _NoOpSpan()
-
-    def generation(self, **_kw):
-        return None
-
-    def update(self, **_kw):
-        return self
-
-    def event(self, **_kw):
-        return None
-
-
 class _NoOpSpan:
-    """Drop-in stub for spans when LangFuse is disabled."""
+    """Drop-in stub returned when LangFuse is disabled."""
 
     def update(self, **_kw):
         return self
@@ -236,11 +237,16 @@ class _NoOpSpan:
     def end(self, **_kw):
         return None
 
-    def span(self, **_kw):
+    def start_as_current_observation(self, **_kw):
+        return _noop_ctx()
+
+    def start_observation(self, **_kw):
         return _NoOpSpan()
 
-    def generation(self, **_kw):
+    def set_trace_io(self, **_kw):
         return None
 
-    def event(self, **_kw):
-        return None
+
+@contextmanager
+def _noop_ctx() -> Generator:
+    yield _NoOpSpan()

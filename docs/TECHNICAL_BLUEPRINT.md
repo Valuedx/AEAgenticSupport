@@ -390,7 +390,7 @@ AE Instance ID
   - Implementation details:
     - `config/observability.py` — lazy-initialized `Langfuse` singleton, `trace_context`/`span_context` context managers, `create_generation` helper.
     - Thread-local propagation via `set_current_trace()`/`get_current_trace()` in `config/llm_client.py` — avoids changing any existing function signatures.
-    - No-op stubs (`_NoOpTrace`, `_NoOpSpan`) returned when disabled — zero runtime overhead, no conditional checks needed.
+    - No-op stubs (`_NoOpSpan`) returned when disabled — zero runtime overhead, no conditional checks needed.
     - All LangFuse calls wrapped in try/except — tracing failures never break agent pipeline.
   - See `SETUP_GUIDE.md` §15 for full setup, architecture diagram, and troubleshooting.
 

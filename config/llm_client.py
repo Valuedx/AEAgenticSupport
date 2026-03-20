@@ -162,10 +162,10 @@ class VertexAIClient:
         trace = get_current_trace()
         if trace is None:
             return
-        usage = None
+        usage_details = None
         if hasattr(resp, "usage_metadata") and resp.usage_metadata:
             u = resp.usage_metadata
-            usage = {
+            usage_details = {
                 "input": u.prompt_token_count or 0,
                 "output": u.candidates_token_count or 0,
                 "total": u.total_token_count or 0,
@@ -176,7 +176,7 @@ class VertexAIClient:
             model=self.model_name,
             input=input,
             output=output,
-            usage=usage,
+            usage_details=usage_details,
             metadata=metadata,
         )
 

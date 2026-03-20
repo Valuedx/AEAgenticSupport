@@ -80,7 +80,7 @@ class VertexEmbedder:
     )
     def embed(self, text: str) -> list[float]:
         trace = get_current_trace()
-        with span_context(trace, "embedding", input={"text": text[:200], "model": self.model_name}) as span:
+        with span_context(trace, "embedding", as_type="embedding", input={"text": text[:200], "model": self.model_name}) as span:
             try:
                 res = self.client.models.embed_content(
                     model=self.model_name,
@@ -274,6 +274,7 @@ class PgVectorRAGEngine:
         with span_context(
             trace,
             f"rag_search:{collection}",
+            as_type="retriever",
             input={"query": query[:300], "collection": collection, "top_k": top_k, "hybrid": hybrid},
         ) as span:
             if self._use_pgvector:

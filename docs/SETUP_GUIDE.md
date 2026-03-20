@@ -1557,32 +1557,35 @@ pip install langfuse
 
 ### 15.6 Architecture
 
-LangFuse integration is implemented as a non-intrusive layer:
+LangFuse integration is implemented as a non-intrusive layer using the **v4 OpenTelemetry-based API**:
 
 ```
 Orchestrator.handle_message()
-  └─ trace_context("orchestrator_turn")     ← LangFuse trace (root)
-       ├─ set_current_trace(trace)          ← Thread-local propagation
+  └─ trace_context("orchestrator_turn")        ← Root span + propagate_attributes
+       ├─ set_current_trace(span)              ← Thread-local for non-OTel callsites
        │
        ├─ VertexAIClient.chat_with_tools()
-       │    └─ create_generation(trace)     ← LLM generation event
+       │    └─ create_generation(as_type="generation")  ← LLM generation
        │
        ├─ ToolExecutor.execute()
-       │    └─ span_context("tool:name")    ← Tool span
+       │    └─ span_context(as_type="tool")    ← Tool span (auto-nested)
        │
        ├─ RAGEngine.search()
-       │    └─ span_context("rag_search")   ← RAG span
+       │    └─ span_context(as_type="retriever") ← Retriever span
        │
        ├─ VertexEmbedder.embed()
-       │    └─ span_context("embedding")    ← Embedding span
+       │    └─ span_context(as_type="embedding") ← Embedding span
        │
        └─ ApprovalGate.classify()
-            └─ span_context("approval")     ← Approval span
+            └─ span_context(as_type="span")    ← Approval classification
 ```
 
 Key design decisions:
-- **Thread-local trace propagation** via `set_current_trace()` / `get_current_trace()` — avoids passing trace objects through every function signature.
-- **No-op stubs** (`_NoOpTrace`, `_NoOpSpan`) when LangFuse is disabled — zero overhead, no conditional checks needed in instrumented code.
+- **LangFuse v4 (OTel-native)** — uses `start_as_current_observation()` context managers; nesting is automatic via the OpenTelemetry context stack.
+- **`propagate_attributes()`** injects `session_id`, `user_id`, and `tags` into the OTel context so all observations inherit them.
+- **Thread-local trace reference** via `set_current_trace()` / `get_current_trace()` — used by callsites that need explicit access (e.g. `create_generation`) to avoid passing span objects through every function signature.
+- **`usage_details`** — token counts use LangFuse v4's `usage_details` dict (`input`/`output`/`total` keys) for accurate cost tracking.
+- **No-op stubs** (`_NoOpSpan`) when LangFuse is disabled — zero overhead, no conditional checks needed in instrumented code.
 - **Non-blocking** — all LangFuse calls are guarded with try/except so tracing failures never break the agent pipeline.
 - **Truncated payloads** — prompts and outputs are truncated before sending to LangFuse to control bandwidth.
 

@@ -316,7 +316,8 @@ class Orchestrator:
             return response
         except Exception as e:
             logger.exception(f"Error in handle_message: {e}")
-            trace.update(output={"error": str(e)[:500]})
+            metrics_collector.record_turn_error(turn_id, str(e))
+            trace.update(output={"error": str(e)[:500]}, level="ERROR")
             error_msg = f"I encountered a technical problem: {cast(Any, str(e))[:100]}. Please try again or contact support."
             return error_msg
         finally:

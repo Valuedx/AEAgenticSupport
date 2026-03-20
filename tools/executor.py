@@ -39,7 +39,7 @@ class ToolExecutor:
         self._audit.info("TOOL_CALL tool=%s params=%s", tool_name, logged_kwargs)
 
         trace = get_current_trace()
-        with span_context(trace, f"tool:{tool_name}", input=logged_kwargs) as span:
+        with span_context(trace, f"tool:{tool_name}", as_type="tool", input=logged_kwargs) as span:
             t0 = time.perf_counter()
             try:
                 result = handler(**kwargs)
