@@ -23,7 +23,7 @@ logging.basicConfig(
 app = FastAPI(
     title="AE AI Hub - Orchestrator",
     description="Agentic workflow orchestration engine with visual DAG builder",
-    version="0.5.0",
+    version="0.8.0",
 )
 
 app.state.limiter = limiter
@@ -40,6 +40,11 @@ app.add_middleware(
 app.include_router(workflows_router)
 app.include_router(tools_router)
 app.include_router(sse_router)
+
+if settings.oidc_enabled:
+    from app.api.auth import router as oidc_router
+    app.include_router(oidc_router)
+    logging.getLogger(__name__).info("OIDC federation enabled (issuer: %s)", settings.oidc_issuer)
 
 from app.observability import shutdown as _shutdown_langfuse
 atexit.register(_shutdown_langfuse)

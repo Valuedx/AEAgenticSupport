@@ -18,7 +18,8 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_tool_defs_cache: list[dict[str, Any]] | None = None
+_TOOL_CACHE_TTL = 300  # seconds
+_tool_defs_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
 async def _call_tool_async(
@@ -92,10 +93,12 @@ def call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
 
 
 def list_tools() -> list[dict[str, Any]]:
-    """Synchronous wrapper: list available MCP tools."""
+    """Synchronous wrapper: list available MCP tools (cached with TTL)."""
+    import time
     global _tool_defs_cache
-    if _tool_defs_cache is not None:
-        return _tool_defs_cache
+    now = time.time()
+    if _tool_defs_cache is not None and now - _tool_defs_cache[0] < _TOOL_CACHE_TTL:
+        return _tool_defs_cache[1]
 
     try:
         loop = _get_or_create_loop()
@@ -107,12 +110,19 @@ def list_tools() -> list[dict[str, Any]]:
         else:
             result = loop.run_until_complete(_list_tools_async())
 
-        _tool_defs_cache = result
+        _tool_defs_cache = (now, result)
         logger.info("Loaded %d tool definitions from MCP server", len(result))
         return result
     except Exception as exc:
         logger.error("MCP list_tools failed: %s", exc)
         return []
+
+
+def invalidate_tool_cache() -> None:
+    """Clear the tool definition cache so the next call re-fetches from MCP."""
+    global _tool_defs_cache
+    _tool_defs_cache = None
+    logger.info("MCP tool cache invalidated")
 
 
 def get_openai_style_tool_defs(tool_names: list[str]) -> list[dict[str, Any]]:

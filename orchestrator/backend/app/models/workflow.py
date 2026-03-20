@@ -70,6 +70,28 @@ class WorkflowInstance(Base):
     )
 
 
+class WorkflowSnapshot(Base):
+    """Immutable point-in-time copy of a workflow graph, saved before each overwrite."""
+
+    __tablename__ = "workflow_snapshots"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workflow_def_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("workflow_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    tenant_id = Column(String(64), nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    graph_json = Column(JSONB, nullable=False)
+    saved_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_snapshot_def_version", "workflow_def_id", "version", unique=True),
+    )
+
+
 class ExecutionLog(Base):
     __tablename__ = "execution_logs"
 

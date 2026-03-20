@@ -41,7 +41,7 @@ def run_react_loop(
     system_prompt = render_prompt(raw_prompt, context)
     initial_message = build_user_message(context)
 
-    tool_defs = _load_tool_definitions(tool_names)
+    tool_defs = _load_tool_definitions(tool_names if tool_names else None)
 
     total_usage = {"input_tokens": 0, "output_tokens": 0}
     iterations: list[dict[str, Any]] = []
@@ -119,12 +119,26 @@ def _execute_tool(tool_name: str, arguments: dict, tenant_id: str) -> Any:
     return call_tool(tool_name, arguments)
 
 
-def _load_tool_definitions(tool_names: list[str]) -> list[dict[str, Any]]:
+def _load_tool_definitions(tool_names: list[str] | None) -> list[dict[str, Any]]:
     """Load tool definitions from MCP server via Streamable HTTP.
 
+    If tool_names is None (empty config), auto-discovers all tools from MCP.
     Returns OpenAI-style function definitions that can be adapted per provider.
     """
-    from app.engine.mcp_client import get_openai_style_tool_defs
+    from app.engine.mcp_client import get_openai_style_tool_defs, list_tools
+    if tool_names is None:
+        raw = list_tools()
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["parameters"],
+                },
+            }
+            for t in raw
+        ]
     return get_openai_style_tool_defs(tool_names)
 
 

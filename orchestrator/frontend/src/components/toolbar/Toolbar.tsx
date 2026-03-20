@@ -4,6 +4,7 @@ import {
   Play,
   FolderOpen,
   FilePlus,
+  History,
   Loader2,
   CircleDot,
   CircleCheck,
@@ -16,6 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { WorkflowListDialog } from "@/components/toolbar/WorkflowListDialog";
+import { VersionHistoryDialog } from "@/components/toolbar/VersionHistoryDialog";
 
 const STATUS_CONFIG: Record<string, { icon: typeof CircleDot; label: string; className: string }> = {
   queued: { icon: CircleDot, label: "Queued", className: "text-muted-foreground" },
@@ -27,6 +29,7 @@ const STATUS_CONFIG: Record<string, { icon: typeof CircleDot; label: string; cla
 
 export function Toolbar() {
   const [listOpen, setListOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
 
@@ -126,6 +129,12 @@ export function Toolbar() {
           <FolderOpen className="h-4 w-4" />
         </Button>
 
+        {currentWorkflow && (
+          <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)} title="Version history">
+            <History className="h-4 w-4" />
+          </Button>
+        )}
+
         <Button
           variant="ghost"
           size="sm"
@@ -156,6 +165,7 @@ export function Toolbar() {
       </div>
 
       <WorkflowListDialog open={listOpen} onOpenChange={setListOpen} />
+      <VersionHistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} />
     </>
   );
 }

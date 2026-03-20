@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.security.tenant import get_tenant_id
-from app.models.workflow import WorkflowDefinition, WorkflowInstance, ExecutionLog
+from app.models.workflow import WorkflowDefinition, WorkflowInstance, WorkflowSnapshot, ExecutionLog
 from app.api.schemas import (
     WorkflowCreate,
     WorkflowUpdate,
@@ -20,6 +20,7 @@ from app.api.schemas import (
     InstanceOut,
     InstanceDetailOut,
     ExecutionLogOut,
+    SnapshotOut,
 )
 
 router = APIRouter(prefix="/api/v1/workflows", tags=["workflows"])
@@ -111,6 +112,14 @@ def update_workflow(
         if warnings:
             import logging
             logging.getLogger(__name__).warning("Graph config warnings on update: %s", warnings)
+        # Save snapshot of current version before overwriting
+        snap = WorkflowSnapshot(
+            workflow_def_id=wf.id,
+            tenant_id=tenant_id,
+            version=wf.version,
+            graph_json=wf.graph_json,
+        )
+        db.add(snap)
         wf.graph_json = body.graph_json
         wf.version += 1
 
@@ -216,6 +225,75 @@ def list_instances(
         .limit(50)
         .all()
     )
+
+
+@router.get("/{workflow_id}/versions", response_model=list[SnapshotOut])
+def list_versions(
+    workflow_id: uuid.UUID,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """List all saved snapshots for a workflow (excludes graph_json for performance)."""
+    wf = (
+        db.query(WorkflowDefinition)
+        .filter_by(id=workflow_id, tenant_id=tenant_id)
+        .first()
+    )
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+
+    return (
+        db.query(WorkflowSnapshot)
+        .filter_by(workflow_def_id=workflow_id, tenant_id=tenant_id)
+        .order_by(WorkflowSnapshot.version.desc())
+        .limit(50)
+        .all()
+    )
+
+
+@router.post("/{workflow_id}/rollback/{version}", response_model=WorkflowOut)
+def rollback_version(
+    workflow_id: uuid.UUID,
+    version: int,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Restore a workflow to a previously saved snapshot version.
+
+    Creates a new snapshot of the current state before restoring,
+    then increments the version number (rollback is a forward operation).
+    """
+    wf = (
+        db.query(WorkflowDefinition)
+        .filter_by(id=workflow_id, tenant_id=tenant_id)
+        .first()
+    )
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+
+    snap = (
+        db.query(WorkflowSnapshot)
+        .filter_by(workflow_def_id=workflow_id, tenant_id=tenant_id, version=version)
+        .first()
+    )
+    if not snap:
+        raise HTTPException(404, f"Snapshot for version {version} not found")
+
+    # Save current state as a snapshot before restoring
+    current_snap = WorkflowSnapshot(
+        workflow_def_id=wf.id,
+        tenant_id=tenant_id,
+        version=wf.version,
+        graph_json=wf.graph_json,
+    )
+    db.add(current_snap)
+
+    wf.graph_json = snap.graph_json
+    wf.version += 1
+
+    db.commit()
+    db.refresh(wf)
+    return wf
 
 
 @router.get("/{workflow_id}/instances/{instance_id}", response_model=InstanceDetailOut)

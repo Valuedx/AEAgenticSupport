@@ -1,6 +1,12 @@
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8001";
 const TENANT_ID = import.meta.env.VITE_TENANT_ID || "default";
 
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem("ae_access_token");
+  if (token) return { "Authorization": `Bearer ${token}` };
+  return { "X-Tenant-Id": TENANT_ID };
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
@@ -9,7 +15,7 @@ async function request<T>(
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "X-Tenant-Id": TENANT_ID,
+      ...getAuthHeaders(),
       ...options.headers,
     },
   });
@@ -62,6 +68,26 @@ export interface ExecutionLogOut {
 
 export interface InstanceDetailOut extends InstanceOut {
   logs: ExecutionLogOut[];
+}
+
+export interface ToolOut {
+  name: string;
+  title: string;
+  description: string;
+  category: string;
+  safety_tier: string;
+  tags: string[];
+}
+
+export interface SnapshotOut {
+  id: string;
+  workflow_def_id: string;
+  version: number;
+  saved_at: string;
+}
+
+export interface SnapshotDetailOut extends SnapshotOut {
+  graph_json: { nodes: unknown[]; edges: unknown[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +167,20 @@ export const api = {
     return request(
       `/api/v1/workflows/${workflowId}/instances/${instanceId}`,
     );
+  },
+
+  listTools(): Promise<ToolOut[]> {
+    return request("/api/v1/tools");
+  },
+
+  listVersions(workflowId: string): Promise<SnapshotOut[]> {
+    return request(`/api/v1/workflows/${workflowId}/versions`);
+  },
+
+  rollbackVersion(workflowId: string, version: number): Promise<WorkflowOut> {
+    return request(`/api/v1/workflows/${workflowId}/rollback/${version}`, {
+      method: "POST",
+    });
   },
 
   streamInstance(

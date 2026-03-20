@@ -83,6 +83,23 @@ class InstanceDetailOut(InstanceOut):
 
 
 # ---------------------------------------------------------------------------
+# Workflow Snapshots (version history)
+# ---------------------------------------------------------------------------
+
+class SnapshotOut(BaseModel):
+    id: uuid.UUID
+    workflow_def_id: uuid.UUID
+    version: int
+    saved_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class SnapshotDetailOut(SnapshotOut):
+    graph_json: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 

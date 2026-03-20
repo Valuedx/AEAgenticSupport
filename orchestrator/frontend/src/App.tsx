@@ -6,9 +6,17 @@ import { FlowCanvas } from "@/components/canvas/FlowCanvas";
 import { PropertyInspector } from "@/components/sidebar/PropertyInspector";
 import { Toolbar } from "@/components/toolbar/Toolbar";
 import { ExecutionPanel } from "@/components/toolbar/ExecutionPanel";
+import { LoginPage } from "@/components/auth/LoginPage";
+
+// OIDC auth gate: only active when VITE_AUTH_MODE=oidc
+const AUTH_MODE = import.meta.env.VITE_AUTH_MODE;
 
 export default function App() {
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
+
+  if (AUTH_MODE === "oidc" && !localStorage.getItem("ae_access_token")) {
+    return <LoginPage />;
+  }
 
   return (
     <TooltipProvider>

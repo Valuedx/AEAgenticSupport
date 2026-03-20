@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     rate_limit_window: str = "1 minute"
     execution_quota_per_hour: int = 50
 
+    # OIDC federation (optional — set oidc_enabled=true to activate)
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""                          # e.g. https://accounts.google.com
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_uri: str = "http://localhost:8001/auth/oidc/callback"
+    oidc_tenant_claim: str = "email"               # ID token claim used as tenant_id
+    oidc_scopes: str = "openid email profile"
+
     model_config = {"env_prefix": "ORCHESTRATOR_", "env_file": ".env"}
 
 

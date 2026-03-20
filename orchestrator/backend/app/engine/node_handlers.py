@@ -47,8 +47,7 @@ def _handle_agent(
     config = node_data.get("config", {})
     label = node_data.get("label", "")
 
-    has_tools = bool(config.get("tools"))
-    is_react = label == "ReAct Agent" or has_tools
+    is_react = label == "ReAct Agent"
 
     if is_react:
         from app.engine.react_loop import run_react_loop

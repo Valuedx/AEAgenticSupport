@@ -1,3 +1,4 @@
+> - **V0.8 Enterprise Features (2026-03-20)**: Dynamic property forms generated from `shared/node_registry.json` schemas (`DynamicConfigForm.tsx`) — PropertyInspector no longer hardcoded. ReAct agent auto-discovers all MCP tools when `tools` config is empty; MCP tool cache upgraded to 5-minute TTL with `POST /api/v1/tools/invalidate-cache`. Workflow versioning: `workflow_snapshots` table + Alembic migration 0002; snapshot saved before each overwrite; `GET /{id}/versions` and `POST /{id}/rollback/{v}` endpoints; `VersionHistoryDialog` with Restore button in Toolbar. OIDC federation: Authorization Code + PKCE flow (`app/api/auth.py`), `authlib` for ID token validation, Redis PKCE state, issues internal JWT; frontend `LoginPage` + `VITE_AUTH_MODE=oidc` gate in `App.tsx`.
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -13,9 +14,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.7  
-**Last updated:** 2026-03-20  
-**Status:** V0.7 Langfuse observability + tenant tool overrides, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Version:** 0.8
+**Last updated:** 2026-03-20
+**Status:** V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 
 ---
 
@@ -31,7 +32,7 @@
 8. [Multi-Tenancy and Security](#8-multi-tenancy-and-security)
 9. [Integration with AI Studio (Sidecar Pattern)](#9-integration-with-ai-studio-sidecar-pattern)
 10. [Shared Schemas](#10-shared-schemas)
-11. [Known Limitations (V0.2)](#11-known-limitations-v02)
+11. [Known Limitations (V0.8)](#12-known-limitations-v08)
 12. [Roadmap](#12-roadmap)
 
 ---
@@ -716,16 +717,16 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 12. Known Limitations (V0.7)
+## 12. Known Limitations (V0.8)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
 | **MCP sessions** | New session per call; no connection pooling | Add session pool for high-throughput deployments |
-| **Tenant auth** | JWT auth implemented; no external IdP integration yet | Add OIDC/SAML federation with enterprise identity providers |
+| **SAML federation** | OIDC implemented; SAML requires XML parsing + SP metadata | Add SAML 2.0 SP via python3-saml in V0.9 |
 | **Condition expressions** | Safe evaluator supports basic ops; no custom functions or regex | Add pluggable expression functions |
-| **Frontend validation** | Config validation runs server-side on save (logs warnings); no inline form validation | Generate dynamic property forms from registry schemas with client-side validation |
-| **ReAct tool discovery** | ReAct agent requires manually listing tool names in config | Auto-discover available tools from MCP registry |
+| **Snapshot pruning** | Snapshots accumulate indefinitely; no max-per-workflow limit | Add background Celery task to prune oldest beyond N snapshots |
 | **Langfuse in threads** | Parallel node execution may not propagate OTel context to worker threads | Use explicit span passing for parallel branches |
+| **OIDC frontend callback** | Token must be stored via a thin redirect page after OIDC callback | Add `/auth/oidc/callback` frontend route that stores token and redirects |
 
 ---
 
@@ -767,11 +768,17 @@ A version-controlled JSON file defining all node types with their `config_schema
 - Tool listing, tool execution, and ReAct tool definitions all fetched live from MCP server via standard protocol.
 - TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 
-**V0.8 — Enterprise Features**
-- OIDC/SAML federation with enterprise identity providers.
-- Dynamic property form generation from registry config schemas.
-- Workflow versioning with diff/rollback UI.
-- Auto-discover available tools for ReAct agent from MCP registry.
+**V0.8 — Enterprise Features (Implemented)**
+- Dynamic property forms generated from `shared/node_registry.json` schemas (`DynamicConfigForm.tsx`): Select for enum fields, Textarea for prompts, number inputs with min/max, JSON textarea for objects/arrays, ToolMultiSelect for the ReAct tools field. `PropertyInspector.tsx` refactored to delegate entirely to the dynamic form.
+- ReAct auto-discovery: when `tools` config is empty, `react_loop.py` calls `list_tools()` and passes all MCP tools. Tool cache upgraded to 5-minute TTL; `POST /api/v1/tools/invalidate-cache` for manual refresh.
+- Workflow version history: `workflow_snapshots` table (Alembic 0002); snapshot inserted before each graph overwrite; `GET /{id}/versions`, `POST /{id}/rollback/{v}` endpoints; `VersionHistoryDialog` in Toolbar with Restore button.
+- OIDC federation: Authorization Code + PKCE flow (`app/api/auth.py`), `authlib` for ID token validation, Redis PKCE state (5-min TTL); issues internal JWT; frontend `LoginPage` + `VITE_AUTH_MODE=oidc` gate.
+
+**V0.9 — Planned**
+- SAML 2.0 federation (python3-saml).
+- Snapshot pruning (max N snapshots per workflow via Celery task).
+- OIDC frontend callback route that auto-stores token.
+- Pluggable condition expression functions.
 
 ---
 

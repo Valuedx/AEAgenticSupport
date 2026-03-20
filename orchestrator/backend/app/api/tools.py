@@ -39,6 +39,13 @@ def _load_tool_specs() -> list[dict[str, Any]]:
     return tools
 
 
+@router.post("/invalidate-cache", status_code=204)
+def invalidate_cache(tenant_id: str = Depends(get_tenant_id)):
+    """Invalidate the MCP tool list cache, forcing a re-fetch on next request."""
+    from app.engine.mcp_client import invalidate_tool_cache
+    invalidate_tool_cache()
+
+
 @router.get("", response_model=list[ToolOut])
 def list_tools(
     tenant_id: str = Depends(get_tenant_id),

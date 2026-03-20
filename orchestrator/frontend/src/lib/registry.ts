@@ -58,3 +58,7 @@ export function getConfigSchema(
   const nt = registry.node_types.find((n) => n.label === label);
   return nt ? (nt.config_schema as ReturnType<typeof getConfigSchema>) : null;
 }
+
+export function getRegistryNodeType(label: string): RegistryNodeType | null {
+  return registry.node_types.find((n) => n.label === label) ?? null;
+}
