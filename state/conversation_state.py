@@ -459,13 +459,26 @@ class ConversationState:
             return ""
 
         try:
-            from config.llm_client import llm_client
-            history = "\n".join([f"{m['role']}: {m['content']}" for m in self.messages[-20:]])
-            prompt = f"Summarize this support conversation in ONE brief sentence (max 20 words):\n\n{history}"
-            summary = llm_client.chat(prompt, system="You provide concise summaries of support interactions.")
-            self.summary = summary.strip()
-            self.save()
-            return self.summary
+            from config.llm_client import llm_client, set_current_trace
+            from config.observability import trace_context
+
+            with trace_context(
+                "generate_conversation_summary",
+                session_id=self.conversation_id,
+                user_id=self.user_id or "",
+                tags=["summary"],
+            ) as trace:
+                set_current_trace(trace)
+                try:
+                    history = "\n".join([f"{m['role']}: {m['content']}" for m in self.messages[-20:]])
+                    prompt = f"Summarize this support conversation in ONE brief sentence (max 20 words):\n\n{history}"
+                    summary = llm_client.chat(prompt, system="You provide concise summaries of support interactions.")
+                    self.summary = summary.strip()
+                    self.save()
+                    trace.update(output={"summary": self.summary})
+                    return self.summary
+                finally:
+                    set_current_trace(None)
         except Exception as e:
             logger.warning(f"Summary generation failed: {e}")
             return self.summary

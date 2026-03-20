@@ -12,7 +12,8 @@ import threading
 from enum import Enum
 from typing import Callable, Optional
 
-from config.llm_client import llm_client
+from config.llm_client import llm_client, set_current_trace
+from config.observability import trace_context
 from gateway.progress import ProgressCallback
 from state.conversation_state import ConversationState, ConversationPhase
 
@@ -267,14 +268,26 @@ class MessageGateway:
                 f"{', '.join(state.affected_workflows)}"
             )
 
-        classification = llm_client.chat(
-            f"Classify this message. Current work: {current_context}\n"
-            f"New message: {message}\n\n"
-            f"Reply with exactly one word: ADDITIVE (related to current "
-            f"work) or INTERRUPT (urgent/different topic) or NEW_REQUEST "
-            f"(different non-urgent request) or CANCEL (stop)",
-            system="You classify user messages. Reply with one word only.",
-        ).strip().upper()
+        with trace_context(
+            "gateway_classify_intent",
+            session_id=getattr(state, "conversation_id", ""),
+            user_id=getattr(state, "user_id", ""),
+            input={"message": message[:300]},
+            tags=["gateway", "classification"],
+        ) as trace:
+            set_current_trace(trace)
+            try:
+                classification = llm_client.chat(
+                    f"Classify this message. Current work: {current_context}\n"
+                    f"New message: {message}\n\n"
+                    f"Reply with exactly one word: ADDITIVE (related to current "
+                    f"work) or INTERRUPT (urgent/different topic) or NEW_REQUEST "
+                    f"(different non-urgent request) or CANCEL (stop)",
+                    system="You classify user messages. Reply with one word only.",
+                ).strip().upper()
+                trace.update(output={"classification": classification})
+            finally:
+                set_current_trace(None)
 
         if "CANCEL" in classification:
             return MessageIntent.CANCEL

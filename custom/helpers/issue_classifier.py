@@ -158,51 +158,64 @@ def _llm_classify(thread_id: str, msg_lower: str,
                   active_case: Case
                   ) -> Optional[Tuple[str, Optional[str]]]:
     try:
-        from config.llm_client import llm_client
+        from config.llm_client import llm_client, set_current_trace
+        from config.observability import trace_context
 
-        active_desc = (
-            f"Active case: {active_case.case_id}, state={active_case.state}, "
-            f"workflows={active_case.workflows_involved}"
-        )
+        with trace_context(
+            "cognibot_issue_classify",
+            session_id=thread_id,
+            input={"message": msg_lower[:300], "active_case": active_case.case_id},
+            tags=["cognibot", "classification"],
+        ) as trace:
+            set_current_trace(trace)
+            try:
+                active_desc = (
+                    f"Active case: {active_case.case_id}, state={active_case.state}, "
+                    f"workflows={active_case.workflows_involved}"
+                )
 
-        resolved = Case.objects.filter(
-            thread_id=thread_id,
-            state__in=["CLOSED", "RESOLVED_PENDING_CONFIRMATION"],
-        ).order_by("-updated_at")[:3]
-        resolved_desc = "; ".join(
-            f"{c.case_id}: workflows={c.workflows_involved}" for c in resolved
-        ) or "(none)"
+                resolved = Case.objects.filter(
+                    thread_id=thread_id,
+                    state__in=["CLOSED", "RESOLVED_PENDING_CONFIRMATION"],
+                ).order_by("-updated_at")[:3]
+                resolved_desc = "; ".join(
+                    f"{c.case_id}: workflows={c.workflows_involved}" for c in resolved
+                ) or "(none)"
 
-        prompt = (
-            f"Classify this support message.\n"
-            f"Active: {active_desc}\n"
-            f"Resolved: {resolved_desc}\n"
-            f"Message: \"{msg_lower}\"\n\n"
-            f"Reply with ONE word: CONTINUE_EXISTING, NEW_ISSUE, "
-            f"RELATED_NEW, RECURRENCE, FOLLOWUP, or STATUS_CHECK"
-        )
+                prompt = (
+                    f"Classify this support message.\n"
+                    f"Active: {active_desc}\n"
+                    f"Resolved: {resolved_desc}\n"
+                    f"Message: \"{msg_lower}\"\n\n"
+                    f"Reply with ONE word: CONTINUE_EXISTING, NEW_ISSUE, "
+                    f"RELATED_NEW, RECURRENCE, FOLLOWUP, or STATUS_CHECK"
+                )
 
-        resp = llm_client.chat(
-            prompt,
-            system="You classify support messages. Reply with one word only.",
-        ).strip().upper()
+                resp = llm_client.chat(
+                    prompt,
+                    system="You classify support messages. Reply with one word only.",
+                ).strip().upper()
 
-        classification_map = {
-            "CONTINUE_EXISTING": IssueClassification.CONTINUE_EXISTING,
-            "NEW_ISSUE": IssueClassification.NEW_ISSUE,
-            "RELATED_NEW": IssueClassification.RELATED_NEW,
-            "RECURRENCE": IssueClassification.RECURRENCE,
-            "FOLLOWUP": IssueClassification.FOLLOWUP,
-            "STATUS_CHECK": IssueClassification.STATUS_CHECK,
-        }
+                classification_map = {
+                    "CONTINUE_EXISTING": IssueClassification.CONTINUE_EXISTING,
+                    "NEW_ISSUE": IssueClassification.NEW_ISSUE,
+                    "RELATED_NEW": IssueClassification.RELATED_NEW,
+                    "RECURRENCE": IssueClassification.RECURRENCE,
+                    "FOLLOWUP": IssueClassification.FOLLOWUP,
+                    "STATUS_CHECK": IssueClassification.STATUS_CHECK,
+                }
 
-        cls = classification_map.get(resp)
-        if cls:
-            issue_id = (
-                active_case.case_id
-                if cls != IssueClassification.NEW_ISSUE else None
-            )
-            return cls, issue_id
+                cls = classification_map.get(resp)
+                if cls:
+                    issue_id = (
+                        active_case.case_id
+                        if cls != IssueClassification.NEW_ISSUE else None
+                    )
+                    trace.update(output={"classification": cls, "issue_id": issue_id})
+                    return cls, issue_id
+                trace.update(output={"classification": resp, "matched": False})
+            finally:
+                set_current_trace(None)
     except Exception as e:
         logger.warning(f"LLM classification fallback failed: {e}")
 

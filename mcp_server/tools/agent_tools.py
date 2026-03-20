@@ -614,24 +614,37 @@ async def agent_analyze_logs(
 
         if all_error_blocks:
             error_groups = _group_errors(all_error_blocks)
-            try:
-                prompt = _build_ai_prompt(all_error_blocks)
-                logger.info(
-                    "AI diagnostic prompt: %d chars, %d unique groups",
-                    len(prompt), len(error_groups),
-                )
-                ai_diagnostic = llm_client.chat(
-                    prompt,
-                    system=(
-                        "You are an expert AutomationEdge Support Engineer. "
-                        "Be structured, concise, and actionable. "
-                        "Always follow the exact response format requested."
-                    ),
-                    max_tokens=600,
-                )
-            except Exception as llm_err:
-                logger.error("AI diagnostic failed: %s", llm_err)
-                ai_diagnostic = "(AI diagnostic unavailable)"
+            from config.llm_client import set_current_trace
+            from config.observability import trace_context
+
+            with trace_context(
+                "mcp_agent_log_analysis",
+                input={"agent_id": agent_id, "error_groups": len(error_groups)},
+                tags=["mcp", "log_analysis"],
+            ) as trace:
+                set_current_trace(trace)
+                try:
+                    prompt = _build_ai_prompt(all_error_blocks)
+                    logger.info(
+                        "AI diagnostic prompt: %d chars, %d unique groups",
+                        len(prompt), len(error_groups),
+                    )
+                    ai_diagnostic = llm_client.chat(
+                        prompt,
+                        system=(
+                            "You are an expert AutomationEdge Support Engineer. "
+                            "Be structured, concise, and actionable. "
+                            "Always follow the exact response format requested."
+                        ),
+                        max_tokens=600,
+                    )
+                    trace.update(output={"diagnostic_length": len(ai_diagnostic)})
+                except Exception as llm_err:
+                    logger.error("AI diagnostic failed: %s", llm_err)
+                    ai_diagnostic = "(AI diagnostic unavailable)"
+                    trace.update(output={"error": str(llm_err)[:300]}, level="ERROR")
+                finally:
+                    set_current_trace(None)
 
         # ── 7. Build Report ──
         report_lines = [f"### Log Analysis for Agent: {agent_id}"]

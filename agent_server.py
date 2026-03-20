@@ -646,7 +646,21 @@ def api_tools_test(tool_name: str):
     if not isinstance(args, dict):
         return jsonify({"error": "'args' must be an object"}), 400
 
-    result = tool_registry.execute(tool_name, **args)
+    from config.llm_client import set_current_trace
+    from config.observability import trace_context
+
+    with trace_context(
+        f"admin_tool_test:{tool_name}",
+        input={"tool": tool_name, "args": {k: str(v)[:100] for k, v in args.items()}},
+        tags=["admin", "tool_test"],
+    ) as trace:
+        set_current_trace(trace)
+        try:
+            result = tool_registry.execute(tool_name, **args)
+            trace.update(output={"success": result.success, "error": result.error})
+        finally:
+            set_current_trace(None)
+
     status = 200 if result.success else 400
     return jsonify(
         {

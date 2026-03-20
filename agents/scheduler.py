@@ -132,11 +132,25 @@ def health_check_handler(**kwargs) -> TaskResult:
     Proactive health check that polls AE for system status.
     Returns alerts if any issues are detected.
     """
+    from config.llm_client import set_current_trace
+    from config.observability import trace_context
+
+    with trace_context(
+        "scheduler_health_check",
+        tags=["scheduler", "health_check"],
+    ) as trace:
+        set_current_trace(trace)
+        try:
+            return _health_check_inner(trace, **kwargs)
+        finally:
+            set_current_trace(None)
+
+
+def _health_check_inner(trace, **kwargs) -> TaskResult:
     alerts = []
     try:
         from tools.registry import tool_registry
 
-        # Check system health
         result = tool_registry.execute("get_system_health")
         if result.success:
             data = result.data or {}
@@ -149,7 +163,6 @@ def health_check_handler(**kwargs) -> TaskResult:
                     "timestamp": datetime.now().isoformat(),
                 })
 
-        # Check for recent failures
         hours = kwargs.get("hours", 1)
         fail_result = tool_registry.execute(
             "list_recent_failures",
@@ -173,6 +186,7 @@ def health_check_handler(**kwargs) -> TaskResult:
                     "timestamp": datetime.now().isoformat(),
                 })
 
+        trace.update(output={"alert_count": len(alerts)})
         return TaskResult(
             success=True,
             message=f"Health check complete. {len(alerts)} alert(s).",
@@ -180,6 +194,7 @@ def health_check_handler(**kwargs) -> TaskResult:
         )
     except Exception as exc:
         logger.error("Health check failed: %s", exc)
+        trace.update(output={"error": str(exc)[:300]}, level="ERROR")
         return TaskResult(
             success=False,
             message=f"Health check error: {exc}",
@@ -221,18 +236,24 @@ def workflow_monitor_handler(**kwargs) -> TaskResult:
 
 def daily_summary_handler(**kwargs) -> TaskResult:
     """Generate a daily ops summary report."""
-    try:
-        from config.llm_client import llm_client
-        from tools.registry import tool_registry
+    from config.llm_client import llm_client, set_current_trace
+    from config.observability import trace_context
 
-        # Gather data
-        health = tool_registry.execute("get_system_health")
-        failures = tool_registry.execute("list_recent_failures", hours=24)
+    with trace_context(
+        "scheduler_daily_summary",
+        tags=["scheduler", "daily_summary"],
+    ) as trace:
+        set_current_trace(trace)
+        try:
+            from tools.registry import tool_registry
 
-        health_data = health.data if health.success else {}
-        failure_data = failures.data if failures.success else []
+            health = tool_registry.execute("get_system_health")
+            failures = tool_registry.execute("list_recent_failures", hours=24)
 
-        prompt = f"""Generate a concise daily ops summary report.
+            health_data = health.data if health.success else {}
+            failure_data = failures.data if failures.success else []
+
+            prompt = f"""Generate a concise daily ops summary report.
 
 System Health: {json.dumps(health_data, default=str)[:500]}
 Failures (24h): {json.dumps(failure_data, default=str)[:1000]}
@@ -245,18 +266,22 @@ Format as a brief report with:
 
 Keep it under 300 words."""
 
-        summary = llm_client.chat(
-            prompt,
-            system="You write concise daily ops reports for IT operations teams.",
-        )
+            summary = llm_client.chat(
+                prompt,
+                system="You write concise daily ops reports for IT operations teams.",
+            )
 
-        return TaskResult(
-            success=True,
-            message="Daily summary generated",
-            data={"summary": summary},
-        )
-    except Exception as exc:
-        return TaskResult(success=False, message=str(exc))
+            trace.update(output={"summary_length": len(summary)})
+            return TaskResult(
+                success=True,
+                message="Daily summary generated",
+                data={"summary": summary},
+            )
+        except Exception as exc:
+            trace.update(output={"error": str(exc)[:300]}, level="ERROR")
+            return TaskResult(success=False, message=str(exc))
+        finally:
+            set_current_trace(None)
 
 
 # ── Handler registry ─────────────────────────────────────────────────
