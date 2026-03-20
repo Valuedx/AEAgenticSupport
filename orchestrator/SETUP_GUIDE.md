@@ -267,6 +267,12 @@ Backend settings use the `ORCHESTRATOR_` prefix, while the frontend API client u
 | `ORCHESTRATOR_MCP_SERVER_URL` | No | `http://localhost:3000` | Parent MCP server URL |
 | `ORCHESTRATOR_SECRET_KEY` | Yes | `change-me-in-production` | Signing key for future JWT support |
 | `ORCHESTRATOR_CORS_ORIGINS` | No | `["http://localhost:8080"]` | Allowed CORS origins (JSON array) |
+| `ORCHESTRATOR_GOOGLE_API_KEY` | No | `""` | Google AI API key for Gemini models |
+| `ORCHESTRATOR_GOOGLE_PROJECT` | No | `""` | GCP project ID (optional for Vertex AI) |
+| `ORCHESTRATOR_GOOGLE_LOCATION` | No | `us-central1` | GCP region |
+| `ORCHESTRATOR_OPENAI_API_KEY` | No | `""` | OpenAI API key for GPT models |
+| `ORCHESTRATOR_OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible base URL |
+| `ORCHESTRATOR_ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for Claude models |
 | `VITE_API_URL` | No | `http://localhost:8001` | Orchestrator backend base URL for the frontend API client |
 | `VITE_TENANT_ID` | No | `default` | Tenant id injected as `X-Tenant-Id` header in frontend requests |
 
@@ -361,5 +367,5 @@ curl http://localhost:8001/api/v1/workflows \
 
 ---
 
-**Document version:** 0.2  
+**Document version:** 0.3  
 **Last updated:** 2026-03-20

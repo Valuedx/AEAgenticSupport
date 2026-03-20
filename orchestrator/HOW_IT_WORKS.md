@@ -1,3 +1,5 @@
+> - **V0.3 Live LLM Integration (2026-03-20)**: Agent nodes now call real LLM providers (Google Gemini, OpenAI, Anthropic). System prompts support Jinja2 templating with upstream context injection (`{{ trigger.user_query }}`, `{{ node_1.response }}`). Token usage tracked in execution logs.
+>
 > - **V0.2 UI Wiring (2026-03-20)**: Frontend now saves/loads/executes workflows via the FastAPI backend and shows execution logs using a polling execution panel. See `orchestrator/TECHNICAL_BLUEPRINT.md` for architecture and `orchestrator/SETUP_GUIDE.md` for setup.
 > - **Initial Walkthrough (2026-03-20)**: V0.1 — covers visual builder interaction, drag-and-drop, graph persistence, DAG execution, human-in-the-loop suspension, and MCP tool integration. See `TECHNICAL_BLUEPRINT.md` for architecture and `SETUP_GUIDE.md` for installation.
 
@@ -5,7 +7,7 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.2  
+**Version:** 0.3  
 **Last updated:** 2026-03-20
 
 ---
@@ -245,7 +247,7 @@ For each node in topological order:
 │  2. Build input from config + upstream outputs               │
 │  3. dispatch_node(node_data, context, tenant_id)             │
 │     ├── trigger  → pass through trigger_payload              │
-│     ├── agent    → call LLM API (stub in V0.1)              │
+│     ├── agent    → render prompt + call LLM provider         │
 │     ├── action   → call MCP tool / HTTP request              │
 │     └── logic    → evaluate condition / merge branches       │
 │  4. Store output in context[node_id]                         │
@@ -268,6 +270,31 @@ context = {
 ```
 
 Each node receives its config and all upstream outputs, so it can reference previous results.
+
+### Agent Node Deep-Dive (V0.3)
+
+When `dispatch_node()` routes to an **agent** node, the following happens:
+
+```
+Agent Node Execution
+────────────────────────────────────────────────────────
+1. Read config: provider, model, systemPrompt, temperature, maxTokens
+2. Render system prompt through Jinja2 engine:
+   "Analyze {{ trigger.user_query }}"  →  "Analyze Why did request 12345 fail?"
+3. Build user message from all upstream node outputs (JSON-formatted)
+4. Route to provider SDK:
+   ├── google  →  google-genai client  →  Gemini API
+   ├── openai  →  openai client        →  OpenAI / compatible API
+   └── anthropic → anthropic client    →  Claude API
+5. Return standardized response:
+   { "response": "...", "usage": { "input_tokens": 342, "output_tokens": 128 },
+     "model": "gemini-2.5-flash", "provider": "google" }
+6. Token counts are persisted in ExecutionLog.output_json
+```
+
+System prompts support full Jinja2 syntax with dot-access to all context keys.
+Missing variables resolve to empty strings, so prompts are reusable across
+different workflow topologies.
 
 ---
 

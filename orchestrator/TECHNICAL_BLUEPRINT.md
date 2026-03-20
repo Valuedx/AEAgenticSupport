@@ -1,11 +1,13 @@
+> - **V0.3 Live LLM Integration (2026-03-20)**: Agent nodes now call real LLM providers (Google Gemini via `google-genai`, OpenAI, Anthropic). Added `app/engine/llm_providers.py` multi-provider abstraction, `app/engine/prompt_template.py` Jinja2 system-prompt templating with context variable injection (dot-accessible upstream outputs), and token usage tracking in execution logs. New config keys: `ORCHESTRATOR_GOOGLE_API_KEY`, `ORCHESTRATOR_OPENAI_API_KEY`, `ORCHESTRATOR_ANTHROPIC_API_KEY`. See `SETUP_GUIDE.md` §7 for configuration.
+>
 > - **V0.2 UI Wiring (2026-03-20)**: Added frontend API client + workflow toolbar (save/load/execute), a saved-workflow list dialog, and an execution log panel with polling against backend instance status. See `orchestrator/HOW_IT_WORKS.md` for runtime walkthrough.
 > - **Initial Scaffold (2026-03-20)**: V0.1 — React Flow visual builder (frontend), FastAPI DAG execution engine (backend), Zustand state management, shadcn/ui component library, SQLAlchemy data models with multi-tenant isolation, Celery worker stubs, and MCP tool bridge. See `SETUP_GUIDE.md` for installation and `HOW_IT_WORKS.md` for runtime walkthrough.
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.2  
+**Version:** 0.3  
 **Last updated:** 2026-03-20  
-**Status:** V0.2 frontend wired to backend (save/load/execute + execution polling) and V0.1 scaffold complete
+**Status:** V0.3 live LLM integration (Google/OpenAI/Anthropic), V0.2 frontend wired to backend, V0.1 scaffold complete
 
 ---
 
@@ -219,7 +221,9 @@ orchestrator/backend/
     │   └── tools.py                # MCP tool bridge for palette
     ├── engine/
     │   ├── dag_runner.py           # Graph parser, topo sort, executor
-    │   └── node_handlers.py        # Per-type dispatch (trigger/agent/action/logic)
+    │   ├── node_handlers.py        # Per-type dispatch (trigger/agent/action/logic)
+    │   ├── llm_providers.py        # Multi-provider LLM abstraction (Google/OpenAI/Anthropic)
+    │   └── prompt_template.py      # Jinja2 system-prompt templating with context injection
     ├── models/
     │   ├── workflow.py             # WorkflowDefinition, WorkflowInstance, ExecutionLog
     │   └── tenant.py              # TenantToolOverride
@@ -241,8 +245,59 @@ File: `app/config.py`
 | `mcp_server_url` | `ORCHESTRATOR_MCP_SERVER_URL` | `http://localhost:3000` |
 | `secret_key` | `ORCHESTRATOR_SECRET_KEY` | `change-me-in-production` |
 | `cors_origins` | `ORCHESTRATOR_CORS_ORIGINS` | `["http://localhost:8080"]` |
+| `google_api_key` | `ORCHESTRATOR_GOOGLE_API_KEY` | `""` |
+| `google_project` | `ORCHESTRATOR_GOOGLE_PROJECT` | `""` |
+| `google_location` | `ORCHESTRATOR_GOOGLE_LOCATION` | `us-central1` |
+| `openai_api_key` | `ORCHESTRATOR_OPENAI_API_KEY` | `""` |
+| `openai_base_url` | `ORCHESTRATOR_OPENAI_BASE_URL` | `https://api.openai.com/v1` |
+| `anthropic_api_key` | `ORCHESTRATOR_ANTHROPIC_API_KEY` | `""` |
 
-### 4.3 API Endpoints
+### 4.3 LLM Provider Abstraction
+
+File: `app/engine/llm_providers.py`
+
+The `call_llm()` function routes to one of three provider backends based on the
+node's `config.provider` value:
+
+| Provider | SDK | Default Model | Config Key |
+|----------|-----|---------------|------------|
+| `google` | `google-genai` | `gemini-2.5-flash` | `ORCHESTRATOR_GOOGLE_API_KEY` |
+| `openai` | `openai` | `gpt-4o` | `ORCHESTRATOR_OPENAI_API_KEY` |
+| `anthropic` | `anthropic` | `claude-sonnet-4-20250514` | `ORCHESTRATOR_ANTHROPIC_API_KEY` |
+
+Each provider returns a standardized response:
+
+```python
+{
+    "response": str,          # LLM text output
+    "usage": {
+        "input_tokens": int,  # tracked per node in ExecutionLog
+        "output_tokens": int,
+    },
+    "model": str,
+    "provider": str,
+}
+```
+
+### 4.4 Jinja2 Prompt Templating
+
+File: `app/engine/prompt_template.py`
+
+System prompts support Jinja2 template syntax with upstream context injection.
+All execution context keys are available as top-level template variables with
+dot-access to nested fields:
+
+```jinja2
+You are an IT support assistant for {{ trigger.customer_name }}.
+The user reported: {{ trigger.user_query }}
+Ticket status from ServiceNow: {{ node_1.output.status }}
+Recent logs: {{ node_2.body | truncate(500) }}
+```
+
+Missing variables resolve to empty strings instead of raising errors, allowing
+prompts to be reusable across different workflow topologies.
+
+### 4.5 API Endpoints
 
 **Workflow CRUD** (prefix: `/api/v1/workflows`)
 
@@ -489,11 +544,11 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 11. Known Limitations (V0.2)
+## 11. Known Limitations (V0.3)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
-| **LLM calls** | Agent handler returns stub response | Integrate Google/OpenAI/Anthropic APIs |
+| **LLM calls** | Live multi-provider LLM calls implemented (Google/OpenAI/Anthropic); ReAct tool-calling loop not yet implemented | Add iterative tool-calling ReAct loop for agent nodes |
 | **Condition branching** | DAG runner executes all nodes linearly | Implement edge-aware branch selection using `sourceHandle` |
 | **MCP transport** | Backend calls `POST /call-tool` (REST) | Add REST bridge to existing stdio/SSE MCP server |
 | **Frontend persistence** | Save/Load/Execute UI is wired, but still lacks tenant/session switching, schema validation, and graph-level validation/highlighting | Add tenant-aware session config, validate `graph_json` against node registry, and improve UX with WebSocket/SSE updates |
@@ -513,10 +568,10 @@ A version-controlled JSON file defining all node types with their `config_schema
 - Workflow list dialog and execution status/log viewer with polling.
 - Next: real-time updates via WebSocket or SSE.
 
-**V0.3 — Live LLM Integration**
-- Agent handler calls real LLM providers (Google Vertex AI, OpenAI, Anthropic).
-- Token usage tracking per node in ExecutionLog.
-- System prompt templating with Jinja2 variable injection from context.
+**V0.3 — Live LLM Integration (Implemented)**
+- Multi-provider LLM abstraction (`app/engine/llm_providers.py`): Google Gemini, OpenAI, Anthropic.
+- Jinja2 system prompt templating with dot-accessible context variables (`app/engine/prompt_template.py`).
+- Token usage tracking (input/output tokens) returned in execution logs.
 
 **V0.4 — Branching and Parallel Execution**
 - Condition-aware edge traversal (follow `true`/`false` handles).

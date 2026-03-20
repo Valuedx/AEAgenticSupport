@@ -41,30 +41,46 @@ def _handle_trigger(
 def _handle_agent(
     node_data: dict, context: dict[str, Any], _tenant_id: str
 ) -> dict[str, Any]:
-    """Placeholder for LLM agent execution.
+    """Execute an LLM agent node via the configured provider.
 
-    In production this would call the configured LLM provider (Google, OpenAI,
-    Anthropic) with the system prompt + assembled context.
+    Renders the system prompt through Jinja2 with context variable injection,
+    assembles upstream outputs into the user message, and calls the LLM.
     """
+    from app.engine.llm_providers import call_llm
+    from app.engine.prompt_template import render_prompt, build_user_message
+
     config = node_data.get("config", {})
     provider = config.get("provider", "google")
     model = config.get("model", "gemini-2.5-flash")
-    system_prompt = config.get("systemPrompt", "")
+    raw_prompt = config.get("systemPrompt", "")
+    temperature = float(config.get("temperature", 0.7))
+    max_tokens = int(config.get("maxTokens", 4096))
 
-    upstream = {k: v for k, v in context.items() if k.startswith("node_")}
+    system_prompt = render_prompt(raw_prompt, context)
+    user_message = build_user_message(context)
 
     logger.info(
-        "Agent node [%s/%s]: prompt=%s, upstream_keys=%s",
-        provider, model, system_prompt[:80], list(upstream.keys()),
+        "Agent node [%s/%s]: prompt_len=%d, user_msg_len=%d",
+        provider, model, len(system_prompt), len(user_message),
     )
 
-    # TODO: Replace with actual LLM API call
-    return {
-        "provider": provider,
-        "model": model,
-        "response": f"[STUB] LLM response from {provider}/{model}",
-        "usage": {"input_tokens": 0, "output_tokens": 0},
-    }
+    result = call_llm(
+        provider=provider,
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    logger.info(
+        "Agent node [%s/%s]: tokens in=%d out=%d",
+        provider, model,
+        result["usage"]["input_tokens"],
+        result["usage"]["output_tokens"],
+    )
+
+    return result
 
 
 def _handle_action(
