@@ -1,10 +1,11 @@
+> - **V0.2 UI Wiring (2026-03-20)**: Added frontend API client + workflow toolbar (save/load/execute), a saved-workflow list dialog, and an execution log panel with polling against backend instance status. See `orchestrator/HOW_IT_WORKS.md` for runtime walkthrough.
 > - **Initial Scaffold (2026-03-20)**: V0.1 — React Flow visual builder (frontend), FastAPI DAG execution engine (backend), Zustand state management, shadcn/ui component library, SQLAlchemy data models with multi-tenant isolation, Celery worker stubs, and MCP tool bridge. See `SETUP_GUIDE.md` for installation and `HOW_IT_WORKS.md` for runtime walkthrough.
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.1  
+**Version:** 0.2  
 **Last updated:** 2026-03-20  
-**Status:** Phase 1–3 scaffold complete (UI shell, custom nodes, backend engine)
+**Status:** V0.2 frontend wired to backend (save/load/execute + execution polling) and V0.1 scaffold complete
 
 ---
 
@@ -20,7 +21,7 @@
 8. [Multi-Tenancy and Security](#8-multi-tenancy-and-security)
 9. [Integration with AI Studio (Sidecar Pattern)](#9-integration-with-ai-studio-sidecar-pattern)
 10. [Shared Schemas](#10-shared-schemas)
-11. [Known Limitations (V0.1)](#11-known-limitations-v01)
+11. [Known Limitations (V0.2)](#11-known-limitations-v02)
 12. [Roadmap](#12-roadmap)
 
 ---
@@ -488,14 +489,14 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 11. Known Limitations (V0.1)
+## 11. Known Limitations (V0.2)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
 | **LLM calls** | Agent handler returns stub response | Integrate Google/OpenAI/Anthropic APIs |
 | **Condition branching** | DAG runner executes all nodes linearly | Implement edge-aware branch selection using `sourceHandle` |
 | **MCP transport** | Backend calls `POST /call-tool` (REST) | Add REST bridge to existing stdio/SSE MCP server |
-| **Frontend persistence** | No save/load — graph lives only in Zustand | Wire API calls to backend CRUD endpoints |
+| **Frontend persistence** | Save/Load/Execute UI is wired, but still lacks tenant/session switching, schema validation, and graph-level validation/highlighting | Add tenant-aware session config, validate `graph_json` against node registry, and improve UX with WebSocket/SSE updates |
 | **Tenant auth** | Header-based `X-Tenant-Id` only | JWT validation with tenant claim |
 | **Schedule triggers** | No cron scheduler backend | Add APScheduler or Celery Beat integration |
 | **ReAct loop** | Palette item exists, no iterative execution | Implement tool-calling loop in agent handler |
@@ -507,10 +508,10 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ## 12. Roadmap
 
-**V0.2 — Wire Frontend to Backend**
-- API service layer in frontend for save/load/execute workflows.
-- Workflow list view and execution status dashboard.
-- Real-time status updates via WebSocket or SSE.
+**V0.2 — Wire Frontend to Backend (Implemented)**
+- Frontend API client for save/load/execute workflows.
+- Workflow list dialog and execution status/log viewer with polling.
+- Next: real-time updates via WebSocket or SSE.
 
 **V0.3 — Live LLM Integration**
 - Agent handler calls real LLM providers (Google Vertex AI, OpenAI, Anthropic).

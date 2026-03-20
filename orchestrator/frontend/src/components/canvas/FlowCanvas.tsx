@@ -10,6 +10,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { useFlowStore } from "@/store/flowStore";
+import { useWorkflowStore } from "@/store/workflowStore";
 import { AgenticNode } from "@/components/nodes/AgenticNode";
 import type { NodeCategory } from "@/types/nodes";
 
@@ -25,6 +26,7 @@ export function FlowCanvas() {
   const onConnect = useFlowStore((s) => s.onConnect);
   const addNode = useFlowStore((s) => s.addNode);
   const selectNode = useFlowStore((s) => s.selectNode);
+  const markDirty = useWorkflowStore((s) => s.markDirty);
 
   const onDragOver = useCallback((e: DragEvent) => {
     e.preventDefault();
@@ -49,8 +51,36 @@ export function FlowCanvas() {
       });
 
       addNode(nodeCategory, label, position, defaultConfig);
+      markDirty();
     },
-    [addNode],
+    [addNode, markDirty],
+  );
+
+  const handleNodesChange: typeof onNodesChange = useCallback(
+    (changes) => {
+      onNodesChange(changes);
+      const hasMeaningfulChange = changes.some(
+        (c) => c.type !== "select" && c.type !== "dimensions",
+      );
+      if (hasMeaningfulChange) markDirty();
+    },
+    [onNodesChange, markDirty],
+  );
+
+  const handleEdgesChange: typeof onEdgesChange = useCallback(
+    (changes) => {
+      onEdgesChange(changes);
+      if (changes.length > 0) markDirty();
+    },
+    [onEdgesChange, markDirty],
+  );
+
+  const handleConnect: typeof onConnect = useCallback(
+    (connection) => {
+      onConnect(connection);
+      markDirty();
+    },
+    [onConnect, markDirty],
   );
 
   return (
@@ -58,9 +88,9 @@ export function FlowCanvas() {
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
+        onNodesChange={handleNodesChange}
+        onEdgesChange={handleEdgesChange}
+        onConnect={handleConnect}
         onInit={(instance) => {
           reactFlowRef.current = instance;
         }}

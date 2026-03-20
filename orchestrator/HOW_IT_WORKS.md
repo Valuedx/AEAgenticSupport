@@ -1,10 +1,11 @@
+> - **V0.2 UI Wiring (2026-03-20)**: Frontend now saves/loads/executes workflows via the FastAPI backend and shows execution logs using a polling execution panel. See `orchestrator/TECHNICAL_BLUEPRINT.md` for architecture and `orchestrator/SETUP_GUIDE.md` for setup.
 > - **Initial Walkthrough (2026-03-20)**: V0.1 — covers visual builder interaction, drag-and-drop, graph persistence, DAG execution, human-in-the-loop suspension, and MCP tool integration. See `TECHNICAL_BLUEPRINT.md` for architecture and `SETUP_GUIDE.md` for installation.
 
 ## AE AI Hub — How It Works (Step-by-Step)
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.1  
+**Version:** 0.2  
 **Last updated:** 2026-03-20
 
 ---
@@ -147,7 +148,7 @@ Every field change calls `flowStore.updateNodeData(id, { config: { ...updated } 
 
 **Code:** `backend/app/api/workflows.py` → `POST /api/v1/workflows`
 
-*Note: In V0.1, the frontend does not yet call the backend. This section describes the backend API that is ready for wiring.*
+*In V0.2, the frontend Toolbar persists workflows directly via the API client in `frontend/src/lib/api.ts`, using `frontend/src/store/workflowStore.ts` for save/load state.*
 
 To persist a workflow, the frontend will serialize the Zustand store's `nodes` and `edges` into a JSON object and POST it:
 
@@ -173,6 +174,8 @@ The backend creates a `WorkflowDefinition` row with `version: 1`. Subsequent sav
 ## 7. Step 6 — Executing the Workflow
 
 **Code:** `backend/app/api/workflows.py` → `POST /api/v1/workflows/{id}/execute`
+
+In V0.2, the frontend `Run` button calls this endpoint and the `ExecutionPanel` polls `GET /api/v1/workflows/{workflowId}/instances/{instanceId}` until the instance reaches `completed`, `failed`, or `suspended`.
 
 ```
 Client                          API Gateway                     Celery Worker

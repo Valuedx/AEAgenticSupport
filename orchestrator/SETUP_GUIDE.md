@@ -258,7 +258,7 @@ Open **http://localhost:8080**. You can drag nodes, connect them, and configure 
 
 ## 7. Environment Variables
 
-All backend settings use the `ORCHESTRATOR_` prefix and can be set via `.env` file or shell environment:
+Backend settings use the `ORCHESTRATOR_` prefix, while the frontend API client uses `VITE_` variables. Both can be set via a `.env` file or shell environment:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -267,6 +267,8 @@ All backend settings use the `ORCHESTRATOR_` prefix and can be set via `.env` fi
 | `ORCHESTRATOR_MCP_SERVER_URL` | No | `http://localhost:3000` | Parent MCP server URL |
 | `ORCHESTRATOR_SECRET_KEY` | Yes | `change-me-in-production` | Signing key for future JWT support |
 | `ORCHESTRATOR_CORS_ORIGINS` | No | `["http://localhost:8080"]` | Allowed CORS origins (JSON array) |
+| `VITE_API_URL` | No | `http://localhost:8001` | Orchestrator backend base URL for the frontend API client |
+| `VITE_TENANT_ID` | No | `default` | Tenant id injected as `X-Tenant-Id` header in frontend requests |
 
 ---
 
@@ -351,7 +353,7 @@ curl http://localhost:8001/api/v1/workflows \
 | `Module not found: @/...` | Path alias misconfigured | Check `tsconfig.json` has `"paths": {"@/*": ["./src/*"]}` and `vite.config.ts` has `resolve.alias` |
 | shadcn init fails | Missing Tailwind or alias | Run `npm install tailwindcss @tailwindcss/vite` and ensure tsconfig has path alias |
 | Backend import error | Missing dependencies | Run `pip install -r requirements.txt` in the venv |
-| `401 Missing X-Tenant-Id` | No tenant header in request | Add `-H "X-Tenant-Id: your-tenant"` to API calls |
+| `401 Missing X-Tenant-Id` | No tenant header in request | Set `VITE_TENANT_ID` for the frontend or add `-H "X-Tenant-Id: your-tenant"` to API calls |
 | Celery tasks not executing | Redis not running | Start Redis with `redis-server` |
 | Migration fails | DB doesn't exist | Create it: `psql -U postgres -c "CREATE DATABASE ae_orchestrator;"` |
 | MCP tools endpoint empty | MCP server dir not found | Ensure `mcp_server/tool_specs.py` exists in parent project root |
@@ -359,5 +361,5 @@ curl http://localhost:8001/api/v1/workflows \
 
 ---
 
-**Document version:** 0.1  
+**Document version:** 0.2  
 **Last updated:** 2026-03-20
