@@ -41,6 +41,7 @@ type FieldSchema = {
   min?: number;
   max?: number;
   items?: { type: string };
+  description?: string;
 };
 
 export interface DynamicConfigFormProps {
@@ -72,6 +73,16 @@ const NODE_ID_KEYS = new Set(["responseNodeId", "historyNodeId"]);
 
 // Fields that accept Jinja2 templates (e.g. {{ trigger.message }})
 const JINJA2_KEYS = new Set(["systemPrompt"]);
+
+// ---------------------------------------------------------------------------
+// FieldHint — grey help text rendered below a field input
+// ---------------------------------------------------------------------------
+
+function FieldHint({ text }: { text: string }) {
+  return (
+    <p className="text-[10px] text-muted-foreground leading-snug">{text}</p>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Tool multi-select sub-component (for react_agent tools field)
@@ -343,6 +354,7 @@ export function DynamicConfigForm({
                   ))}
                 </SelectContent>
               </Select>
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -357,6 +369,7 @@ export function DynamicConfigForm({
                 selected={selected}
                 onChange={(names) => update(key, names)}
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -374,6 +387,7 @@ export function DynamicConfigForm({
                 className={jsonErrors[key] ? "border-red-500" : ""}
                 onBlur={(e) => handleJsonBlur(key, e.target.value)}
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -394,6 +408,7 @@ export function DynamicConfigForm({
               {jsonErrors[key] && (
                 <p className="text-[10px] text-red-500">Invalid JSON</p>
               )}
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -401,14 +416,17 @@ export function DynamicConfigForm({
         // ---- boolean → checkbox ----
         if (field.type === "boolean") {
           return (
-            <div key={key} className="flex items-center gap-2">
-              <input
-                id={key}
-                type="checkbox"
-                checked={Boolean(value ?? field.default ?? false)}
-                onChange={(e) => update(key, e.target.checked)}
-              />
-              <Label htmlFor={key}>{humanize(key)}</Label>
+            <div key={key} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <input
+                  id={key}
+                  type="checkbox"
+                  checked={Boolean(value ?? field.default ?? false)}
+                  onChange={(e) => update(key, e.target.checked)}
+                />
+                <Label htmlFor={key}>{humanize(key)}</Label>
+              </div>
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -435,6 +453,7 @@ export function DynamicConfigForm({
                   )
                 }
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -448,6 +467,7 @@ export function DynamicConfigForm({
                 selected={String(value ?? "")}
                 onChange={(name) => update(key, name)}
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -465,6 +485,7 @@ export function DynamicConfigForm({
                 rows={4}
                 placeholder="Use {{ trigger.field }} or {{ node_2.response }}"
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -480,6 +501,7 @@ export function DynamicConfigForm({
                 value={String(value ?? field.default ?? "")}
                 onChange={(e) => update(key, e.target.value)}
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -495,6 +517,7 @@ export function DynamicConfigForm({
                 suggestions={exprSuggestions}
                 placeholder="e.g. node_2.intent == &quot;diagnose&quot;"
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -510,6 +533,7 @@ export function DynamicConfigForm({
                 suggestions={nodeIdSuggestions}
                 placeholder="e.g. node_4"
               />
+              {field.description && <FieldHint text={field.description} />}
             </div>
           );
         }
@@ -524,6 +548,7 @@ export function DynamicConfigForm({
               value={String(value ?? field.default ?? "")}
               onChange={(e) => update(key, e.target.value)}
             />
+            {field.description && <FieldHint text={field.description} />}
           </div>
         );
       })}

@@ -30,8 +30,17 @@
       "description": "Start workflow on HTTP POST",
       "icon": "webhook",
       "config_schema": {
-        "method": { "type": "string", "default": "POST", "enum": ["POST", "PUT"] },
-        "path": { "type": "string", "default": "/webhook" }
+        "method": {
+          "type": "string",
+          "default": "POST",
+          "enum": ["POST", "PUT"],
+          "description": "HTTP method accepted by this trigger endpoint"
+        },
+        "path": {
+          "type": "string",
+          "default": "/webhook",
+          "description": "URL path for this webhook (e.g. /my-webhook). Must start with /"
+        }
       }
     },
     {
@@ -41,7 +50,11 @@
       "description": "Start workflow on a cron schedule",
       "icon": "clock",
       "config_schema": {
-        "cron": { "type": "string", "default": "0 * * * *" }
+        "cron": {
+          "type": "string",
+          "default": "0 * * * *",
+          "description": "Cron expression in UTC (e.g. '0 * * * *' = every hour, '0 9 * * 1-5' = weekdays at 9am)"
+        }
       }
     },
     {
@@ -51,11 +64,35 @@
       "description": "AI reasoning node with prompt and model selection",
       "icon": "brain",
       "config_schema": {
-        "provider": { "type": "string", "default": "google", "enum": ["google", "openai", "anthropic"] },
-        "model": { "type": "string", "default": "gemini-2.5-flash", "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"] },
-        "systemPrompt": { "type": "string", "default": "" },
-        "temperature": { "type": "number", "default": 0.7, "min": 0, "max": 2 },
-        "maxTokens": { "type": "integer", "default": 4096 }
+        "provider": {
+          "type": "string",
+          "default": "google",
+          "enum": ["google", "openai", "anthropic"],
+          "description": "LLM provider to use for this agent"
+        },
+        "model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+          "description": "Model variant — balance speed vs. capability"
+        },
+        "systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Jinja2 template for the system prompt. Use {{ trigger.field }} for trigger data or {{ node_2.response }} for a previous node's output"
+        },
+        "temperature": {
+          "type": "number",
+          "default": 0.7,
+          "min": 0,
+          "max": 2,
+          "description": "Sampling temperature — 0 = deterministic, 1 = balanced, 2 = very creative"
+        },
+        "maxTokens": {
+          "type": "integer",
+          "default": 4096,
+          "description": "Maximum number of output tokens for this LLM call"
+        }
       }
     },
     {
@@ -65,11 +102,34 @@
       "description": "Iterative tool-calling agent loop",
       "icon": "repeat",
       "config_schema": {
-        "provider": { "type": "string", "default": "google", "enum": ["google", "openai", "anthropic"] },
-        "model": { "type": "string", "default": "gemini-2.5-flash", "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"] },
-        "systemPrompt": { "type": "string", "default": "" },
-        "maxIterations": { "type": "integer", "default": 10 },
-        "tools": { "type": "array", "items": { "type": "string" }, "default": [] }
+        "provider": {
+          "type": "string",
+          "default": "google",
+          "enum": ["google", "openai", "anthropic"],
+          "description": "LLM provider powering the ReAct reasoning loop"
+        },
+        "model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+          "description": "Model variant used for each reasoning step in the ReAct loop"
+        },
+        "systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Jinja2 template for the system prompt. Use {{ trigger.field }} or {{ node_2.response }}"
+        },
+        "maxIterations": {
+          "type": "integer",
+          "default": 10,
+          "description": "Maximum number of Reason→Act cycles before the agent stops (prevents runaway loops)"
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "MCP tools available to this agent. Leave empty to auto-discover all tools at runtime"
+        }
       }
     },
     {
@@ -79,8 +139,16 @@
       "description": "Execute an MCP server tool",
       "icon": "wrench",
       "config_schema": {
-        "toolName": { "type": "string", "default": "" },
-        "parameters": { "type": "object", "default": {} }
+        "toolName": {
+          "type": "string",
+          "default": "",
+          "description": "Name of the MCP tool to call — select from the list or type manually"
+        },
+        "parameters": {
+          "type": "object",
+          "default": {},
+          "description": "JSON object of fixed parameters to pass to the tool. Runtime node outputs can override these"
+        }
       }
     },
     {
@@ -90,10 +158,27 @@
       "description": "Make an external HTTP call",
       "icon": "globe",
       "config_schema": {
-        "url": { "type": "string", "default": "" },
-        "method": { "type": "string", "default": "GET", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-        "headers": { "type": "object", "default": {} },
-        "body": { "type": "string", "default": "" }
+        "url": {
+          "type": "string",
+          "default": "",
+          "description": "Full URL to call (e.g. https://api.example.com/data)"
+        },
+        "method": {
+          "type": "string",
+          "default": "GET",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+          "description": "HTTP method to use for the request"
+        },
+        "headers": {
+          "type": "object",
+          "default": {},
+          "description": "JSON object of HTTP headers (e.g. {\"Authorization\": \"Bearer ...\"})"
+        },
+        "body": {
+          "type": "string",
+          "default": "",
+          "description": "Request body text — used for POST, PUT, and PATCH requests"
+        }
       }
     },
     {
@@ -103,8 +188,16 @@
       "description": "Pause and wait for human approval",
       "icon": "user-check",
       "config_schema": {
-        "approvalMessage": { "type": "string", "default": "" },
-        "timeout": { "type": "integer", "default": 3600 }
+        "approvalMessage": {
+          "type": "string",
+          "default": "",
+          "description": "Message shown to the approver in the approval UI"
+        },
+        "timeout": {
+          "type": "integer",
+          "default": 3600,
+          "description": "Seconds to wait for approval before the execution times out (3600 = 1 hour)"
+        }
       }
     },
     {
@@ -114,9 +207,21 @@
       "description": "Branch based on a condition expression",
       "icon": "git-branch",
       "config_schema": {
-        "condition": { "type": "string", "default": "" },
-        "trueLabel": { "type": "string", "default": "Yes" },
-        "falseLabel": { "type": "string", "default": "No" }
+        "condition": {
+          "type": "string",
+          "default": "",
+          "description": "safe_eval expression evaluated as true/false (e.g. node_2.intent == \"diagnose\" or node_3.score > 0.8)"
+        },
+        "trueLabel": {
+          "type": "string",
+          "default": "Yes",
+          "description": "Label for the edge followed when the condition is true"
+        },
+        "falseLabel": {
+          "type": "string",
+          "default": "No",
+          "description": "Label for the edge followed when the condition is false"
+        }
       }
     },
     {
@@ -126,7 +231,12 @@
       "description": "Merge multiple branches",
       "icon": "git-merge",
       "config_schema": {
-        "strategy": { "type": "string", "default": "waitAll", "enum": ["waitAll", "waitAny"] }
+        "strategy": {
+          "type": "string",
+          "default": "waitAll",
+          "enum": ["waitAll", "waitAny"],
+          "description": "waitAll: hold until every incoming branch completes; waitAny: continue as soon as any one branch completes"
+        }
       }
     },
     {
@@ -136,8 +246,16 @@
       "description": "Iterate over an array, executing downstream nodes once per element",
       "icon": "repeat",
       "config_schema": {
-        "arrayExpression": { "type": "string", "default": "" },
-        "itemVariable": { "type": "string", "default": "item" }
+        "arrayExpression": {
+          "type": "string",
+          "default": "",
+          "description": "Expression that resolves to the array to iterate (e.g. node_2.items or trigger.records)"
+        },
+        "itemVariable": {
+          "type": "string",
+          "default": "item",
+          "description": "Variable name for the current element inside the loop (accessible as item.field in downstream nodes)"
+        }
       }
     },
     {
@@ -185,8 +303,18 @@
       "description": "Classifies the user's intent into one of the configured intent labels. Outputs {intent: string} for downstream Condition nodes to route on.",
       "icon": "route",
       "config_schema": {
-        "provider": { "type": "string", "default": "google", "enum": ["google", "openai", "anthropic"] },
-        "model": { "type": "string", "default": "gemini-2.5-flash", "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"] },
+        "provider": {
+          "type": "string",
+          "default": "google",
+          "enum": ["google", "openai", "anthropic"],
+          "description": "LLM provider used to classify the user intent"
+        },
+        "model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+          "description": "Model variant for the classification call"
+        },
         "intents": {
           "type": "array",
           "items": { "type": "string" },

@@ -474,3 +474,55 @@ The chip renders `selectedNode.id` (e.g., `node_3`) in a `font-mono` `<code>` sp
 5. Click the **Save Conversation State** node → find the `responseNodeId` field → paste `node_1`.
 
 The expression picker autocomplete on nodeId fields also surfaces this, but the chip is faster when you already know the node you want.
+
+## 📝 15. Inline Field Help Text — Schema Descriptions in Config Forms
+
+Every field in the Properties panel can now show a small grey hint line below the input. The hint comes directly from the `description` property in `shared/node_registry.json`.
+
+**Files involved:**
+- `shared/node_registry.json` — source of truth for all `description` strings
+- `frontend/src/components/sidebar/DynamicConfigForm.tsx` — renders `<FieldHint>`
+
+### Adding a description to an existing field
+
+Open `shared/node_registry.json` and find the field you want to document:
+
+```json
+"config_schema": {
+  "myField": {
+    "type": "string",
+    "default": "",
+    "description": "Explain what this field does and give a concrete example"
+  }
+}
+```
+
+That's it — the frontend reads `description` from the schema and renders it automatically. No TypeScript changes needed.
+
+### Adding a description to a new node's fields
+
+When you add a new node type (see §1), add a `description` to every `config_schema` entry from the start. Good descriptions:
+- Explain *what* the field controls
+- Include a concrete example value (e.g., `e.g. trigger.session_id`)
+- Mention units for numeric fields (e.g., `seconds`, `0–2 range`)
+- Explain the difference between enum options when it isn't obvious
+
+### How `DynamicConfigForm` renders hints
+
+The `FieldHint` component is a single line:
+
+```tsx
+function FieldHint({ text }: { text: string }) {
+  return (
+    <p className="text-[10px] text-muted-foreground leading-snug">{text}</p>
+  );
+}
+```
+
+Every renderer branch in `DynamicConfigForm` ends with:
+
+```tsx
+{field.description && <FieldHint text={field.description} />}
+```
+
+This covers all nine field types: enum/Select, array/ToolMultiSelect, array/JSON textarea, object/JSON textarea, boolean/checkbox, number/Input, ToolSingleSelect, ExpressionInput, and plain string/Input.
