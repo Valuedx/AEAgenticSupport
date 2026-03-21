@@ -3,261 +3,205 @@
 **Version:** 0.9
 **Last updated:** 2026-03-21
 
-Welcome to the Developer Guide for the AE AI Hub Agentic Orchestrator! This document provides detailed examples and instructions for extending the orchestrator, writing custom expressions, and using advanced Agentic orchestration features.
+Welcome to the Developer Guide! 🚀 
+
+If you are a fresher or new to this codebase, you are in the right place. This guide is written specifically to help you understand how the **Agentic Orchestrator** works under the hood, step-by-step, with plain English explanations and heavily commented code examples.
 
 ---
 
-## Table of Contents
+## 📚 Core Concepts (The Basics)
 
-1. [Adding a Custom Node Type](#1-adding-a-custom-node-type)
-2. [Expression Language (`safe_eval`) Guide](#2-expression-language-safe_eval-guide)
-3. [Using ReAct Agents & MCP Tools](#3-using-react-agents--mcp-tools)
-4. [Advanced Execution: Loops & Retries](#4-advanced-execution-loops--retries)
-5. [Environment Variables & The Vault](#5-environment-variables--the-vault)
-6. [Human-in-the-Loop (Suspension)](#6-human-in-the-loop-suspension)
+Before we write code, let's understand the vocabulary:
+
+*   **Orchestrator:** A system that manages a sequence of tasks. Think of it like a factory manager ensuring every machine does its job in the right order.
+*   **Node:** A single "box" or "step" on the visual canvas. A node might send an email, ask an AI a question, or check if a condition is true.
+*   **DAG (Directed Acyclic Graph):** A fancy computer science term for a flowchart. "Directed" means the arrows have a direction. "Acyclic" means it doesn't loop infinitely back on itself. It always moves forward through the workflow.
+*   **Context:** The highly secured "memory" of the workflow. Every time a node finishes running, it drops its results into the Context. The nodes downstream can then read those results.
+*   **MCP (Model Context Protocol):** A standard way for our AI agents to securely connect to external tools (like a tool to check server status or query a database).
+*   **Jinja2:** A "fill-in-the-blanks" text system. If you write `"Hello {{ user_name }}"`, Jinja2 will look inside the Context for `user_name` and replace it, resulting in `"Hello Alice"`.
 
 ---
 
-## 1. Adding a Custom Node Type
+## 🛠️ 1. Let's Build Your First Custom Node
 
-The orchestrator uses a **data-driven UI** approach. Adding a new node type requires **zero frontend code changes**. You only need to define the schema in the shared registry and write a backend handler.
+The most common task you will do as a developer is adding a new type of Node. 
+The magical part? **You don't need to write any React/Frontend code.** The UI builds itself based on a JSON file!
 
-### Step 1. Define the Schema (`node_registry.json`)
+Let's pretend we want to build a **Slack Notification Node** that sends a message to a team channel.
 
-Open `shared/node_registry.json` and add your node definition. 
+### Step 1: Tell the UI about your Node (`node_registry.json`)
 
-**Example: Adding a "Slack Notification" Action Node**
+Open the `shared/node_registry.json` file. This is the source of truth for all nodes. We will add our new node here.
 
 ```json
 {
   "type": "slack_notification",
   "category": "action",
   "label": "Slack Notification",
-  "description": "Send a message to a Slack channel",
+  "description": "Sends a message to a Slack channel",
   "icon": "MessageSquare",
   "color": "bg-blue-100 border-blue-300",
+  
+  // This is where the magic happens! The UI reads this config_schema
+  // and automatically generates the textboxes and checkboxes for the user.
   "config_schema": {
     "channel": {
       "type": "string",
-      "description": "The Slack channel name or ID (e.g., #alerts)"
+      "description": "Enter the Slack channel name (e.g., #alerts)"
     },
     "messageTemplate": {
       "type": "string",
-      "description": "The message body (supports Jinja2 {{ context.variable }})"
+      "description": "What to say! You can use variables like {{ context.user }}"
     },
     "urgent": {
       "type": "boolean",
-      "description": "Send with high priority",
+      "description": "Check this box to flag it as high priority",
       "default": false
     }
   }
 }
 ```
 
-*Note: The frontend will automatically generate a form with a text input for `channel`, a textarea for `messageTemplate`, and a checkbox for `urgent`.*
+### Step 2: Write the Python Logic (`node_handlers.py`)
 
-### Step 2. Implement the Backend Handler
-
-Open `backend/app/engine/node_handlers.py`. Add a handler function and register it in `dispatch_node`.
+Now that the UI can place the node, we need to tell the backend what to do when the workflow actually runs.
+Open `backend/app/engine/node_handlers.py`.
 
 ```python
 from app.engine.prompt_template import render_template
 
+# This function receives the user's config, the current memory (context), 
+# and the tenant_id (who is running this workflow)
 async def _handle_slack_notification(node_data: dict, context: dict, tenant_id: str) -> dict:
+    
+    # 1. Safely grab the settings the user typed into the UI
     config = node_data.get("config", {})
     channel = config.get("channel", "#general")
-    template = config.get("messageTemplate", "")
+    template = config.get("messageTemplate", "No message provided.")
     urgent = config.get("urgent", False)
     
-    # 1. Render the message template using upstream context
+    # 2. Fill in the blanks! Let's render the Jinja2 template.
+    # If template is "Server {{ trigger.server }} failed"
+    # and context has a trigger.server value of "Web-01", 
+    # message becomes "Server Web-01 failed".
     message = render_template(template, context)
     
-    # 2. Add 'URGENT' prefix if configured
+    # 3. Apply basic business logic
     if urgent:
         message = f"🚨 *URGENT* 🚨\n{message}"
         
-    # 3. Call your internal API or external service
-    # e.g., await some_slack_client.post_message(channel, message)
-    print(f"Sending to {channel}: {message}")
+    # 4. Do the actual work! (e.g., call a Slack API hook)
+    print(f"I am sending this to {channel}: {message}")
     
-    # 4. Return the output to be added to the execution context
+    # 5. Return a dictionary. Whatever you return here is permanently 
+    # saved into the workflow's Context memory for the next nodes to use.
     return {
-        "status": "sent",
-        "channel": channel,
-        "delivered_message": message
+        "status": "success",
+        "delivered_to": channel,
+        "final_text": message
     }
 ```
 
-Finally, wire it up in `dispatch_node(...)`:
+Finally, at the bottom of `node_handlers.py`, just route the traffic to your new function:
 
 ```python
-# Inside dispatch_node:
+# Inside the dispatch_node function:
 if node_category == "action":
-    if label == "Slack Notification":
+    if label == "Slack Notification":  # MUST match the label in the JSON!
         return await _handle_slack_notification(node_data, context, tenant_id)
-    # ... other action nodes
 ```
+Congratulations! You just built a fully functional distributed workflow node! 🎉
 
 ---
 
-## 2. Expression Language (`safe_eval`) Guide
+## 🧠 2. Writing Logic Rules (`safe_eval`)
 
-The Orchestrator uses a restricted AST-based expression evaluator (`safe_eval`) for `Condition` and `ForEach` nodes. `eval()` and `exec()` are strictly prohibited for security.
+Workflows often need to make decisions like, *"If the AI found a virus, go left. If the file is safe, go right."* We do this using **Condition Nodes**.
 
-### Context Variables
+Because letting users run random Python code is a huge security risk, we built a very strict expression evaluator called `safe_eval`. It acts like a mini-language.
 
-You can access any upstream node's output using dot notation. For example, if a previous node with ID `node_2` returned `{"status": 200, "data": {"user": "Alice"}}`, you can reference it as:
-`node_2.data.user`
-
-### Supported Operations
-
-**1. Comparisons & Logic**
+### Reading from Memory (The Context)
+If a previous node with the ID `node_2` returned `{"user": {"age": 25, "name": "Bob"}}`, you can check his age like this:
 ```python
-node_1.status == 200 and node_1.confidence > 0.8
-not trigger.is_test or trigger.override == true
-"error" in node_3.logs
+node_2.user.age >= 18
 ```
 
-**2. Ternary Expressions**
+### Safe Functions You Can Use
+Instead of standard Python, you can only use these safe functions (added in V0.9):
+*   **Math:** `len()`, `min()`, `max()`, `abs()`
+*   **Types:** `str()`, `int()`, `float()`, `bool()`
+*   **Text Checkers:** `startswith()`, `endswith()`, `contains()` (checks if an item is in a list)
+*   **Text Changers:** `lower()`, `upper()`, `strip()`
+
+### Examples for Freshers
+Here is how you would type these inside a Condition Node on the visual canvas:
+
+**Example A: Simple text check**
+Wait, did the AI respond with an error? Let's check:
 ```python
-"High" if trigger.priority == 1 else "Normal"
+lower(node_1.status) == "error"
 ```
 
-**3. Whitelisted Functions (V0.9+)**
-You can use these safe built-in functions:
-*   `len(x)`: Length of a string or array.
-*   `str(x)`, `int(x)`, `float(x)`, `bool(x)`: Type conversion.
-*   `min(x, y)`, `max(x, y)`, `abs(x)`: Math operations.
-*   `lower(s)`, `upper(s)`, `strip(s)`: String manipulation.
-*   `startswith(s, prefix)`, `endswith(s, suffix)`: String matching.
-*   `contains(collection, item)`: Same as the `in` operator.
-*   `matches(string, regex)`: Safe regex matching (e.g., `matches(node_1.email, r".*@company\.com")`).
-
-**4. Whitelisted Methods (V0.9+)**
-You can call safe methods directly on objects:
-*   **Strings:** `.lower()`, `.upper()`, `.strip()`, `.split(sep)`, `.startswith(prefix)`, `.endswith(suffix)`, `.isdigit()`, `.replace(old, new)`.
-*   **Dictionaries/Objects:** `.get(key, default)`, `.keys()`, `.values()`.
-
-**Example: Complex Condition Logic**
+**Example B: Making sure an array isn't empty**
+Did the database give us any results?
 ```python
-# Check if the AI's response indicates an issue AND the username ends with @admin.com
-lower(node_2.sentiment) == "negative" and trigger.user.endswith("@admin.com")
+len(node_3.database_rows) > 0
+```
 
-# Ensure an array has items and grab a safe dict value
-len(node_3.results) > 0 and node_3.metadata.get("urgent", false) == true
+**Example C: Complex security condition**
+Is the user part of the `@admin.com` domain AND is this an urgent request?
+```python
+trigger.email.endswith("@admin.com") and trigger.priority == "High"
 ```
 
 ---
 
-## 3. Using ReAct Agents & MCP Tools
+## 🤖 3. The ReAct Agent (AI that uses Tools)
 
-The **ReAct Agent** node gives an LLM the ability to autonomously loop, reason, and call tools. 
+Normally, if you ask ChatGPT a question, it just replies with text. 
+But a **ReAct Agent** (Reasoning + Acting) is special. You give it a goal, and you hand it a backpack full of tools (like a tool to restart a server, or a tool to read logs).
 
-### Tool Binding
+### How to configure it:
+1.  Drag a **ReAct Agent** onto the canvas.
+2.  In the `tools` dropdown, you can select specific tools you want to allow it to use.
+3.  **Pro Tip:** If you leave the tools dropdown completely empty, the backend will auto-discover **every single tool** available on the MCP server and hand them all to the AI.
 
-In the flow builder, the ReAct Agent has a `tools` configuration property (a multi-select dropdown hooked up to the MCP server).
-*   **Explicit List:** If you select specific tools (e.g., `["ae.request.get_status", "ae.request.restart"]`), the agent is sandboxed and can *only* use those tools.
-*   **Auto-Discovery:** If you leave the `tools` list **empty**, the engine will automatically discover and pass **all available tools** (106+) from the MCP server to the agent at runtime.
-
-### The Run Loop
-The `react_loop.py` handles the execution. It will:
-1.  Provide the LLM with your `systemPrompt` and the execution context.
-2.  If the LLM decides to call a tool, the engine pauses the LLM, connects to the MCP server (`call_tool`), gets the result, appends it to the conversation history, and calls the LLM again.
-3.  This loops until the LLM returns a final text answer (or hits the hard cap of 25 iterations).
-
-**Example System Prompt for an IT Agent:**
-```text
-You are an IT Diagnostic Agent.
-The user reported an issue: {{ trigger.issue_description }}
-Request ID: {{ trigger.request_id }}
-
-1. Call the 'ae.request.get_logs' tool.
-2. Analyze the output.
-3. If the error mentions 'timeout', call 'ae.service.restart'.
-4. Provide a final summary of your actions.
-```
+### How it thinks:
+The backend code (`react_loop.py`) runs a loop that goes like this:
+1. **AI:** "I need to check the server status. I will use the `get_status` tool."
+2. **Backend:** *Pauses the AI, runs the `get_status` tool, gets the result, hands the result back to the AI.*
+3. **AI:** "Okay, the server is down. I will now use the `restart_server` tool."
+4. **Backend:** *Runs the tool, returns the result.*
+5. **AI:** "The server is back up! Here is my final summary for the user."
 
 ---
 
-## 4. Advanced Execution: Loops & Retries
+## 🔄 4. Advanced Tricks: Loops, Retries, and Suspensions
 
-### The ForEach Loop
-The **ForEach** node (introduced in V0.9) lets you run a subgraph multiple times.
+### The "ForEach" Loop (Doing things repeatedly)
+Introduced in V0.9, the ForEach node takes a list, and runs every node attached to it *once per item* in the list.
 
-*   **`arrayExpression`**: A safe_eval string pointing to a list. Example: `node_1.extracted_emails`
-*   **`itemVariable`**: The name you want to assign to the current item. Example: `email_address`
+If your list is `["Alice", "Bob"]`:
+*   `_loop_item` will be "Alice" for the first run.
+*   `_loop_item` will be "Bob" for the second run.
 
-**How it works:**
-If `node_1` returns `["alice@test.com", "bob@test.com"]`, the `ForEach` node will trigger all of its immediately downstream nodes 2 times.
-In the downstream nodes (like an LLM Agent), you can reference the current item in templates:
-```text
-Write a personalized greeting for {{ email_address }}.
-(This is iteration {{ _loop_index }})
-```
+### The Retry Button (Oops, API failed!)
+If a workflow runs 10 steps successfully, but fails on step 11 because the internet blinked, you don't want to start over from step 1!
+The backend now tracks `current_node_id`. If it fails, a user can hit **Retry** in the UI. The backend deletes the error log, loads the memory right before step 11, and simply presses 'play' again.
 
-The output of the ForEach operation is collected into an array named `forEach_results` in the context.
-
-### Retry from Failed Node
-If a workflow fails halfway through (e.g., an external API returns a 500 error), you don't have to restart from the beginning and waste LLM tokens.
-
-**API Endpoint:** `POST /api/v1/workflows/{workflow_id}/instances/{instance_id}/retry`
-The engine will:
-1. Reload the context up to the point of failure.
-2. Re-parse the DAG and skip all nodes that have already successfully executed.
-3. Execute the failed node and continue downstream.
-
-You can trigger this programmatically or by clicking the **Retry** button in the frontend execution panel limit.
+### Human-in-the-Loop (The Pause Button)
+Sometimes it is too dangerous to let an AI delete a database automatically. It needs human approval.
+If a Node's config contains an `approvalMessage` (e.g., `"Approve deletion?"`), the python code (`dag_runner.py`) will literally put itself to sleep, mark its status as `suspended`, and free up its memory.
+When a human clicks "Approve" via a webhook/Slack API, the backend wakes back up, loads its context, and continues the workflow exactly where it left off.
 
 ---
 
-## 5. Environment Variables & The Vault
+## 🔐 5. Security: The Vault
 
-Never hardcode secrets (API keys, passwords, bearer tokens) in the visual builder's Web UI.
+**Golden Rule:** NEVER hardcode passwords or API keys in the visual builder text boxes.
 
-1.  **Store the Secret:** Use the backend Vault API to store encrypted secrets per-tenant.
-2.  **Access the Secret:** In any text field in the Visual Builder (like a node's URL path, headers, or prompts), use the `{{ env.SECRET_NAME }}` syntax.
+Instead, an admin saves an API key in the Database Vault (encrypted) under a name like `AWS_PROD_KEY`.
+When a developer configures a node (like an HTTP request), they just type:
+`{{ env.AWS_PROD_KEY }}`
 
-**Example: HTTP Action Node Configuration**
-```json
-{
-  "url": "https://api.mycrm.com/v1/users",
-  "headers": {
-    "Authorization": "Bearer {{ env.CRM_PROD_API_KEY }}"
-  }
-}
-```
-Before the node executes, `node_handlers.py` calls `resolve_config_env_vars()`. It looks up `CRM_PROD_API_KEY` in the Fernet-encrypted database vault for the current tenant and seamlessly injects it into the configuration dict.
-
----
-
-## 6. Human-in-the-Loop (Suspension)
-
-Sometimes a workflow must pause until a human approves an action (e.g., deleting a database or restarting a production process).
-
-### Design Time
-Add a generic Action node, and configure the `approvalMessage` property.
-```text
-"Please approve the restart of server {{ trigger.server_name }}."
-```
-
-### Run Time
-When the engine reaches this node, it detects the `approvalMessage`.
-1. It records the current context in the database.
-2. Changes the instance status to `suspended`.
-3. The worker thread finishes and dies (freeing up resources).
-
-### Resumption
-An external application (like an MS Teams bot or email webhook) displays the approval message to the user. When approved, that system makes an API call back to the orchestrator:
-
-```http
-POST /api/v1/workflows/callback
-{
-  "instance_id": "123e4567-e89b-12d3...",
-  "payload": {
-    "approved": true,
-    "user": "admin@company.com"
-  }
-}
-```
-
-The Celery worker resumes the graph instantly from where it left off, and downstream nodes can reference the user's decision via `node_id.approved`.
+When the workflow runs, exactly 1 millisecond before the node executes, `resolve_config_env_vars()` (in `prompt_template.py`) intercepts that string, safely fetches the encrypted key from the database, decrypts it in RAM, and hands it to the node. Safe and sound!
