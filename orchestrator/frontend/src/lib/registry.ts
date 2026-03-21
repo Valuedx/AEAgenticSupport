@@ -1,5 +1,5 @@
 import type { PaletteItem, NodeCategory } from "@/types/nodes";
-import registryData from "../../shared/node_registry.json";
+import registryData from "../../../shared/node_registry.json";
 
 interface RegistryNodeType {
   type: string;

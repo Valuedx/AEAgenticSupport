@@ -1,3 +1,5 @@
+> - **V0.9.2 UX Improvements (2026-03-21)**: New Step 6 (pre-run validation) — `validateWorkflow()` runs client-side before every execution. Checks: trigger presence, node reachability (BFS from triggers), required empty fields, broken node-ID cross-references. `ValidationDialog` blocks hard errors and allows "Run Anyway" for warnings only.
+>
 > - **V0.9 Execution Enhancements (2026-03-21)**: New Step 14 — ForEach Loop iteration with downstream node re-execution per array element. New Step 15 — Retry from Failed Node (API + engine). Step 11 MCP section updated — connection pooling with configurable pool size. Step 8 updated — enhanced safe expression evaluator supports whitelisted functions (`len`, `lower`, `matches` etc.) and method calls. New config: `ORCHESTRATOR_MAX_SNAPSHOTS` (snapshot pruning) and `ORCHESTRATOR_MCP_POOL_SIZE`. Environment variable mapping via `{{ env.SECRET_NAME }}` for node config values. Langfuse context fix for parallel execution.
 > - **V0.8 Enterprise Features (2026-03-20)**: Step 4 updated — property forms now generated from registry schemas via DynamicConfigForm; no more hardcoded panels. Step 5 updated — each graph save creates a snapshot in workflow_snapshots. New Step 12 — Version History & Rollback. Step 13 MCP section updated — 5-minute TTL cache + invalidate-cache endpoint. New Step 14 — OIDC Authentication. ReAct section updated for auto-discovery.
 >
@@ -212,11 +214,57 @@ This gives every save an immutable point-in-time backup. The version badge in th
 
 ---
 
-## 7. Step 6 — Executing the Workflow
+## 7. Step 5b — Pre-Run Validation (Client-Side)
+
+**Code:** `frontend/src/lib/validateWorkflow.ts`, `frontend/src/components/toolbar/ValidationDialog.tsx`
+
+Before calling the execute API, the **Run** button runs `validateWorkflow(nodes, edges)` entirely in the browser. This gives instant feedback without making a network request.
+
+```
+User clicks Run
+      │
+      ▼
+validateWorkflow(nodes, edges)
+      │
+      ├── Check 1: At least one Trigger node exists
+      │
+      ├── Check 2: BFS reachability from all triggers
+      │              → orphaned nodes → WARNING
+      │
+      ├── Check 3: Required fields per node type
+      │              condition, url, toolName,
+      │              arrayExpression, responseNodeId,
+      │              intents (≥1) → ERROR
+      │
+      └── Check 4: Node ID cross-references
+                     responseNodeId, historyNodeId
+                     must point to existing node IDs → ERROR
+
+      │
+      ├── errors.length === 0 → proceed to API
+      │
+      ├── only warnings → show ValidationDialog with "Run Anyway"
+      │
+      └── any hard errors → show ValidationDialog, block execution
+```
+
+`ValidationError` shape:
+```ts
+interface ValidationError {
+  nodeId: string;       // e.g. "node_3" (empty for graph-level errors)
+  nodeLabel: string;    // e.g. "Save Conversation State"
+  message: string;      // human-readable description
+  severity: "error" | "warning";
+}
+```
+
+---
+
+## Step 6 — Executing the Workflow
 
 **Code:** `backend/app/api/workflows.py` → `POST /api/v1/workflows/{id}/execute`
 
-The frontend `Run` button calls this endpoint. Real-time status arrives via SSE stream (`/instances/{instanceId}/stream`).
+The frontend `Run` button calls this endpoint (only after validation passes). Real-time status arrives via SSE stream (`/instances/{instanceId}/stream`).
 
 ```
 Client                          API Gateway                     Celery Worker

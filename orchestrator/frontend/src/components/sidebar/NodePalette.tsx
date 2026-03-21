@@ -9,6 +9,9 @@ import {
   UserCheck,
   GitBranch,
   GitMerge,
+  Route,
+  History,
+  Save,
   ChevronRight,
   type LucideIcon,
 } from "lucide-react";
@@ -32,6 +35,9 @@ const ICON_MAP: Record<string, LucideIcon> = {
   "user-check": UserCheck,
   "git-branch": GitBranch,
   "git-merge": GitMerge,
+  route: Route,
+  history: History,
+  save: Save,
 };
 
 const CATEGORY_META: Record<NodeCategory, { label: string; color: string }> = {

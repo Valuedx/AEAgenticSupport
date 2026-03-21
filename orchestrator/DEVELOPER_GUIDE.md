@@ -239,3 +239,54 @@ The canonical graph for any chat-enabled workflow is:
 2. **Load at the start / Save at the end** bookend every instance with memory fetch/store.
 3. **LLM Router** reads the full history passed from the Load State node, handling pivots and follow-ups contextually.
 4. **The intent value** flows dynamically into standard Condition nodes — keeping routine routing out of arbitrary Python code.
+
+---
+
+## 🛡️ 7. Pre-Run Validation — Catching Mistakes Before They Run
+
+The orchestrator validates your workflow **in the browser** the moment you hit **Run**. This prevents common mistakes without wasting an API call.
+
+### What gets checked?
+
+**File:** `frontend/src/lib/validateWorkflow.ts`
+
+| Check | What it catches | Severity |
+|-------|----------------|----------|
+| No trigger | Canvas has no Webhook or Schedule Trigger | Error |
+| Disconnected node | A node exists on canvas but nothing connects it to a trigger | Warning |
+| Empty required field | e.g., Condition has no expression, HTTP Request has no URL | Error |
+| LLM Router: no intents | The `intents` array is empty | Error |
+| Broken node reference | `responseNodeId` or `historyNodeId` points to a non-existent node | Error |
+
+**Errors** block execution entirely. **Warnings** allow you to click **"Run Anyway"** (useful when you intentionally have a disconnected utility branch you're testing).
+
+### How to add a validation rule for your new node
+
+Open `frontend/src/lib/validateWorkflow.ts` and find `REQUIRED_FIELDS`:
+
+```ts
+const REQUIRED_FIELDS: Record<string, string[]> = {
+  "Condition":               ["condition"],
+  "HTTP Request":            ["url"],
+  "MCP Tool":                ["toolName"],
+  "ForEach":                 ["arrayExpression"],
+  "Save Conversation State": ["responseNodeId"],
+  // 👉 Add your new node label and required field names here:
+  "Slack Notification":      ["channel", "messageTemplate"],
+};
+```
+
+That's it! The validator will automatically show an error if those fields are empty when a user tries to run a workflow containing your node.
+
+If your node has a **node-ID reference field** (a field where the user types another node's ID like `node_4`), also add it to `NODE_ID_REF_FIELDS`:
+
+```ts
+const NODE_ID_REF_FIELDS: Record<string, string[]> = {
+  "Save Conversation State": ["responseNodeId"],
+  "LLM Router":              ["historyNodeId"],
+  // 👉 Add reference fields for your node:
+  "Data Aggregator":         ["sourceNodeId"],
+};
+```
+
+The validator will cross-check that the referenced node ID actually exists on the canvas.

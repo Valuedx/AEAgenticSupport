@@ -15,6 +15,15 @@ import type { AgenticNodeData, NodeCategory } from "@/types/nodes";
 let nodeIdCounter = 0;
 const nextId = () => `node_${++nodeIdCounter}`;
 
+function syncNodeIdCounterFromNodes(nodes: Node[]) {
+  let max = 0;
+  for (const n of nodes) {
+    const m = /^node_(\d+)$/.exec(n.id);
+    if (m) max = Math.max(max, Number.parseInt(m[1], 10));
+  }
+  nodeIdCounter = max;
+}
+
 interface FlowState {
   nodes: Node[];
   edges: Edge[];
@@ -23,6 +32,9 @@ interface FlowState {
   onNodesChange: OnNodesChange;
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
+
+  /** Replace canvas state and align `node_*` id counter for new nodes from the palette. */
+  replaceGraph: (nodes: Node[], edges: Edge[]) => void;
 
   addNode: (
     nodeCategory: NodeCategory,
@@ -63,6 +75,11 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       animated: isCondition ? true : false,
     };
     set({ edges: addEdge(edge, get().edges) });
+  },
+
+  replaceGraph: (nodes, edges) => {
+    syncNodeIdCounterFromNodes(nodes);
+    set({ nodes, edges, selectedNodeId: null });
   },
 
   addNode: (nodeCategory, label, position, defaultConfig = {}) => {

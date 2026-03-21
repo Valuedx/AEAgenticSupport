@@ -10,14 +10,19 @@ import {
   CircleCheck,
   CircleX,
   Pause,
+  Layers,
+  Cpu,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useWorkflowStore } from "@/store/workflowStore";
+import { useFlowStore } from "@/store/flowStore";
 import { WorkflowListDialog } from "@/components/toolbar/WorkflowListDialog";
 import { VersionHistoryDialog } from "@/components/toolbar/VersionHistoryDialog";
+import { ValidationDialog } from "@/components/toolbar/ValidationDialog";
+import { validateWorkflow, type ValidationError } from "@/lib/validateWorkflow";
 
 const STATUS_CONFIG: Record<string, { icon: typeof CircleDot; label: string; className: string }> = {
   queued: { icon: CircleDot, label: "Queued", className: "text-muted-foreground" },
@@ -32,6 +37,8 @@ export function Toolbar() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
+  const [validationOpen, setValidationOpen] = useState(false);
 
   const currentWorkflow = useWorkflowStore((s) => s.currentWorkflow);
   const isDirty = useWorkflowStore((s) => s.isDirty);
@@ -41,6 +48,11 @@ export function Toolbar() {
   const saveWorkflow = useWorkflowStore((s) => s.saveWorkflow);
   const executeWorkflow = useWorkflowStore((s) => s.executeWorkflow);
   const newWorkflow = useWorkflowStore((s) => s.newWorkflow);
+  const loadExampleComplexWorkflow = useWorkflowStore((s) => s.loadExampleComplexWorkflow);
+  const loadAutomationEdgeMainWorkflow = useWorkflowStore((s) => s.loadAutomationEdgeMainWorkflow);
+  const nodes = useFlowStore((s) => s.nodes);
+  const edges = useFlowStore((s) => s.edges);
+  const nodeCount = nodes.length;
 
   const workflowName = currentWorkflow?.name || "Untitled Workflow";
   const status = activeInstance?.status;
@@ -59,6 +71,21 @@ export function Toolbar() {
   const handleNameSubmit = () => {
     saveWorkflow(nameInput || "Untitled Workflow");
     setEditingName(false);
+  };
+
+  const handleRun = () => {
+    const errors = validateWorkflow(nodes, edges);
+    if (errors.length > 0) {
+      setValidationErrors(errors);
+      setValidationOpen(true);
+      return;
+    }
+    executeWorkflow();
+  };
+
+  const handleRunAnyway = () => {
+    setValidationOpen(false);
+    executeWorkflow();
   };
 
   return (
@@ -125,6 +152,44 @@ export function Toolbar() {
           <FilePlus className="h-4 w-4" />
         </Button>
 
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            if (
+              (isDirty || nodeCount > 0) &&
+              !window.confirm(
+                "Replace the canvas with the IT helpdesk example workflow? Unsaved changes will be lost if you have not saved.",
+              )
+            ) {
+              return;
+            }
+            loadExampleComplexWorkflow();
+          }}
+          title="Example: IT helpdesk (SLA checklist, L2 approval)"
+        >
+          <Layers className="h-4 w-4" />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            if (
+              (isDirty || nodeCount > 0) &&
+              !window.confirm(
+                "Replace the canvas with the AutomationEdge main-app routing example (gateway + specialists)? Unsaved changes will be lost if you have not saved.",
+              )
+            ) {
+              return;
+            }
+            loadAutomationEdgeMainWorkflow();
+          }}
+          title="Example: main app parity — diagnostic / remediation / RCA / ops orchestrator"
+        >
+          <Cpu className="h-4 w-4" />
+        </Button>
+
         <Button variant="ghost" size="sm" onClick={() => setListOpen(true)} title="Open workflow">
           <FolderOpen className="h-4 w-4" />
         </Button>
@@ -150,7 +215,7 @@ export function Toolbar() {
         <Button
           variant="default"
           size="sm"
-          onClick={() => executeWorkflow()}
+          onClick={handleRun}
           disabled={isExecuting || loading}
           title="Execute workflow"
           className="gap-1.5"
@@ -166,6 +231,12 @@ export function Toolbar() {
 
       <WorkflowListDialog open={listOpen} onOpenChange={setListOpen} />
       <VersionHistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} />
+      <ValidationDialog
+        open={validationOpen}
+        errors={validationErrors}
+        onClose={() => setValidationOpen(false)}
+        onRunAnyway={handleRunAnyway}
+      />
     </>
   );
 }

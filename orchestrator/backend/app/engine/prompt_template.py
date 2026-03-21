@@ -97,6 +97,13 @@ def build_user_message(context: dict[str, Any]) -> str:
     if trigger:
         parts.append(f"**Trigger input:**\n```json\n{json.dumps(trigger, indent=2, default=str)}\n```")
 
+    loop_item = context.get("_loop_item")
+    if loop_item is not None:
+        parts.append(
+            "**Current loop item:**\n```json\n"
+            f"{json.dumps(loop_item, indent=2, default=str)}\n```"
+        )
+
     for key, value in context.items():
         if not key.startswith("node_"):
             continue

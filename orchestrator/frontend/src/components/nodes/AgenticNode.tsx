@@ -10,6 +10,9 @@ import {
   UserCheck,
   GitBranch,
   GitMerge,
+  Route,
+  History,
+  Save,
   type LucideIcon,
 } from "lucide-react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,6 +30,9 @@ const ICON_MAP: Record<string, LucideIcon> = {
   "user-check": UserCheck,
   "git-branch": GitBranch,
   "git-merge": GitMerge,
+  route: Route,
+  history: History,
+  save: Save,
 };
 
 const CATEGORY_STYLES: Record<

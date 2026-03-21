@@ -1,7 +1,7 @@
 """Enable PostgreSQL Row-Level Security for tenant isolation.
 
 Revision ID: 0001
-Revises: (initial)
+Revises: 0000
 Create Date: 2026-03-20
 
 Applies RLS policies to all tenant-scoped tables so that queries scoped
@@ -13,7 +13,7 @@ start of each database session.
 from alembic import op
 
 revision = "0001"
-down_revision = None
+down_revision = "0000"
 branch_labels = None
 depends_on = None
 

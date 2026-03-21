@@ -1,10 +1,13 @@
 import { create } from "zustand";
+import type { Edge, Node } from "@xyflow/react";
 import {
   api,
   type WorkflowOut,
   type InstanceDetailOut,
 } from "@/lib/api";
 import { useFlowStore } from "@/store/flowStore";
+import { EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW } from "@/lib/exampleComplexWorkflow";
+import { EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW } from "@/lib/exampleMainAppWorkflow";
 
 interface WorkflowState {
   currentWorkflow: WorkflowOut | null;
@@ -24,6 +27,8 @@ interface WorkflowState {
   saveWorkflow: (name?: string) => Promise<void>;
   deleteWorkflow: (id: string) => Promise<void>;
   newWorkflow: () => void;
+  loadExampleComplexWorkflow: () => void;
+  loadAutomationEdgeMainWorkflow: () => void;
   markDirty: () => void;
 
   executeWorkflow: (triggerPayload?: Record<string, unknown>) => Promise<void>;
@@ -57,23 +62,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const wf = await api.getWorkflow(id);
-      const flow = useFlowStore.getState();
       const graph = wf.graph_json;
-      flow.onNodesChange(
-        flow.nodes.map((n) => ({ type: "remove" as const, id: n.id })),
-      );
-      flow.onEdgesChange(
-        flow.edges.map((e) => ({ type: "remove" as const, id: e.id })),
-      );
+      const newNodes = (graph.nodes ?? []) as Node[];
+      const newEdges = (graph.edges ?? []) as Edge[];
 
-      const newNodes = (graph.nodes ?? []) as Parameters<typeof flow.onNodesChange>[0] extends (infer _) ? typeof flow.nodes : never;
-      const newEdges = (graph.edges ?? []) as typeof flow.edges;
-
-      useFlowStore.setState({
-        nodes: newNodes,
-        edges: newEdges,
-        selectedNodeId: null,
-      });
+      useFlowStore.getState().replaceGraph(newNodes, newEdges);
 
       set({ currentWorkflow: wf, isDirty: false, loading: false, activeInstance: null });
     } catch (e) {
@@ -124,8 +117,30 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   newWorkflow: () => {
-    useFlowStore.setState({ nodes: [], edges: [], selectedNodeId: null });
+    useFlowStore.getState().replaceGraph([], []);
     set({ currentWorkflow: null, isDirty: false, activeInstance: null });
+  },
+
+  loadExampleComplexWorkflow: () => {
+    const { nodes, edges } = EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW;
+    useFlowStore.getState().replaceGraph(nodes, edges);
+    set({
+      currentWorkflow: null,
+      isDirty: true,
+      activeInstance: null,
+      error: null,
+    });
+  },
+
+  loadAutomationEdgeMainWorkflow: () => {
+    const { nodes, edges } = EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW;
+    useFlowStore.getState().replaceGraph(nodes, edges);
+    set({
+      currentWorkflow: null,
+      isDirty: true,
+      activeInstance: null,
+      error: null,
+    });
   },
 
   markDirty: () => {

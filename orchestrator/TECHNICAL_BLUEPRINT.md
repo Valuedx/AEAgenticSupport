@@ -1,3 +1,5 @@
+> - **V0.9.2 UX Improvements (2026-03-21)**: Pre-run workflow validation (`src/lib/validateWorkflow.ts`) — checks for missing trigger, disconnected nodes, required empty fields (condition, url, toolName, arrayExpression, responseNodeId), and broken node-ID cross-references (responseNodeId, historyNodeId). `ValidationDialog` surfaces errors and warnings before execution; hard errors block run, warnings allow "Run Anyway". `Toolbar.tsx` now calls `validateWorkflow()` on every Run click.
+>
 > - **V0.9.1 Stateful DAGs (2026-03-21)**: Added robust Stateful Re-Trigger DAG Pattern. Added `ConversationSession` PostgreSQL table with Alembic migration `0003_conversation_sessions.py` + unique index `(tenant_id, session_id)`. Added REST APIs in `conversations.py` (`GET /api/v1/conversations`, `GET /{id}`, `DELETE /{id}`). Exposes 3 new conversational memory nodes in `node_registry.json`: `Load Conversation State`, `Save Conversation State`, and `LLM Router`.
 > - **V0.9 Execution Enhancements (2026-03-21)**: ForEach loop node (`_handle_forEach`, `_run_forEach_iterations`) — iterates downstream subgraph per array element. Retry from failed node (`retry_graph()`, `POST /{id}/instances/{iid}/retry`). MCP connection pooling (`_MCPSessionPool`). Enhanced safe expression evaluator with whitelisted function/method calls (`len`, `lower`, `matches`, etc.). Snapshot pruning via Celery Beat (`prune_old_snapshots`, `ORCHESTRATOR_MAX_SNAPSHOTS`). Environment variable mapping (`{{ env.SECRET_NAME }}` resolved from vault). Langfuse parallel context fix — explicit trace propagation into threads. Frontend `retryInstance` action.
 > - **V0.8 Enterprise Features (2026-03-20)**: Dynamic property forms generated from `shared/node_registry.json` schemas (`DynamicConfigForm.tsx`) — PropertyInspector no longer hardcoded. ReAct agent auto-discovers all MCP tools when `tools` config is empty; MCP tool cache upgraded to 5-minute TTL with `POST /api/v1/tools/invalidate-cache`. Workflow versioning: `workflow_snapshots` table + Alembic migration 0002; snapshot saved before each overwrite; `GET /{id}/versions` and `POST /{id}/rollback/{v}` endpoints; `VersionHistoryDialog` with Restore button in Toolbar. OIDC federation: Authorization Code + PKCE flow (`app/api/auth.py`), `authlib` for ID token validation, Redis PKCE state, issues internal JWT; frontend `LoginPage` + `VITE_AUTH_MODE=oidc` gate in `App.tsx`.
@@ -185,7 +187,35 @@ A single `memo`-ized component renders all node types polymorphically:
 - **Handles:** Target (left) on all except Triggers. Source (right) on all except Merge. Condition nodes get two source handles (`true` in green, `false` in red) at 35%/65% vertical offset.
 - **Icons:** Mapped via `ICON_MAP` from Lucide icon names stored in `config.icon`.
 
-### 3.5 Property Inspector
+### 3.5 Pre-Run Workflow Validation
+
+Files: `src/lib/validateWorkflow.ts`, `src/components/toolbar/ValidationDialog.tsx`
+
+Before any execution begins, `validateWorkflow(nodes, edges)` is called by the Toolbar's Run handler. It returns an array of `ValidationError` objects, each with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `nodeId` | `string` | ID of the offending node (empty for graph-level errors) |
+| `nodeLabel` | `string` | Human-readable node name |
+| `message` | `string` | Description of the problem |
+| `severity` | `"error" \| "warning"` | Errors block execution; warnings allow "Run Anyway" |
+
+**Checks performed (in order):**
+
+1. **No trigger** — workflow must have at least one Trigger category node
+2. **Reachability (BFS)** — every node must be reachable from a trigger via edges; orphaned nodes produce a warning
+3. **Required fields** — per node label, specific fields must be non-empty:
+   - `Condition` → `condition`
+   - `HTTP Request` → `url`
+   - `MCP Tool` → `toolName`
+   - `ForEach` → `arrayExpression`
+   - `Save Conversation State` → `responseNodeId`
+   - `LLM Router` → `intents` array must have ≥ 1 entry
+4. **Node ID cross-references** — `responseNodeId` (Save Conversation State) and `historyNodeId` (LLM Router), when set, must match an existing node ID
+
+`ValidationDialog` presents errors in red and warnings in yellow. If only warnings exist, a **Run Anyway** button is offered. Hard errors disable execution entirely until fixed.
+
+### 3.6 Property Inspector
 
 File: `components/sidebar/PropertyInspector.tsx`
 
