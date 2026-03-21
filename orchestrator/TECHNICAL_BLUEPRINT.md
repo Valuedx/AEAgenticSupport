@@ -1,3 +1,5 @@
+> - **V0.9.5 Reflection Node (2026-03-22)**: New `Reflection` agent node that calls an LLM with an auto-built summary of the workflow's execution history and expects a structured JSON response. Handler in `app/engine/reflection_handler.py` — `_build_execution_summary()` collects the most recent N `node_*` keys from context (hard cap 25, configurable via `maxHistoryNodes`), truncates each to 800 chars to prevent token explosion, and injects the trigger payload. `reflectionPrompt` is a Jinja2 template with `{{ execution_summary }}` available alongside all normal context variables. `_parse_json_response()` strips markdown fences, falls back to regex `{...}` extraction, and returns `{"reflection": raw, "parse_error": True}` as a last resort. `outputKeys` warns (non-blocking) if any expected top-level keys are absent from the response. Node registered in `shared/node_registry.json` under category `agent`. Dispatch added in `node_handlers.py` via label match `"Reflection"`. Frontend: `reflectionPrompt` added to `REQUIRED_FIELDS` in `validateWorkflow.ts`; `_raw_response` added to `NODE_OUTPUT_FIELDS` in `expressionVariables.ts`. Node is intentionally read-only — it never mutates the shared context; downstream Condition nodes route on its returned JSON fields (e.g., `node_X.next_action == "escalate"`). Full Langfuse observability via `record_generation`. No DB migration required.
+>
 > - **V0.9.4 HITL UX (2026-03-22)**: Full Human-in-the-Loop review UI. New `GET /api/v1/workflows/{wf_id}/instances/{inst_id}/context` endpoint returns `InstanceContextOut` — the live `context_json` (internal `_`-prefixed keys stripped) plus the `approvalMessage` extracted from the suspended node's config. `CallbackRequest` gains an optional `context_patch: dict` field — a shallow-merge applied to the instance context before resuming, enabling operators to override specific node outputs without rerunning earlier nodes. `resume_graph` and `resume_workflow_task` both thread `context_patch` through. Frontend: new `HITLResumeDialog` component shows the approval message, a read-only scrollable context JSON viewer, and an editable JSON textarea for the patch; "Approve & Resume" and "Reject" buttons. `ExecutionPanel` shows a yellow "Review & Resume" button in the header when `status === "suspended"`. `workflowStore` gains `instanceContext` state plus `fetchInstanceContext` and `resumeInstance` actions. No DB migration required.
 >
 > - **V0.9.3 Deterministic Batch Semantics (2026-03-22)**: Added opt-in `deterministic_mode` flag to `ExecuteRequest`. When `true`, `_execute_parallel` sorts the ready-node batch by node ID before submitting to `ThreadPoolExecutor` and processes futures in submission order (instead of `as_completed`) so execution logs are written in a stable, reproducible sequence every run. The `execute_graph` and `_execute_ready_queue` signatures accept `deterministic_mode: bool = False`; `execute_workflow_task` forwards it through Celery. A `deterministic` Langfuse tag is added to the root trace when the flag is active. No DB migration required. Frontend `api.ts` `executeWorkflow` accepts an optional third `deterministicMode` parameter. Default (`false`) preserves existing as-completed throughput behaviour — no breaking changes.
@@ -10,9 +12,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9.4
+**Version:** 0.9.5
 **Last updated:** 2026-03-22
-**Status:** V0.9.4 HITL UX, V0.9.3 Deterministic batch semantics, V0.9.2 UX improvements, V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Status:** V0.9.5 Reflection Node, V0.9.4 HITL UX, V0.9.3 Deterministic batch semantics, V0.9.2 UX improvements, V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -226,6 +228,7 @@ Before any execution begins, `validateWorkflow(nodes, edges)` is called by the T
    - `ForEach` → `arrayExpression`
    - `Save Conversation State` → `responseNodeId`
    - `LLM Router` → `intents` array must have ≥ 1 entry
+   - `Reflection` → `reflectionPrompt`
 4. **Node ID cross-references** — `responseNodeId` (Save Conversation State) and `historyNodeId` (LLM Router), when set, must match an existing node ID
 
 `ValidationDialog` presents errors in red and warnings in yellow. If only warnings exist, a **Run Anyway** button is offered. Hard errors disable execution entirely until fixed.
@@ -253,6 +256,7 @@ Fields that accept runtime expressions get an autocomplete dropdown instead of a
 | LLM Agent | `response`, `input_tokens`, `output_tokens` |
 | ReAct Agent | `response`, `tool_calls`, `iterations` |
 | LLM Router | `intent` |
+| Reflection | `_raw_response` (+ any user-defined `outputKeys` at runtime) |
 | MCP Tool | `result` |
 | HTTP Request | `status_code`, `body`, `headers` |
 | Human Approval | `approved`, `approver` |
@@ -634,9 +638,46 @@ File: `app/engine/node_handlers.py`
 | `action` | `_handle_action` | Routes to MCP tool call, HTTP request, or no-op based on config keys |
 | `logic` | `_handle_logic` | Evaluates condition expressions (returns `{branch: "true"|"false"}`) or merges upstream outputs |
 
+**Special-label dispatches** override category routing for nodes identified by their `label` string:
+
+| Label | Handler | Notes |
+|-------|---------|-------|
+| `ForEach` | `_handle_forEach` | Returns `{items, itemVariable}`; DAG runner drives iteration |
+| `Load Conversation State` | `_handle_load_conversation_state` | Fetches/creates `ConversationSession` |
+| `Save Conversation State` | `_handle_save_conversation_state` | Appends turn to session |
+| `LLM Router` | `_handle_llm_router` | Classification call, returns `{intent}` |
+| `Reflection` | `_handle_reflection` (in `reflection_handler.py`) | Builds execution summary, calls LLM, parses JSON — read-only |
+
 **MCP tool invocation:** `_call_mcp_tool()` sends `POST {mcp_server_url}/call-tool` with `{"tool_name": ..., "arguments": ...}` and the `X-Tenant-Id` header.
 
 **HTTP request:** `_call_http()` makes arbitrary HTTP requests via httpx with a 30s timeout.
+
+### 6.9 Reflection Node
+
+File: `app/engine/reflection_handler.py`
+
+The Reflection node lets the workflow reason about its own execution so far and return a decision or assessment that downstream Condition nodes can route on.
+
+**Execution summary builder (`_build_execution_summary`):**
+- Collects all `node_*` keys from context in insertion (execution) order
+- Takes the last `min(maxHistoryNodes, 25)` entries — the hard cap prevents token explosion regardless of user config
+- Serializes each value with `json.dumps(indent=2, default=str)` and truncates to 800 chars
+- Prepends the `trigger` payload if present
+
+**Prompt rendering:**
+- `reflectionPrompt` is a Jinja2 template; `{{ execution_summary }}` injects the history block; all other context variables are available too
+- If the rendered prompt is empty, a safe default is substituted rather than calling the LLM blind
+- The user message always includes a JSON-only instruction plus the summary (and lists `outputKeys` if configured)
+
+**JSON parsing (`_parse_json_response`):**
+1. Strip markdown code fences (` ```json ... ``` `)
+2. `json.loads()` — if dict, return as-is; if non-object, wrap as `{"reflection": value}`
+3. Regex `{...}` extraction fallback
+4. Last resort: `{"reflection": raw, "parse_error": True}`
+
+**Return value:** `{**parsed, "_usage": usage, "_raw_response": raw_response}`
+
+The handler is strictly read-only — it never mutates the shared `context` dict. The dag_runner stores the returned dict under the node's own key (e.g., `context["node_5"]`), from which downstream nodes read `node_5.next_action`, `node_5.confidence`, etc.
 
 ---
 

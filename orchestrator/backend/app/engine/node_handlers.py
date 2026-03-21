@@ -52,6 +52,9 @@ def dispatch_node(
         return _handle_save_conversation_state(node_data, context, tenant_id)
     if label == "LLM Router":
         return _handle_llm_router(node_data, context, tenant_id)
+    if label == "Reflection":
+        from app.engine.reflection_handler import _handle_reflection
+        return _handle_reflection(node_data, context, tenant_id)
 
     handler = handlers.get(category, _handle_action)
     return handler(node_data, context, tenant_id)

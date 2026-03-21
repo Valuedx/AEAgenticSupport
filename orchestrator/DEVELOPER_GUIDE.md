@@ -1,6 +1,6 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.4
+**Version:** 0.9.5
 **Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
@@ -661,3 +661,107 @@ await api.executeWorkflow(workflowId, triggerPayload, /* deterministicMode */ tr
 **`backend/app/engine/dag_runner.py`** — `_execute_parallel` reads `deterministic_mode`:
 - `True`: sorts `ready_nodes` → creates log entries in sorted order → submits in sorted order → calls `future.result()` in sorted order
 - `False` (default): original `as_completed` path, unchanged
+
+---
+
+## 🧠 18. Reflection Node — Workflow Self-Assessment
+
+**Introduced in V0.9.5**
+
+The Reflection node lets a workflow "look back" at everything that has happened so far and ask an LLM to produce a structured JSON decision. A downstream Condition node then routes based on that decision.
+
+### When to use it
+
+- **Quality gate**: after several agent nodes, ask "is the output good enough, or should we escalate?"
+- **Loop controller**: after a ForEach, ask "did enough items succeed, or do we retry?"
+- **Routing decision**: given the full execution history, pick the next department/queue/action.
+
+### How it works
+
+**File:** `backend/app/engine/reflection_handler.py`
+
+```
+Reflection node executes
+        │
+        ▼
+_build_execution_summary(context, max_history_nodes)
+  ├── Collects last N node_* keys from context (insertion order = execution order)
+  ├── Hard cap at 25 nodes regardless of config
+  ├── Truncates each to 800 chars (prevents token explosion)
+  └── Prepends trigger payload if present
+        │
+        ▼
+render_prompt(reflectionPrompt, {**context, "execution_summary": summary})
+  └── Jinja2 template — {{ execution_summary }} injects the history block
+        │
+        ▼
+call_llm(provider, model, system_prompt, user_message, temperature=0.3)
+  └── user_message always ends with "respond ONLY with a valid JSON object"
+        │
+        ▼
+_parse_json_response(raw)
+  ├── Strip ```json ... ``` fences
+  ├── json.loads() → if dict, return; if primitive, wrap {"reflection": value}
+  ├── Regex {…} extraction fallback
+  └── Last resort: {"reflection": raw, "parse_error": True}
+        │
+        ▼
+Returns {**parsed, "_usage": usage, "_raw_response": raw_response}
+  └── dag_runner stores this under context["node_X"]
+```
+
+### Configuring a Reflection node
+
+| Field | Default | What it does |
+|-------|---------|-------------|
+| `provider` | `google` | LLM provider |
+| `model` | `gemini-2.5-flash` | Model variant |
+| `reflectionPrompt` | *(required)* | Jinja2 system prompt; use `{{ execution_summary }}` |
+| `outputKeys` | `[]` | Expected top-level keys in the JSON response — warns if absent |
+| `maxHistoryNodes` | `10` | How many recent node outputs to include in the summary |
+| `temperature` | `0.3` | Lower = more deterministic JSON output |
+| `maxTokens` | `1024` | Enough for structured JSON; increase for verbose responses |
+
+### Example prompt template
+
+```jinja2
+You are a quality-control engine for an IT support workflow.
+Review the execution history and decide whether the issue has been resolved.
+
+{{ execution_summary }}
+
+Respond with a JSON object with exactly these keys:
+- "resolved": true or false
+- "confidence": 0.0–1.0
+- "next_action": one of "close_ticket", "escalate", "retry_diagnosis"
+- "reason": one-sentence explanation
+```
+
+### Example downstream condition
+
+```
+node_5.resolved == True          → close ticket branch
+node_5.next_action == "escalate" → escalate branch
+```
+
+### Key design constraint: read-only
+
+The Reflection node **never mutates `context`**. It only returns a value. The dag_runner stores that value under the node's own key. This means:
+
+- Earlier node outputs are never overwritten
+- There is no dynamic graph mutation (the DAG is Kahn-sorted upfront)
+- The pattern is fully composable with ForEach, HITL, and Condition nodes
+
+### Code path (for contributors)
+
+1. `node_handlers.dispatch_node()` matches `label == "Reflection"` and imports `_handle_reflection` from `reflection_handler.py`
+2. `_handle_reflection()` reads config, builds summary, renders prompt, calls LLM
+3. `_parse_json_response()` normalises the raw text to a dict
+4. `record_generation()` logs the call to Langfuse under `reflection:{provider}/{model}`
+5. dag_runner receives `{**parsed, "_usage": ..., "_raw_response": ...}` and stores it in context
+
+### Frontend integration
+
+- `shared/node_registry.json` — `reflection` type under `agent` category with full `config_schema`
+- `validateWorkflow.ts` — `"Reflection": ["reflectionPrompt"]` in `REQUIRED_FIELDS` blocks execution if prompt is empty
+- `expressionVariables.ts` — `"Reflection": ["_raw_response"]` in `NODE_OUTPUT_FIELDS`; user-defined `outputKeys` fields (e.g., `node_X.next_action`) are also accessible at runtime but can't be statically enumerated

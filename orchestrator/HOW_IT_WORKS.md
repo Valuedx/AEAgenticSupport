@@ -1,3 +1,5 @@
+> - **V0.9.5 Reflection Node (2026-03-22)**: New `Reflection` agent node. Drag it onto the canvas, write a `reflectionPrompt` Jinja2 template (use `{{ execution_summary }}` to get an auto-built summary of all node outputs so far), and configure expected `outputKeys`. When the workflow reaches this node, it calls the LLM, parses the JSON response, and stores it like any other node output — e.g., `node_5.next_action`. A downstream Condition node can then branch on `node_5.next_action == "escalate"`. The node is read-only: it never edits earlier node outputs. No DB migration required.
+>
 > - **V0.9.4 HITL UX (2026-03-22)**: Step 9 updated — new `GET /instances/{id}/context` endpoint returns live `context_json` + `approvalMessage` from the suspended node. `POST /callback` now accepts optional `context_patch` for operator-supplied overrides merged before resume. Frontend: `ExecutionPanel` shows a "Review & Resume" button when suspended; `HITLResumeDialog` provides approval-message display, read-only context viewer, patch editor JSON textarea, and Approve / Reject buttons.
 >
 > - **V0.9.3 Deterministic Batch Semantics (2026-03-22)**: Step 6 updated — `POST /{id}/execute` now accepts an optional `deterministic_mode: true` flag. When set, the execution engine sorts every parallel ready-batch by node ID and processes futures in submission order instead of completion order, giving identical log sequences on every run. Default behaviour (non-deterministic, maximum throughput) is unchanged.
@@ -113,7 +115,7 @@ In addition to the validation ring, node cards show type-specific summary info i
 
 | Node type | Extra info shown on card |
 |-----------|--------------------------|
-| Agent / ReAct Agent / LLM Router | Model badge (e.g. `gemini-2.5-flash`) |
+| Agent / ReAct Agent / LLM Router / Reflection | Model badge (e.g. `gemini-2.5-flash`) |
 | Merge | Strategy badge (`waitAll` or `waitAny`) |
 | ForEach | `↻ arrayExpression` monospace line (when set) |
 

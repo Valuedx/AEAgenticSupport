@@ -34,6 +34,7 @@ const NODE_OUTPUT_FIELDS: Record<string, string[]> = {
   "LLM Agent":                ["response", "input_tokens", "output_tokens"],
   "ReAct Agent":              ["response", "tool_calls", "iterations"],
   "LLM Router":               ["intent"],
+  "Reflection":               ["_raw_response"],   // user-defined outputKeys are also available but dynamic
   "MCP Tool":                 ["result"],
   "HTTP Request":             ["status_code", "body", "headers"],
   "Human Approval":           ["approved", "approver"],

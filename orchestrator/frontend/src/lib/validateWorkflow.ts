@@ -31,6 +31,7 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   "ForEach":                 ["arrayExpression"],
   "Save Conversation State": ["responseNodeId"],
   "LLM Router":              [],   // intents check done separately
+  "Reflection":              ["reflectionPrompt"],
 };
 
 // Fields that reference another node ID by value — must exist in the graph

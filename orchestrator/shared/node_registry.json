@@ -332,6 +332,53 @@
           "description": "Expression that resolves to the current user message text"
         }
       }
+    },
+    {
+      "type": "reflection",
+      "category": "agent",
+      "label": "Reflection",
+      "description": "Calls an LLM with a summary of the workflow's execution history and returns a structured JSON assessment. Downstream Condition nodes can branch on any returned field (e.g. {\"next_action\": \"escalate\"}).",
+      "icon": "brain",
+      "config_schema": {
+        "provider": {
+          "type": "string",
+          "default": "google",
+          "enum": ["google", "openai", "anthropic"],
+          "description": "LLM provider used for the reflection call"
+        },
+        "model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+          "description": "Model variant to use"
+        },
+        "reflectionPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Jinja2 system prompt template. Use {{ execution_summary }} to inject the auto-built history block, plus any other context variables."
+        },
+        "outputKeys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Expected top-level keys in the LLM's JSON response (e.g. [\"next_action\", \"confidence\"]). A warning is logged for any missing keys but execution is not blocked."
+        },
+        "maxHistoryNodes": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum number of recent node outputs to include in the execution summary (hard cap: 25)"
+        },
+        "temperature": {
+          "type": "number",
+          "default": 0.3,
+          "description": "Sampling temperature for the LLM call (0 = deterministic, 1 = creative)"
+        },
+        "maxTokens": {
+          "type": "number",
+          "default": 1024,
+          "description": "Maximum tokens for the LLM response"
+        }
+      }
     }
   ]
 }
