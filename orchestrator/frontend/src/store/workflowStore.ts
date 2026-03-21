@@ -4,6 +4,7 @@ import {
   api,
   type WorkflowOut,
   type InstanceDetailOut,
+  type InstanceContextOut,
 } from "@/lib/api";
 import { useFlowStore } from "@/store/flowStore";
 import { EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW } from "@/lib/exampleComplexWorkflow";
@@ -16,6 +17,9 @@ interface WorkflowState {
 
   activeInstance: InstanceDetailOut | null;
   isExecuting: boolean;
+
+  /** Context snapshot loaded for HITL review of a suspended instance. */
+  instanceContext: InstanceContextOut | null;
 
   loading: boolean;
   error: string | null;
@@ -33,6 +37,15 @@ interface WorkflowState {
 
   executeWorkflow: (triggerPayload?: Record<string, unknown>) => Promise<void>;
   retryInstance: (workflowId: string, instanceId: string, fromNodeId?: string) => Promise<void>;
+  /** Fetch and cache the context snapshot for a suspended instance. */
+  fetchInstanceContext: (workflowId: string, instanceId: string) => Promise<void>;
+  /** Resume a suspended instance with optional approval payload and context patch. */
+  resumeInstance: (
+    workflowId: string,
+    instanceId: string,
+    approvalPayload: Record<string, unknown>,
+    contextPatch?: Record<string, unknown>,
+  ) => Promise<void>;
   pollInstance: (workflowId: string, instanceId: string) => Promise<void>;
   streamInstance: (workflowId: string, instanceId: string) => void;
   clearExecution: () => void;
@@ -44,6 +57,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   isDirty: false,
   activeInstance: null,
   isExecuting: false,
+  instanceContext: null,
   loading: false,
   error: null,
   _sseCleanup: null,
@@ -215,6 +229,29 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     );
 
     set({ _sseCleanup: cleanup });
+  },
+
+  fetchInstanceContext: async (workflowId, instanceId) => {
+    try {
+      const ctx = await api.getInstanceContext(workflowId, instanceId);
+      set({ instanceContext: ctx });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  resumeInstance: async (workflowId, instanceId, approvalPayload, contextPatch) => {
+    set({ isExecuting: true, error: null, instanceContext: null });
+    try {
+      const instance = await api.callbackWorkflow(workflowId, approvalPayload, contextPatch);
+      set({
+        activeInstance: { ...instance, logs: get().activeInstance?.logs ?? [] },
+        isExecuting: true,
+      });
+      get().streamInstance(workflowId, instance.id);
+    } catch (e) {
+      set({ error: String(e), isExecuting: false });
+    }
   },
 
   pollInstance: async (workflowId, instanceId) => {

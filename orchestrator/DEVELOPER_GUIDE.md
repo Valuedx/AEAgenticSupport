@@ -1,6 +1,6 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.3
+**Version:** 0.9.4
 **Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
@@ -193,6 +193,45 @@ The backend now tracks `current_node_id`. If it fails, a user can hit **Retry** 
 Sometimes it is too dangerous to let an AI delete a database automatically. It needs human approval.
 If a Node's config contains an `approvalMessage` (e.g., `"Approve deletion?"`), the python code (`dag_runner.py`) will literally put itself to sleep, mark its status as `suspended`, and free up its memory.
 When a human clicks "Approve" via a webhook/Slack API, the backend wakes back up, loads its context, and continues the workflow exactly where it left off.
+
+#### HITL Review UI (V0.9.4)
+
+The orchestrator now includes a built-in review UI so operators don't need external webhooks for simple approvals.
+
+**How it works for the operator:**
+
+1. When a workflow suspends, the **Execution Panel** shows a yellow **Review & Resume** button.
+2. Clicking it fetches the current context from `GET /instances/{id}/context` (internal keys like `_trace` are stripped before display).
+3. The `HITLResumeDialog` opens showing:
+   - The node's configured **approval message** (e.g., *"About to delete 500 production records — confirm?"*).
+   - A read-only **JSON viewer** of every node's output up to the suspension point.
+   - An editable **Context Patch** textarea (JSON object) where the operator can inject corrected values — for example, overriding a specific node's output before the workflow continues.
+4. **Approve & Resume** merges the patch and calls `POST /callback` — the workflow continues.
+5. **Reject** sends `{rejected: true}` in the approval payload — downstream Condition nodes can branch on `approval.rejected`.
+
+**How to make a node require approval:**
+
+In `shared/node_registry.json`, add `approvalMessage` to the node's `config_schema`:
+
+```json
+"config_schema": {
+  "approvalMessage": {
+    "type": "string",
+    "default": "",
+    "description": "If non-empty, execution pauses here for human approval before continuing."
+  }
+}
+```
+
+Set it on any action node in the Properties panel. Leave it empty to skip the approval gate.
+
+**Context patch use cases:**
+
+| Scenario | Patch |
+|----------|-------|
+| Override a condition result | `{"node_5": {"branch": "true"}}` |
+| Inject corrected data | `{"node_3": {"score": 0.95, "label": "approved"}}` |
+| Add a manual flag | `{"manual_override": true}` |
 
 ---
 

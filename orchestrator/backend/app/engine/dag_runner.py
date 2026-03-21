@@ -155,9 +155,21 @@ def execute_graph(db: Session, instance_id: str, deterministic_mode: bool = Fals
 
 
 def resume_graph(
-    db: Session, instance_id: str, approval_payload: dict
+    db: Session,
+    instance_id: str,
+    approval_payload: dict,
+    context_patch: dict | None = None,
 ) -> None:
-    """Resume a suspended workflow from the node that caused suspension."""
+    """Resume a suspended workflow from the node that caused suspension.
+
+    Args:
+        approval_payload: Forwarded into context["approval"] so downstream
+            nodes can inspect the human's decision.
+        context_patch: Optional shallow-merge dict applied to the context
+            before re-entering the ready queue.  Use to inject corrected
+            node outputs or override any context key without rerunning
+            earlier nodes.
+    """
     instance: WorkflowInstance | None = (
         db.query(WorkflowInstance).filter_by(id=instance_id).first()
     )
@@ -175,6 +187,14 @@ def resume_graph(
 
     context: dict[str, Any] = dict(instance.context_json or {})
     context["approval"] = approval_payload
+
+    # Apply operator-supplied context overrides (HITL context patch)
+    if context_patch:
+        context.update(context_patch)
+        logger.info(
+            "Workflow %s resumed with context_patch covering keys: %s",
+            instance_id, list(context_patch.keys()),
+        )
 
     already_executed = set(context.keys()) - {"trigger", "approval"}
     _execute_ready_queue(

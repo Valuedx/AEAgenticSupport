@@ -90,6 +90,16 @@ export interface SnapshotDetailOut extends SnapshotOut {
   graph_json: { nodes: unknown[]; edges: unknown[] };
 }
 
+export interface InstanceContextOut {
+  instance_id: string;
+  status: string;
+  current_node_id: string | null;
+  /** approvalMessage extracted from the suspended node config */
+  approval_message: string | null;
+  /** execution context with internal (_-prefixed) keys stripped */
+  context_json: Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Workflow CRUD
 // ---------------------------------------------------------------------------
@@ -153,11 +163,24 @@ export const api = {
   callbackWorkflow(
     id: string,
     approvalPayload: Record<string, unknown> = {},
+    contextPatch?: Record<string, unknown>,
   ): Promise<InstanceOut> {
     return request(`/api/v1/workflows/${id}/callback`, {
       method: "POST",
-      body: JSON.stringify({ approval_payload: approvalPayload }),
+      body: JSON.stringify({
+        approval_payload: approvalPayload,
+        context_patch: contextPatch ?? null,
+      }),
     });
+  },
+
+  getInstanceContext(
+    workflowId: string,
+    instanceId: string,
+  ): Promise<InstanceContextOut> {
+    return request(
+      `/api/v1/workflows/${workflowId}/instances/${instanceId}/context`,
+    );
   },
 
   retryInstance(

@@ -1,3 +1,5 @@
+> - **V0.9.4 HITL UX (2026-03-22)**: Step 9 updated — new `GET /instances/{id}/context` endpoint returns live `context_json` + `approvalMessage` from the suspended node. `POST /callback` now accepts optional `context_patch` for operator-supplied overrides merged before resume. Frontend: `ExecutionPanel` shows a "Review & Resume" button when suspended; `HITLResumeDialog` provides approval-message display, read-only context viewer, patch editor JSON textarea, and Approve / Reject buttons.
+>
 > - **V0.9.3 Deterministic Batch Semantics (2026-03-22)**: Step 6 updated — `POST /{id}/execute` now accepts an optional `deterministic_mode: true` flag. When set, the execution engine sorts every parallel ready-batch by node ID and processes futures in submission order instead of completion order, giving identical log sequences on every run. Default behaviour (non-deterministic, maximum throughput) is unchanged.
 >
 > - **V0.9.2 UX Improvements (2026-03-21)**: New Step 5b (pre-run validation) — `validateWorkflow()` runs client-side before every execution. Checks: trigger presence, node reachability (BFS from triggers), required empty fields, broken node-ID cross-references. `ValidationDialog` blocks hard errors and allows "Run Anyway" for warnings only. Undo/Redo — `flowStore.past[]`/`future[]` history stacks (max 50); `_pushHistory()` called before add/delete/connect/drag-start/edge-delete; Ctrl+Z/Ctrl+Y keyboard shortcuts in `FlowCanvas.tsx`; toolbar Undo/Redo buttons with disabled state. Node ID chip — `PropertyInspector` now shows the node's machine ID (e.g., `node_3`) in a monospace chip at the top of the panel with a one-click copy button so users can easily reference it in expression fields on other nodes. Inline field help text — every field in `DynamicConfigForm` now renders a `FieldHint` (10px muted subtext) when the field's `config_schema` entry carries a `description`; all node types in `node_registry.json` have been populated with descriptions. ForEach/Merge canvas clarity — `AgenticNode` renders a `waitAll`/`waitAny` strategy badge for Merge nodes and a `↻ arrayExpression` monospace hint for ForEach nodes, making both nodes interpretable at a glance without opening the properties panel.
@@ -495,7 +497,7 @@ Auto-discovery means ReAct agents configured with an empty `tools` list will use
 
 ## 10. Step 9 — Human-in-the-Loop Suspension
 
-**Code:** `backend/app/engine/dag_runner.py` (suspension), `backend/app/api/workflows.py` → `POST /callback` (resume)
+**Code:** `backend/app/engine/dag_runner.py` (suspension), `backend/app/api/workflows.py` → `POST /callback` (resume), `frontend/src/components/toolbar/HITLResumeDialog.tsx` (UI)
 
 When the DAG runner encounters an Action node with `approvalMessage` in its config:
 
@@ -517,17 +519,31 @@ Check: is "approval" key in context?        │                             │
              ... time passes ...            │                             │
                                             │                             │
 POST /callback                              │                       Human approves
-  {approval_payload: {"approved": true}} ──▶│                             │
+  {approval_payload: {"approved": true},    │                             │
+   context_patch: {"node_3": {...}}}    ───▶│                             │
                                             │                             │
-resume_workflow_task.delay(instance_id)     │                             │
+resume_workflow_task.delay(...)             │                             │
   │                                         │                             │
   ├─ Load context from DB                   │                             │
   ├─ Inject approval_payload                │                             │
+  ├─ Apply context_patch (shallow merge)    │                             │
   ├─ Re-parse graph, skip executed nodes    │                             │
   └─ Continue _execute_ready_queue()        │                             │
 ```
 
 This pattern allows the workflow to sleep indefinitely without holding a worker thread. The approval can come from any channel — WhatsApp, Teams, a web UI, or a direct API call.
+
+### HITL Review UI (V0.9.4)
+
+When an execution is suspended, the **Execution Panel** shows a yellow **Review & Resume** button. Clicking it:
+
+1. Calls `GET /instances/{id}/context` → loads the live execution context and the suspended node's `approvalMessage`.
+2. Opens the **`HITLResumeDialog`**, which shows:
+   - The `approvalMessage` in a yellow alert banner.
+   - The full `context_json` in a read-only scrollable viewer.
+   - A JSON textarea pre-filled with `{}` for the operator to enter an optional context patch.
+3. **Approve & Resume** — parses the patch, calls `POST /callback` with both `approval_payload: {approved: true}` and the patch, then streams the resumed execution.
+4. **Reject** — calls `POST /callback` with `approval_payload: {rejected: true}` and no patch, allowing downstream Condition nodes to route the rejection branch.
 
 ---
 

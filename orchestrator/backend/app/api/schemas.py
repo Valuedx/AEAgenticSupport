@@ -58,6 +58,24 @@ class ExecuteRequest(BaseModel):
 
 class CallbackRequest(BaseModel):
     approval_payload: dict[str, Any] = Field(default_factory=dict)
+    context_patch: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Optional shallow-merge patch applied to the workflow context before "
+            "resuming. Keys in this dict overwrite matching keys in the existing "
+            "context_json. Use to inject corrected values (e.g., a fixed node "
+            "output) without rerunning the entire workflow from scratch."
+        ),
+    )
+
+
+class InstanceContextOut(BaseModel):
+    """Current snapshot of a suspended instance exposed for HITL review."""
+    instance_id: uuid.UUID
+    status: str
+    current_node_id: str | None
+    approval_message: str | None
+    context_json: dict[str, Any]
 
 
 class RetryRequest(BaseModel):

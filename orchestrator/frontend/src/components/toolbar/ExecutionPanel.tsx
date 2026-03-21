@@ -10,6 +10,7 @@ import {
   Copy,
   Check,
   Maximize2,
+  ClipboardCheck,
 } from "lucide-react";
 import { useState, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +24,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useWorkflowStore } from "@/store/workflowStore";
+import { HITLResumeDialog } from "@/components/toolbar/HITLResumeDialog";
 import type { ExecutionLogOut } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
@@ -204,11 +206,22 @@ export function ExecutionPanel() {
   const activeInstance = useWorkflowStore((s) => s.activeInstance);
   const isExecuting = useWorkflowStore((s) => s.isExecuting);
   const clearExecution = useWorkflowStore((s) => s.clearExecution);
+  const currentWorkflow = useWorkflowStore((s) => s.currentWorkflow);
+  const instanceContext = useWorkflowStore((s) => s.instanceContext);
+  const fetchInstanceContext = useWorkflowStore((s) => s.fetchInstanceContext);
+  const [hitlOpen, setHitlOpen] = useState(false);
 
   if (!activeInstance) return null;
 
+  const isSuspended = activeInstance.status === "suspended";
   const Icon = STATUS_ICON[activeInstance.status] ?? CircleDot;
   const color = STATUS_COLOR[activeInstance.status] ?? "text-muted-foreground";
+
+  const handleReviewResume = async () => {
+    if (!currentWorkflow) return;
+    await fetchInstanceContext(currentWorkflow.id, activeInstance.id);
+    setHitlOpen(true);
+  };
 
   return (
     <div className="absolute bottom-0 left-0 right-0 bg-card border-t shadow-lg z-10 max-h-[45%] flex flex-col">
@@ -226,6 +239,17 @@ export function ExecutionPanel() {
           </span>
         )}
         <div className="flex-1" />
+        {isSuspended && currentWorkflow && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-[11px] gap-1 text-yellow-700 border-yellow-300 hover:bg-yellow-50"
+            onClick={handleReviewResume}
+          >
+            <ClipboardCheck className="h-3 w-3" />
+            Review &amp; Resume
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="sm"
@@ -235,6 +259,15 @@ export function ExecutionPanel() {
           <X className="h-3.5 w-3.5" />
         </Button>
       </div>
+      {currentWorkflow && instanceContext && (
+        <HITLResumeDialog
+          open={hitlOpen}
+          onClose={() => setHitlOpen(false)}
+          workflowId={currentWorkflow.id}
+          instanceId={activeInstance.id}
+          context={instanceContext}
+        />
+      )}
       <Separator />
       <ScrollArea className="flex-1 px-4 py-2">
         <div className="space-y-1.5">

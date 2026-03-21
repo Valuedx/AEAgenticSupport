@@ -21,12 +21,22 @@ def execute_workflow_task(self, instance_id: str, deterministic_mode: bool = Fal
 
 
 @celery_app.task(bind=True, name="orchestrator.resume_workflow")
-def resume_workflow_task(self, instance_id: str, approval_payload: dict | None = None):
-    """Resume a suspended workflow (e.g. after human approval)."""
+def resume_workflow_task(
+    self,
+    instance_id: str,
+    approval_payload: dict | None = None,
+    context_patch: dict | None = None,
+):
+    """Resume a suspended workflow (e.g. after human approval).
+
+    Args:
+        context_patch: Optional shallow-merge dict applied to context before
+            re-entering the ready queue (HITL context edit support).
+    """
     db = SessionLocal()
     try:
         from app.engine.dag_runner import resume_graph
-        resume_graph(db, instance_id, approval_payload or {})
+        resume_graph(db, instance_id, approval_payload or {}, context_patch=context_patch)
     finally:
         db.close()
 

@@ -20,6 +20,7 @@ from app.api.schemas import (
     RetryRequest,
     InstanceOut,
     InstanceDetailOut,
+    InstanceContextOut,
     ExecutionLogOut,
     SnapshotOut,
 )
@@ -201,7 +202,7 @@ def callback_workflow(
         raise HTTPException(404, "No suspended instance found for this workflow")
 
     from app.workers.tasks import resume_workflow_task
-    resume_workflow_task.delay(str(instance.id), body.approval_payload)
+    resume_workflow_task.delay(str(instance.id), body.approval_payload, body.context_patch)
 
     instance.status = "running"
     db.commit()
@@ -330,6 +331,54 @@ def rollback_version(
     db.commit()
     db.refresh(wf)
     return wf
+
+
+@router.get("/{workflow_id}/instances/{instance_id}/context", response_model=InstanceContextOut)
+def get_instance_context(
+    workflow_id: uuid.UUID,
+    instance_id: uuid.UUID,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Return the current execution context snapshot for HITL review.
+
+    Strips internal runtime keys (prefixed with '_') before returning.
+    When the instance is suspended, also extracts the approvalMessage from
+    the suspended node's config so the UI can surface it to the operator.
+    """
+    instance = (
+        db.query(WorkflowInstance)
+        .filter_by(id=instance_id, workflow_def_id=workflow_id, tenant_id=tenant_id)
+        .first()
+    )
+    if not instance:
+        raise HTTPException(404, "Instance not found")
+
+    # Extract approvalMessage from the suspended node's config
+    approval_message: str | None = None
+    if instance.current_node_id and instance.status == "suspended":
+        graph = instance.definition.graph_json
+        node = next(
+            (n for n in graph.get("nodes", []) if n.get("id") == instance.current_node_id),
+            None,
+        )
+        if node:
+            approval_message = node.get("data", {}).get("config", {}).get("approvalMessage")
+
+    # Strip internal runtime keys before exposing to the operator
+    context_json = {
+        k: v
+        for k, v in (instance.context_json or {}).items()
+        if not k.startswith("_")
+    }
+
+    return InstanceContextOut(
+        instance_id=instance.id,
+        status=instance.status,
+        current_node_id=instance.current_node_id,
+        approval_message=approval_message,
+        context_json=context_json,
+    )
 
 
 @router.get("/{workflow_id}/instances/{instance_id}", response_model=InstanceDetailOut)
