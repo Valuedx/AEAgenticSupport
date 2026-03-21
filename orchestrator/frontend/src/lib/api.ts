@@ -161,11 +161,12 @@ export const api = {
   },
 
   callbackWorkflow(
-    id: string,
+    workflowId: string,
+    instanceId: string,
     approvalPayload: Record<string, unknown> = {},
     contextPatch?: Record<string, unknown>,
   ): Promise<InstanceOut> {
-    return request(`/api/v1/workflows/${id}/callback`, {
+    return request(`/api/v1/workflows/${workflowId}/instances/${instanceId}/callback`, {
       method: "POST",
       body: JSON.stringify({
         approval_payload: approvalPayload,

@@ -300,6 +300,18 @@ def _execute_ready_queue(
         if not ready:
             break
 
+        # ForEach / Loop nodes must always be processed individually so that
+        # their post-execution iteration dispatch fires.  If such a node is in
+        # the ready batch alongside other nodes, pull just the first one out
+        # and let the remaining nodes be picked up on the next loop iteration.
+        iteration_node_ids = [
+            nid for nid in ready
+            if nodes_map.get(nid, {}).get("data", {}).get("nodeCategory") == "logic"
+            and nodes_map.get(nid, {}).get("data", {}).get("label") in ("ForEach", "Loop")
+        ]
+        if iteration_node_ids:
+            ready = [iteration_node_ids[0]]
+
         if len(ready) == 1:
             node_id = ready[0]
             result = _execute_single_node(
@@ -822,6 +834,8 @@ def _run_loop_iterations(
                         "loop_results": all_iteration_results[nid],
                         "iterations": idx,
                     }
+                context.pop("_loop_index", None)
+                context.pop("_loop_iteration", None)
                 return  # Suspend propagates via instance status
 
         actual_iterations = idx + 1
@@ -833,6 +847,8 @@ def _run_loop_iterations(
                     "loop_results": all_iteration_results[nid],
                     "iterations": actual_iterations,
                 }
+            context.pop("_loop_index", None)
+            context.pop("_loop_iteration", None)
             _propagate_edges(loop_node_id, forward, nodes_map, context, satisfied, pruned)
             for nid in downstream_node_ids:
                 satisfied[nid] = set()
@@ -881,6 +897,10 @@ def _build_node_input(node_data: dict, context: dict[str, Any]) -> dict:
         node_input["loop_item"] = context["_loop_item"]
         node_input["loop_index"] = context.get("_loop_index", 0)
         node_input["loop_variable"] = context.get("_loop_item_var", "item")
+    # Include loop index/iteration if inside a Loop iteration (Loop sets _loop_iteration; ForEach does not)
+    elif "_loop_iteration" in context:
+        node_input["loop_index"] = context["_loop_index"]
+        node_input["loop_iteration"] = context["_loop_iteration"]
 
     return node_input
 

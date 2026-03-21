@@ -261,7 +261,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   resumeInstance: async (workflowId, instanceId, approvalPayload, contextPatch) => {
     set({ isExecuting: true, error: null, instanceContext: null });
     try {
-      const instance = await api.callbackWorkflow(workflowId, approvalPayload, contextPatch);
+      const instance = await api.callbackWorkflow(workflowId, instanceId, approvalPayload, contextPatch);
       set({
         activeInstance: { ...instance, logs: get().activeInstance?.logs ?? [] },
         isExecuting: true,

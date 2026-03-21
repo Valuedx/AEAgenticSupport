@@ -187,21 +187,21 @@ def execute_workflow(
     return instance
 
 
-@router.post("/{workflow_id}/callback", response_model=InstanceOut)
+@router.post("/{workflow_id}/instances/{instance_id}/callback", response_model=InstanceOut)
 def callback_workflow(
     workflow_id: uuid.UUID,
+    instance_id: uuid.UUID,
     body: CallbackRequest,
     tenant_id: str = Depends(get_tenant_id),
     db: Session = Depends(get_db),
 ):
     instance = (
         db.query(WorkflowInstance)
-        .filter_by(workflow_def_id=workflow_id, tenant_id=tenant_id, status="suspended")
-        .order_by(WorkflowInstance.created_at.desc())
+        .filter_by(id=instance_id, workflow_def_id=workflow_id, tenant_id=tenant_id, status="suspended")
         .first()
     )
     if not instance:
-        raise HTTPException(404, "No suspended instance found for this workflow")
+        raise HTTPException(404, f"Suspended instance {instance_id} not found for this workflow")
 
     from app.workers.tasks import resume_workflow_task
     resume_workflow_task.delay(str(instance.id), body.approval_payload, body.context_patch)
