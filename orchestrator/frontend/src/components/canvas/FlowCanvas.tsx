@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, type DragEvent } from "react";
 import {
   ReactFlow,
   Background,
@@ -33,7 +33,28 @@ export function FlowCanvas() {
   const onConnect = useFlowStore((s) => s.onConnect);
   const addNode = useFlowStore((s) => s.addNode);
   const selectNode = useFlowStore((s) => s.selectNode);
+  const undo = useFlowStore((s) => s.undo);
+  const redo = useFlowStore((s) => s.redo);
   const markDirty = useWorkflowStore((s) => s.markDirty);
+
+  // Keyboard shortcuts: Ctrl+Z → undo, Ctrl+Y / Ctrl+Shift+Z → redo
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      if (e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        markDirty();
+      } else if (e.key === "y" || (e.key === "z" && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+        markDirty();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [undo, redo, markDirty]);
 
   const onDragOver = useCallback((e: DragEvent) => {
     e.preventDefault();

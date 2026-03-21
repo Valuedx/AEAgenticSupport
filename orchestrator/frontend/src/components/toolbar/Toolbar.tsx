@@ -12,6 +12,8 @@ import {
   Pause,
   Layers,
   Cpu,
+  Undo2,
+  Redo2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,6 +54,10 @@ export function Toolbar() {
   const loadAutomationEdgeMainWorkflow = useWorkflowStore((s) => s.loadAutomationEdgeMainWorkflow);
   const nodes = useFlowStore((s) => s.nodes);
   const edges = useFlowStore((s) => s.edges);
+  const past = useFlowStore((s) => s.past);
+  const future = useFlowStore((s) => s.future);
+  const undo = useFlowStore((s) => s.undo);
+  const redo = useFlowStore((s) => s.redo);
   const nodeCount = nodes.length;
 
   const workflowName = currentWorkflow?.name || "Untitled Workflow";
@@ -136,6 +142,27 @@ export function Toolbar() {
             v{currentWorkflow.version}
           </Badge>
         )}
+
+        <Separator orientation="vertical" className="h-6" />
+
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => { undo(); }}
+          disabled={past.length === 0}
+          title="Undo (Ctrl+Z)"
+        >
+          <Undo2 className="h-4 w-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => { redo(); }}
+          disabled={future.length === 0}
+          title="Redo (Ctrl+Y)"
+        >
+          <Redo2 className="h-4 w-4" />
+        </Button>
 
         <div className="flex-1" />
 

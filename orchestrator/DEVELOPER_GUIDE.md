@@ -242,7 +242,36 @@ The canonical graph for any chat-enabled workflow is:
 
 ---
 
-## 🛡️ 7. Pre-Run Validation — Catching Mistakes Before They Run
+## ↩️ 7. Undo / Redo — Canvas History
+
+The workflow canvas supports full undo/redo with **Ctrl+Z** (undo) and **Ctrl+Y** or **Ctrl+Shift+Z** (redo). Toolbar buttons show the same actions with disabled state when history is empty.
+
+### How it works
+
+**File:** `frontend/src/store/flowStore.ts`
+
+The store maintains two history stacks: `past[]` and `future[]`, each capped at 50 snapshots. A snapshot is `{ nodes: Node[], edges: Edge[] }`.
+
+`_pushHistory()` is called automatically **before** every destructive action:
+
+| Action | When snapshot is taken |
+|--------|----------------------|
+| `addNode()` | Before the node is added |
+| `deleteNode()` | Before the node and its edges are removed |
+| `onConnect()` | Before the new edge is created |
+| `onNodesChange()` with drag | On first `dragging: true` event per drag (once per gesture) |
+| `onNodesChange()` with remove | Before a node is removed via Delete key |
+| `onEdgesChange()` with remove | Before an edge is removed via Delete key |
+
+> `updateNodeData()` (property panel edits) is **not** snapshotted because it fires on every keystroke. Config changes can be reverted by simply editing the field back.
+
+### Loading a workflow resets history
+
+Calling `replaceGraph()` (used by load, new workflow, and example loaders) always resets both `past` and `future` to empty arrays — this prevents confusing undo across different workflows.
+
+---
+
+## 🛡️ 8. Pre-Run Validation — Catching Mistakes Before They Run
 
 The orchestrator validates your workflow **in the browser** the moment you hit **Run**. This prevents common mistakes without wasting an API call.
 

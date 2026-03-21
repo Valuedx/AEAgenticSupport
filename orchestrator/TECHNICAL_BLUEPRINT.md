@@ -1,4 +1,4 @@
-> - **V0.9.2 UX Improvements (2026-03-21)**: Pre-run workflow validation (`src/lib/validateWorkflow.ts`) — checks for missing trigger, disconnected nodes, required empty fields (condition, url, toolName, arrayExpression, responseNodeId), and broken node-ID cross-references (responseNodeId, historyNodeId). `ValidationDialog` surfaces errors and warnings before execution; hard errors block run, warnings allow "Run Anyway". `Toolbar.tsx` now calls `validateWorkflow()` on every Run click.
+> - **V0.9.2 UX Improvements (2026-03-21)**: Pre-run workflow validation (`src/lib/validateWorkflow.ts`) — checks for missing trigger, disconnected nodes, required empty fields (condition, url, toolName, arrayExpression, responseNodeId), and broken node-ID cross-references (responseNodeId, historyNodeId). `ValidationDialog` surfaces errors and warnings before execution; hard errors block run, warnings allow "Run Anyway". `Toolbar.tsx` now calls `validateWorkflow()` on every Run click. Undo/Redo — `flowStore.ts` gains `past[]`/`future[]` snapshot arrays (max 50) with `_pushHistory()` called before every destructive canvas action; `FlowCanvas.tsx` registers Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z global keyboard handlers; Toolbar shows Undo/Redo buttons with disabled state when history is empty.
 >
 > - **V0.9.1 Stateful DAGs (2026-03-21)**: Added robust Stateful Re-Trigger DAG Pattern. Added `ConversationSession` PostgreSQL table with Alembic migration `0003_conversation_sessions.py` + unique index `(tenant_id, session_id)`. Added REST APIs in `conversations.py` (`GET /api/v1/conversations`, `GET /{id}`, `DELETE /{id}`). Exposes 3 new conversational memory nodes in `node_registry.json`: `Load Conversation State`, `Save Conversation State`, and `LLM Router`.
 > - **V0.9 Execution Enhancements (2026-03-21)**: ForEach loop node (`_handle_forEach`, `_run_forEach_iterations`) — iterates downstream subgraph per array element. Retry from failed node (`retry_graph()`, `POST /{id}/instances/{iid}/retry`). MCP connection pooling (`_MCPSessionPool`). Enhanced safe expression evaluator with whitelisted function/method calls (`len`, `lower`, `matches`, etc.). Snapshot pruning via Celery Beat (`prune_old_snapshots`, `ORCHESTRATOR_MAX_SNAPSHOTS`). Environment variable mapping (`{{ env.SECRET_NAME }}` resolved from vault). Langfuse parallel context fix — explicit trace propagation into threads. Frontend `retryInstance` action.
@@ -151,16 +151,22 @@ The single Zustand store manages all canvas state:
 | `nodes` | `Node[]` | React Flow node objects |
 | `edges` | `Edge[]` | React Flow edge connections |
 | `selectedNodeId` | `string \| null` | Currently selected node for inspector |
+| `past` | `Snapshot[]` | Undo history stack (max 50 entries) |
+| `future` | `Snapshot[]` | Redo history stack (max 50 entries) |
+| `_draggingNodeIds` | `Set<string>` | Tracks in-flight drag operations to avoid duplicate snapshots |
 
 | Action | Signature | Description |
 |--------|-----------|-------------|
-| `onNodesChange` | `OnNodesChange` | React Flow node change handler (move, resize) |
-| `onEdgesChange` | `OnEdgesChange` | React Flow edge change handler |
-| `onConnect` | `OnConnect` | New edge creation between handles |
-| `addNode` | `(category, label, position, config?) → void` | Create node at canvas position |
+| `onNodesChange` | `OnNodesChange` | React Flow node change handler; snapshots before drag-start and remove |
+| `onEdgesChange` | `OnEdgesChange` | React Flow edge change handler; snapshots before remove |
+| `onConnect` | `OnConnect` | New edge creation; always snapshots before connecting |
+| `addNode` | `(category, label, position, config?) → void` | Create node at canvas position; snapshots before creation |
 | `selectNode` | `(id \| null) → void` | Set selection for property inspector |
 | `updateNodeData` | `(id, partial) → void` | Merge data updates from inspector forms |
-| `deleteNode` | `(id) → void` | Remove node and all connected edges |
+| `deleteNode` | `(id) → void` | Remove node and connected edges; snapshots before deletion |
+| `undo` | `() → void` | Restore previous canvas state from `past` stack |
+| `redo` | `() → void` | Replay next state from `future` stack |
+| `_pushHistory` | `() → void` | Internal: push current `{nodes, edges}` snapshot to `past`, clear `future` |
 
 ### 3.3 Node Categories and Palette
 
