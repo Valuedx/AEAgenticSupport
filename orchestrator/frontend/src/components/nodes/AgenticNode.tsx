@@ -13,12 +13,15 @@ import {
   Route,
   History,
   Save,
+  AlertCircle,
+  AlertTriangle,
   type LucideIcon,
 } from "lucide-react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { AgenticNodeData, NodeCategory } from "@/types/nodes";
 import { cn } from "@/lib/utils";
+import { useNodeValidation } from "@/lib/useNodeValidation";
 
 const ICON_MAP: Record<string, LucideIcon> = {
   webhook: Webhook,
@@ -71,7 +74,7 @@ const STATUS_DOT: Record<string, string> = {
   suspended: "bg-yellow-500",
 };
 
-function AgenticNodeComponent({ data, selected }: NodeProps) {
+function AgenticNodeComponent({ id, data, selected }: NodeProps) {
   const nodeData = data as unknown as AgenticNodeData;
   const { label, nodeCategory, config, status = "idle" } = nodeData;
   const styles = CATEGORY_STYLES[nodeCategory];
@@ -82,13 +85,23 @@ function AgenticNodeComponent({ data, selected }: NodeProps) {
   const hasOutput = nodeCategory !== "logic" || label !== "Merge";
   const isCondition = nodeCategory === "logic" && label === "Condition";
 
+  // Design-time validation indicators
+  const { errorIds, warningIds } = useNodeValidation();
+  const hasError = errorIds.has(id);
+  const hasWarning = !hasError && warningIds.has(id);
+
   return (
     <Card
       className={cn(
         "min-w-[180px] max-w-[220px] border-2 shadow-md transition-shadow",
         styles.border,
         styles.bg,
+        // Selection ring takes highest priority
         selected && "ring-2 ring-primary shadow-lg",
+        // Error ring when not selected
+        !selected && hasError && "ring-2 ring-red-500/70",
+        // Warning ring when not selected and no error
+        !selected && hasWarning && "ring-2 ring-yellow-500/60",
       )}
     >
       {hasInput && (
@@ -109,7 +122,15 @@ function AgenticNodeComponent({ data, selected }: NodeProps) {
               {label}
             </CardTitle>
           </div>
-          <span className={cn("h-2 w-2 rounded-full shrink-0", STATUS_DOT[status])} />
+          {hasError && (
+            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-500" title="This node has configuration errors" />
+          )}
+          {hasWarning && (
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-yellow-500" title="This node is not connected to a trigger" />
+          )}
+          {!hasError && !hasWarning && (
+            <span className={cn("h-2 w-2 rounded-full shrink-0", STATUS_DOT[status])} />
+          )}
         </div>
         <div className="flex items-center gap-1.5 mt-1.5">
           <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0", styles.badge)}>

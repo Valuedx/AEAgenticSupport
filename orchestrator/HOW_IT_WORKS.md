@@ -92,6 +92,19 @@ The entire app is wrapped in `ReactFlowProvider` (required by React Flow for coo
 
 If `VITE_AUTH_MODE=oidc` and no token is stored in `localStorage`, the OIDC `LoginPage` is shown instead.
 
+### Node card visual indicators
+
+Each node card shows one of four visual states at a glance, evaluated in priority order:
+
+| Priority | Visual | Meaning |
+|----------|--------|---------|
+| 1 (highest) | Blue ring | Node is currently selected |
+| 2 | Red ring + `AlertCircle` icon | Configuration error (empty required field, broken node-ID reference) |
+| 3 | Yellow ring + `AlertTriangle` icon | Warning — node is not reachable from any trigger |
+| 4 (default) | Coloured dot | Runtime status: grey=idle, blue=running, green=completed, red=failed, yellow=suspended |
+
+The `useNodeValidation` hook (`src/lib/useNodeValidation.ts`) runs `validateWorkflow()` inside a `useMemo` whenever `nodes` or `edges` change, returning `errorIds` and `warningIds` sets. Each `AgenticNode` reads its own `id` from NodeProps and checks membership in these sets.
+
 ---
 
 ## 3. Step 2 — Drag-and-Drop: Palette to Canvas
