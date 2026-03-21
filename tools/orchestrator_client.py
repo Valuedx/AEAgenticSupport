@@ -23,6 +23,59 @@ logger = logging.getLogger("ops_agent.orchestrator_client")
 _POLL_INTERVAL = 2   # seconds between status checks
 
 
+def _orchestrator_http_error_message(resp: httpx.Response, *, what: str) -> str:
+    """Turn a failed orchestrator HTTP response into a short operator-facing message."""
+    code = resp.status_code
+    detail = ""
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            raw = data.get("detail") or data.get("message")
+            if isinstance(raw, list):
+                detail = "; ".join(
+                    str(item) if not isinstance(item, dict) else str(item.get("msg", item))
+                    for item in raw[:5]
+                )
+            elif raw is not None:
+                detail = str(raw).strip()
+    except Exception:
+        pass
+    if not detail and (resp.text or "").strip():
+        detail = (resp.text or "").strip()[:240]
+
+    if code == 401:
+        hint = (
+            "Orchestrator returned 401 Unauthorized. When the hub uses JWT mode "
+            "(`ORCHESTRATOR_AUTH_MODE=jwt`), set `ORCHESTRATOR_API_TOKEN` in AI Studio’s "
+            "`.env` to a valid service token. In dev mode, ensure `ORCHESTRATOR_TENANT_ID` "
+            "matches the hub."
+        )
+    elif code == 403:
+        hint = "Orchestrator returned 403 Forbidden (tenant or token not allowed for this action)."
+    elif code == 404:
+        hint = "Orchestrator returned 404 Not Found (unknown workflow id, instance id, or path)."
+    elif code == 422:
+        hint = "Orchestrator returned 422 Unprocessable Entity (invalid request body or parameters)."
+    elif code == 429:
+        hint = "Orchestrator returned 429 Too Many Requests (rate or execution quota exceeded)."
+    elif code in (502, 503, 504):
+        hint = (
+            f"Orchestrator returned {code} (service unavailable or gateway timeout). "
+            "Check that the AE AI Hub API and workers are up."
+        )
+    else:
+        hint = f"Orchestrator HTTP {code} while {what}."
+
+    if detail:
+        return f"{hint} Detail: {detail}"
+    return hint
+
+
+def _raise_for_orchestrator_status(resp: httpx.Response, *, what: str) -> None:
+    if resp.is_error:
+        raise RuntimeError(_orchestrator_http_error_message(resp, what=what)) from None
+
+
 class OrchestratorClient:
     """Thin synchronous wrapper around the orchestrator backend API."""
 
@@ -63,7 +116,7 @@ class OrchestratorClient:
     def list_workflows(self) -> list[dict[str, Any]]:
         """Return all workflow definitions for this tenant."""
         resp = self._client.get(self._url("/workflows"), headers=self._headers())
-        resp.raise_for_status()
+        _raise_for_orchestrator_status(resp, what="listing workflows")
         return resp.json()
 
     def execute(
@@ -78,7 +131,9 @@ class OrchestratorClient:
             content=body,
             headers=self._headers(),
         )
-        resp.raise_for_status()
+        _raise_for_orchestrator_status(
+            resp, what=f"starting workflow {workflow_id!r}"
+        )
         return resp.json()
 
     def get_context(
@@ -91,7 +146,10 @@ class OrchestratorClient:
             self._url(f"/workflows/{workflow_id}/instances/{instance_id}/context"),
             headers=self._headers(),
         )
-        resp.raise_for_status()
+        _raise_for_orchestrator_status(
+            resp,
+            what=f"fetching context for workflow {workflow_id!r} instance {instance_id!r}",
+        )
         return resp.json()
 
     def run_and_wait(

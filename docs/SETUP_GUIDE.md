@@ -1,3 +1,5 @@
+> - **Visual orchestrator — Studio `.env` (2026-03-21)**: Section 3.1.1 documents `ORCHESTRATOR_BASE_URL`, `ORCHESTRATOR_TENANT_ID`, `ORCHESTRATOR_API_TOKEN`, and `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` for the AI Studio / agent server (distinct from hub `orchestrator/backend/` settings). `.env.example` includes the same optional block.
+>
 > - **LangFuse Observability — Full Coverage (2026-03-20)**:
 >   - Added optional LangFuse integration for full LLM observability (traces, generations, spans).
 >   - **Core path**: orchestrator turns, LLM calls (`chat`, `chat_with_tools`), tool executions, RAG searches, embeddings, approval classification.
@@ -346,7 +348,24 @@ APP_CONTROL_CENTER_PATH=state/app_control_center.json
 TOOL_OVERRIDE_PATH=state/tool_overrides.json
 SCHEDULER_CATALOG_PATH=state/scheduler_catalog.json
 DOCS_CATALOG_PATH=state/docs_catalog.json
+
+# Visual orchestrator (AE AI Hub) — optional; see §3.1.1
+# ORCHESTRATOR_BASE_URL=http://localhost:8001
+# ORCHESTRATOR_TENANT_ID=default
+# ORCHESTRATOR_API_TOKEN=
+# ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=false
 ```
+
+### 3.1.1 Visual orchestrator bridge (optional)
+
+Use these variables on the **AI Studio / agent server** `.env` (the one read by `config/settings.py`) when Studio should reach the **AE AI Hub** API — for example the `orchestrator_workflow_id` proxy in `handle_chat_message()`, or the optional `list_workflows` / `run_workflow` tools. They are **not** the same as the hub service variables under `orchestrator/backend/` (database, Redis, LLM keys, etc.); for deploying the hub itself, see `orchestrator/SETUP_GUIDE.md`.
+
+| Variable | Required | Example | Purpose |
+|----------|----------|---------|---------|
+| `ORCHESTRATOR_BASE_URL` | No | `http://localhost:8001` | Hub FastAPI base URL (no trailing path). |
+| `ORCHESTRATOR_TENANT_ID` | No | `default` | Sent as `X-Tenant-Id`; must match hub expectations (JWT mode uses token claims). |
+| `ORCHESTRATOR_API_TOKEN` | When hub uses JWT | *(service token)* | `Authorization: Bearer …` when `ORCHESTRATOR_AUTH_MODE=jwt` on the hub. |
+| `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` | No | `false` | If `true`, Studio blocks on `run_and_wait` for metadata-triggered runs; if `false` (default), only enqueues and returns instance id + poll URLs. Per-request override: `orchestrator_wait_for_result` in `user_metadata`. |
 
 ### 3.2 Set environment variables on the server
 

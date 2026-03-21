@@ -71,6 +71,26 @@ class TestOrchestratorClient(unittest.TestCase):
         self.assertEqual(h["X-Tenant-Id"], "tenant-a")
         c.close()
 
+    def test_execute_maps_401_to_operator_hint(self):
+        def handler(request: httpx.Request):
+            if request.method == "POST" and request.url.path.endswith("/execute"):
+                return httpx.Response(
+                    401,
+                    json={"detail": "Invalid or expired token"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        http = httpx.Client(transport=transport, base_url="http://orch.test")
+        c = OrchestratorClient(http_client=http)
+        with self.assertRaises(RuntimeError) as ar:
+            c.execute("wf-1", {"a": 1})
+        msg = str(ar.exception)
+        self.assertIn("401", msg)
+        self.assertIn("ORCHESTRATOR_API_TOKEN", msg)
+        self.assertIn("Invalid or expired token", msg)
+        c.close()
+
     def test_run_and_wait_completed(self):
         calls = {"ctx": 0}
 
