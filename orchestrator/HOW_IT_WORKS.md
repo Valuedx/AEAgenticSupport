@@ -214,7 +214,40 @@ This gives every save an immutable point-in-time backup. The version badge in th
 
 ---
 
-## 7. Step 5b — Pre-Run Validation (Client-Side)
+## 7. Step 5a — Undo / Redo (Client-Side Canvas History)
+
+**Code:** `frontend/src/store/flowStore.ts`, `frontend/src/components/canvas/FlowCanvas.tsx`
+
+Every destructive canvas action is tracked in two in-memory stacks inside the Zustand store so users can freely experiment and reverse mistakes without saving.
+
+```
+User action (add / delete / connect / drag)
+      │
+      ▼
+_pushHistory()
+  → push {nodes, edges} snapshot to past[]
+  → clear future[]
+      │
+      ▼
+Apply the change to canvas
+
+Ctrl+Z (undo)                      Ctrl+Y / Ctrl+Shift+Z (redo)
+      │                                       │
+      ▼                                       ▼
+pop past[last]               pop future[0]
+push current to future[]     push current to past[]
+set nodes/edges = snapshot   set nodes/edges = snapshot
+```
+
+Key rules:
+- **Max 50 snapshots** in each direction — older history is evicted.
+- **Drag captures once per gesture** via `_draggingNodeIds`: the first `dragging: true` event pushes a snapshot; subsequent pixel-by-pixel events do not.
+- **Config edits are not snapshotted** — property panel keystrokes fire too frequently; users edit the field back instead.
+- **`replaceGraph()` resets both stacks** — loading a different workflow always starts with a clean history.
+
+---
+
+## Step 5b — Pre-Run Validation (Client-Side)
 
 **Code:** `frontend/src/lib/validateWorkflow.ts`, `frontend/src/components/toolbar/ValidationDialog.tsx`
 
