@@ -132,7 +132,7 @@ function AgenticNodeComponent({ id, data, selected }: NodeProps) {
             <span className={cn("h-2 w-2 rounded-full shrink-0", STATUS_DOT[status])} />
           )}
         </div>
-        <div className="flex items-center gap-1.5 mt-1.5">
+        <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
           <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0", styles.badge)}>
             {nodeCategory}
           </Badge>
@@ -141,7 +141,17 @@ function AgenticNodeComponent({ id, data, selected }: NodeProps) {
               {String(config.model)}
             </Badge>
           )}
+          {label === "Merge" && config?.strategy != null && (
+            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+              {String(config.strategy)}
+            </Badge>
+          )}
         </div>
+        {label === "ForEach" && config?.arrayExpression && (
+          <p className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight" title={String(config.arrayExpression)}>
+            ↻ {String(config.arrayExpression)}
+          </p>
+        )}
       </CardHeader>
 
       {isCondition ? (

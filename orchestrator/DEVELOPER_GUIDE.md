@@ -526,3 +526,42 @@ Every renderer branch in `DynamicConfigForm` ends with:
 ```
 
 This covers all nine field types: enum/Select, array/ToolMultiSelect, array/JSON textarea, object/JSON textarea, boolean/checkbox, number/Input, ToolSingleSelect, ExpressionInput, and plain string/Input.
+
+## 🔁 16. ForEach & Merge — Canvas-Level UX Clarity
+
+These two logic nodes now surface key config on the canvas card so users don't have to open the Properties panel to understand what they do.
+
+**File:** `frontend/src/components/nodes/AgenticNode.tsx`
+
+### Merge — strategy badge
+
+The `waitAll`/`waitAny` strategy is shown as a secondary badge next to the category pill:
+
+```tsx
+{label === "Merge" && config?.strategy != null && (
+  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+    {String(config.strategy)}
+  </Badge>
+)}
+```
+
+This mirrors the pattern already used for agent model badges. If you add a new strategy option to `node_registry.json`, it appears automatically.
+
+### ForEach — array expression hint
+
+When `arrayExpression` is set, a small `↻ expr` line appears below the badge row:
+
+```tsx
+{label === "ForEach" && config?.arrayExpression && (
+  <p className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight"
+     title={String(config.arrayExpression)}>
+    ↻ {String(config.arrayExpression)}
+  </p>
+)}
+```
+
+The line is `truncate` (with full text in `title` for hover) so it doesn't blow out the card width. When the field is empty (node just dropped, not configured) the line is hidden entirely.
+
+### Adding similar hints for your own node
+
+Follow the same pattern — guard with `label === "YourNodeLabel" && config?.yourField` and render a `<p>` or `<Badge>` inside `CardHeader` after the badge `<div>`. Keep the text short and `truncate` anything that could be long.
