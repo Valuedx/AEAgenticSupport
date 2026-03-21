@@ -160,7 +160,13 @@ async def stream_instance(
                         }
                         yield f"event: status\ndata: {json.dumps(status_data)}\n\n"
 
-                    if inst.status in ("completed", "failed", "suspended"):
+                    if inst.status in (
+                        "completed",
+                        "failed",
+                        "suspended",
+                        "cancelled",
+                        "paused",
+                    ):
                         final = {
                             "instance_status": inst.status,
                             "completed_at": inst.completed_at,

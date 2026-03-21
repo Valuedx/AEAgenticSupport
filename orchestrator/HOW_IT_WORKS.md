@@ -1,3 +1,5 @@
+> - **V0.9.11 Operator pause / cancel / resume (2026-03-22)**: While a run is **queued** or **running**, the execution panel offers **Pause** (cooperative pause after the current node), **Stop** (cooperative **cancel**), and (same timing) the SSE stream ends when the instance reaches **`paused`** or **`cancelled`**. **Resume** continues a **`paused`** run via `POST …/resume-paused` (optional `context_patch`). From **`paused`**, **Stop** abandons the run (immediate **`cancelled`**). Distinct from HITL **`suspended`** + **Review & Resume** (`POST …/callback`). DB: `cancel_requested`, `pause_requested` (migrations `0005`, `0006`). See `TECHNICAL_BLUEPRINT.md` §4.5, §5.2, §6.11.
+>
 > - **V0.9.10 Bridge reply + display names (2026-03-22)**: **Bridge User Reply** node promotes `orchestrator_user_reply` to context root for Studio/Teams sync replies; parent `MessageGateway` prefers it, then heuristic extraction, then JSON (`ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE`). Optional **`displayName`** on canvas nodes (registry **`label`** unchanged) — see Step 4 / Step 17 and `TECHNICAL_BLUEPRINT.md` §3.4.1, §6.8, §10.
 >
 > - **Studio Proxy Bridge (2026-03-22)**: Step 17 — AI Studio proxy via `orchestrator_workflow_id` in `user_metadata`. **Default async:** enqueue only; optional `orchestrator_wait_for_result` / `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` enables blocking poll. Merges chat fields into the trigger when absent; `ORCHESTRATOR_API_TOKEN` for JWT; sync mode returns HITL + callback hints. Tests: `tests/test_orchestrator_bridge.py`. See Step 17 and `orchestrator/TECHNICAL_BLUEPRINT.md` §10.
@@ -36,9 +38,9 @@
 
 ## AE AI Hub — How It Works (Step-by-Step)
 
-**Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
+**Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it. For contributor-focused topics (custom nodes, `safe_eval`, pause/cancel internals), see `DEVELOPER_GUIDE.md`.
 
-**Version:** 0.9.10
+**Version:** 0.9.11
 **Last updated:** 2026-03-22
 
 ---
@@ -391,6 +393,24 @@ POST /api/v1/workflows/{id}/execute
 ```
 
 When enabled, every parallel ready-batch is sorted by node ID before submission, and the engine waits for each future in that fixed order rather than using `as_completed`. Execution logs will appear in the same node sequence on every run, which makes debugging and test assertions against log order reliable. Default is `false` (maximum throughput).
+
+### Pause, Stop, and Resume (V0.9.11)
+
+While the instance is **`queued`** or **`running`**, the **Execution** panel shows:
+
+| Control | Effect |
+|---------|--------|
+| **Pause** | Sets `pause_requested`. After the **current node** finishes, status becomes **`paused`** and context is saved. Does **not** set `completed_at`. |
+| **Stop** | Sets `cancel_requested`. After the current node finishes, status becomes **`cancelled`** and `completed_at` is set. |
+
+When status is **`paused`**:
+
+| Control | Effect |
+|---------|--------|
+| **Resume** | `POST /api/v1/workflows/{workflow_id}/instances/{instance_id}/resume-paused` (optional JSON `{"context_patch": {...}}`). Celery runs `resume_paused_graph` — same ready-queue continuation as HITL resume, but without injecting `approval`. Reconnects the SSE stream from the client. |
+| **Stop** | Abandons the run: **`cancelled`** immediately (no worker round-trip). |
+
+**HITL** (**`suspended`**) is unchanged: use **Review & Resume** and `POST …/callback` with `approval_payload` / `context_patch`. Pause/resume APIs do not apply to `suspended` instances.
 
 ---
 

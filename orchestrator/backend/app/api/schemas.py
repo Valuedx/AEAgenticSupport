@@ -85,6 +85,18 @@ class RetryRequest(BaseModel):
     )
 
 
+class ResumePausedRequest(BaseModel):
+    """Resume a workflow instance that was paused between nodes."""
+
+    context_patch: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Optional shallow-merge patch applied to context before resuming "
+            "(same semantics as HITL callback context_patch)."
+        ),
+    )
+
+
 class InstanceOut(BaseModel):
     id: uuid.UUID
     tenant_id: str

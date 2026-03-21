@@ -4,6 +4,10 @@ import {
   CircleDot,
   Loader2,
   Pause,
+  PauseCircle,
+  Ban,
+  StopCircle,
+  Play,
   X,
   ChevronDown,
   ChevronUp,
@@ -135,6 +139,9 @@ const STATUS_ICON: Record<string, typeof CircleDot> = {
   completed: CircleCheck,
   failed: CircleX,
   suspended: Pause,
+  paused: PauseCircle,
+  cancelled: Ban,
+  queued: CircleDot,
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -143,6 +150,8 @@ const STATUS_COLOR: Record<string, string> = {
   completed: "text-green-500",
   failed: "text-red-500",
   suspended: "text-yellow-500",
+  cancelled: "text-orange-500",
+  queued: "text-muted-foreground",
 };
 
 function LogEntry({
@@ -224,6 +233,9 @@ export function ExecutionPanel() {
   const activeInstance = useWorkflowStore((s) => s.activeInstance);
   const isExecuting = useWorkflowStore((s) => s.isExecuting);
   const clearExecution = useWorkflowStore((s) => s.clearExecution);
+  const cancelInstance = useWorkflowStore((s) => s.cancelInstance);
+  const pauseInstance = useWorkflowStore((s) => s.pauseInstance);
+  const resumePausedInstance = useWorkflowStore((s) => s.resumePausedInstance);
   const currentWorkflow = useWorkflowStore((s) => s.currentWorkflow);
   const instanceContext = useWorkflowStore((s) => s.instanceContext);
   const fetchInstanceContext = useWorkflowStore((s) => s.fetchInstanceContext);
@@ -233,6 +245,10 @@ export function ExecutionPanel() {
   if (!activeInstance) return null;
 
   const isSuspended = activeInstance.status === "suspended";
+  const canStop =
+    !!currentWorkflow &&
+    isExecuting &&
+    (activeInstance.status === "running" || activeInstance.status === "queued");
   const Icon = STATUS_ICON[activeInstance.status] ?? CircleDot;
   const color = STATUS_COLOR[activeInstance.status] ?? "text-muted-foreground";
 
@@ -258,6 +274,46 @@ export function ExecutionPanel() {
           </span>
         )}
         <div className="flex-1" />
+        {canPause && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-[11px] gap-1 text-cyan-700 border-cyan-300 hover:bg-cyan-50 dark:text-cyan-300 dark:border-cyan-800 dark:hover:bg-cyan-950/40"
+            title="Pause after the current node finishes (same as Stop timing, but you can resume)"
+            onClick={() => pauseInstance(currentWorkflow!.id, activeInstance.id)}
+          >
+            <PauseCircle className="h-3 w-3" />
+            Pause
+          </Button>
+        )}
+        {canResumePaused && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-[11px] gap-1 text-cyan-700 border-cyan-300 hover:bg-cyan-50"
+            title="Continue from this paused run"
+            onClick={() => resumePausedInstance(currentWorkflow!.id, activeInstance.id)}
+          >
+            <Play className="h-3 w-3" />
+            Resume
+          </Button>
+        )}
+        {canStop && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-[11px] gap-1 text-orange-700 border-orange-300 hover:bg-orange-50 dark:text-orange-300 dark:border-orange-800 dark:hover:bg-orange-950/40"
+            title={
+              activeInstance.status === "paused"
+                ? "Discard this run (cancelled)"
+                : "Stop after the current node finishes (does not interrupt mid-node)"
+            }
+            onClick={() => cancelInstance(currentWorkflow!.id, activeInstance.id)}
+          >
+            <StopCircle className="h-3 w-3" />
+            Stop
+          </Button>
+        )}
         {isSuspended && currentWorkflow && (
           <Button
             variant="outline"

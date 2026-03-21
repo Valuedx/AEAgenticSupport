@@ -1,3 +1,5 @@
+> - **V0.9.11 Operator execution control (2026-03-22)**: Cooperative **cancel**, **pause**, and **resume** between nodes (the current node always finishes; no mid–LLM-call interrupt). New DB columns on `workflow_instances`: `cancel_requested`, `pause_requested` (Alembic `0005_workflow_cancel_requested.py`, `0006_workflow_pause_requested.py`). `dag_runner` exposes `_finalize_cancelled`, `_finalize_paused`, and `_abort_if_cancel_or_pause` — **cancel wins** if both flags are set. Instance statuses: `cancelled` (terminal, sets `completed_at`), `paused` (operator pause, not HITL — `completed_at` stays null). **API:** `POST /{workflow_id}/instances/{instance_id}/cancel` (queued/running: sets `cancel_requested`; **paused**: immediate `cancelled`), `POST …/pause` (sets `pause_requested`), `POST …/resume-paused` (body optional `context_patch`, Celery `resume_paused_workflow_task` → `resume_paused_graph`). **SSE** (`sse.py`) ends the stream with `done` for `cancelled` and `paused` (same pattern as `suspended`). **Frontend:** `ExecutionPanel` — Pause, Resume (when `paused`), Stop (cooperative cancel while running; **discard** when paused). **`workflowStore`:** `cancelInstance`, `pauseInstance`, `resumePausedInstance`. **`tools/orchestrator_client.py`:** `cancel()`, `pause()`, `resume_paused()`; `run_and_wait()` returns context when status is `cancelled` or `paused`. See §4.5, §5.2, §6.11.
+>
 > - **V0.9.10 Bridge reply UX + canvas display names (2026-03-22)**: **Bridge User Reply** action node (`bridge_user_reply` in `node_registry.json`) sets the final chat string for the AI Studio proxy: handler `_handle_bridge_user_reply` resolves `messageExpression` (safe_eval) or `responseNodeId` (same pattern as Save Conversation State); `dag_runner._promote_orchestrator_user_reply()` copies non-empty `orchestrator_user_reply` to **context root** after each completed node so `GET …/context` exposes it for Studio/Teams. Parent `gateway/message_gateway.py`: sync completion prefers top-level `orchestrator_user_reply`, then `_extract_user_facing_orchestrator_reply()` (longest LLM/ReAct `response`, skipping short router JSON); `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` / `orchestrator_chat_reply_mode` (`auto` vs `full_context`); `orchestrator_include_context_json`; clearer **suspended** bridge text. Frontend: optional `displayName` on `AgenticNodeData` + `nodeCanvasTitle()` for human-friendly canvas titles while **registry `label`** stays the engine key; PropertyInspector splits **Display name** vs **Engine type**; expression picker groups use canvas titles; `validateWorkflow` messages use canvas titles. Example workflows (`exampleMainAppWorkflow.ts`, `exampleComplexWorkflow.ts`) use `displayName` and per-branch Bridge nodes. Tests: `tests/test_orchestrator_bridge.py`.
 >
 > - **Studio Proxy Bridge (2026-03-22)**: AI Studio proxy via `orchestrator_workflow_id` in `user_metadata`. **Default async** (enqueue + instance id / poll URLs); `orchestrator_wait_for_result` or `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` selects blocking `run_and_wait`. Merges chat fields into trigger; Bearer via `ORCHESTRATOR_API_TOKEN`; sync suspended path uses `return_on_suspended=True`. Tests: `tests/test_orchestrator_bridge.py`. Config adds `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT`. Section 10 updated.
@@ -24,9 +26,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9.10
+**Version:** 0.9.11
 **Last updated:** 2026-03-22
-**Status:** V0.9.10 Bridge User Reply + Studio chat formatting + `displayName`; V0.9.9 Loop Node; V0.9.8 Rich Token Streaming; V0.9.7 Checkpoint-aware Langfuse; V0.9.6 Checkpointing; V0.9.5 Reflection; V0.9.4 HITL UX; V0.9.3 Deterministic batch; V0.9.2 UX; V0.9.1 Stateful DAGs; V0.9 execution; V0.8 enterprise; earlier milestones through V0.1
+**Status:** V0.9.11 Operator cancel/pause/resume; V0.9.10 Bridge User Reply + Studio chat formatting + `displayName`; V0.9.9 Loop Node; V0.9.8 Rich Token Streaming; V0.9.7 Checkpoint-aware Langfuse; V0.9.6 Checkpointing; V0.9.5 Reflection; V0.9.4 HITL UX; V0.9.3 Deterministic batch; V0.9.2 UX; V0.9.1 Stateful DAGs; V0.9 execution; V0.8 enterprise; earlier milestones through V0.1
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -66,6 +68,8 @@ The AE AI Hub is an **add-on module** (sidecar) to AutomationEdge AI Studio. It 
 
 This module does **not** modify any existing `AEAgenticSupport` code. It runs as an independent service pair (React frontend + FastAPI backend) that consumes the existing MCP server's 106 tools as a client.
 
+**Documentation set:** `SETUP_GUIDE.md` (install and migrations), `HOW_IT_WORKS.md` (operator-facing steps), `DEVELOPER_GUIDE.md` (extending nodes, safe_eval, execution-control internals, debugging).
+
 **Relationship to parent project:**
 
 | Concern | Parent (`AEAgenticSupport`) | Orchestrator (`orchestrator/`) |
@@ -102,7 +106,8 @@ This module does **not** modify any existing `AEAgenticSupport` code. It runs as
 │                                                                      │
 │  POST /api/v1/workflows          — Save graph JSON                   │
 │  POST /api/v1/workflows/{id}/execute  — Enqueue to Celery            │
-│  POST /api/v1/workflows/{id}/callback — Resume suspended workflow    │
+│  POST /api/v1/workflows/{id}/instances/{iid}/callback — HITL resume  │
+│  POST /api/v1/workflows/{id}/instances/{iid}/pause|resume-paused|cancel │
 │  GET  /api/v1/workflows/{id}/status   — Execution logs               │
 │  GET  /api/v1/tools                   — MCP palette hydration        │
 └────────────────────┬─────────────────────────────────────────────────┘
@@ -441,7 +446,11 @@ prompts to be reusable across different workflow topologies.
 | `PATCH` | `/{workflow_id}` | 200 | Update name/description/graph (bumps version) |
 | `DELETE` | `/{workflow_id}` | 204 | Delete workflow and cascade instances |
 | `POST` | `/{workflow_id}/execute` | 202 | Create instance, enqueue to Celery |
-| `POST` | `/{workflow_id}/callback` | 200 | Resume most recent suspended instance |
+| `POST` | `/{workflow_id}/instances/{instance_id}/callback` | 200 | Resume **suspended** (HITL) instance; optional `context_patch` |
+| `POST` | `/{workflow_id}/instances/{instance_id}/retry` | 200 | Retry **failed** instance (`RetryRequest`) |
+| `POST` | `/{workflow_id}/instances/{instance_id}/pause` | 200 | Request cooperative **pause** after current node (`pause_requested`) |
+| `POST` | `/{workflow_id}/instances/{instance_id}/resume-paused` | 200 | Resume **paused** run (`ResumePausedRequest`, optional `context_patch`) |
+| `POST` | `/{workflow_id}/instances/{instance_id}/cancel` | 200 | Request **cancel** after current node, or abandon **paused** run |
 | `GET` | `/{workflow_id}/status` | 200 | List execution instances (limit 50) |
 | `GET` | `/{workflow_id}/instances/{instance_id}` | 200 | Instance detail with execution logs |
 | `GET` | `/{workflow_id}/instances/{instance_id}/checkpoints` | 200 | List per-node checkpoints (no context payload) |
@@ -493,13 +502,15 @@ One row per execution run of a workflow definition.
 | `id` | `UUID` (PK) | Auto-generated |
 | `tenant_id` | `VARCHAR(64)` | Indexed |
 | `workflow_def_id` | `UUID` (FK) | References `workflow_definitions.id` |
-| `status` | `VARCHAR(32)` | `queued` → `running` → `completed` / `failed` / `suspended` |
+| `status` | `VARCHAR(32)` | `queued` → `running` → `completed` / `failed` / `suspended` / `paused` / `cancelled` |
 | `trigger_payload` | `JSONB` | Input data from webhook/schedule |
 | `context_json` | `JSONB` | Accumulated node outputs during execution |
 | `current_node_id` | `VARCHAR(128)` | Last node executed (for resume) |
 | `started_at` | `TIMESTAMPTZ` | Set when worker picks up |
-| `completed_at` | `TIMESTAMPTZ` | Set on completion/failure |
+| `completed_at` | `TIMESTAMPTZ` | Set on completion, failure, or **cancelled** (not on `paused` / `suspended`) |
 | `created_at` | `TIMESTAMPTZ` | Auto |
+| `cancel_requested` | `BOOLEAN` | Set by `POST …/cancel` (worker clears when finalizing `cancelled`) — migration `0005` |
+| `pause_requested` | `BOOLEAN` | Set by `POST …/pause` (worker clears when finalizing `paused`) — migration `0006` |
 
 Index: `(tenant_id, status)`.
 
@@ -743,6 +754,25 @@ After every successful node completion the engine calls `_save_checkpoint(db, in
 
 **Langfuse linking (V0.9.7):** `_save_checkpoint` returns the checkpoint UUID. For sequential nodes (`_execute_single_node`), the id is passed to `span.update(output={..., "checkpoint_id": ...})` while the Langfuse span is still open — the span metadata in the Langfuse UI directly references the DB row. For parallel nodes (`_apply_result`), the Langfuse span has already closed; the checkpoint_id is instead embedded in `log_entry.output_json["_checkpoint_id"]`, remaining queryable via the execution log API. `span_node()` accepts an optional `checkpoint_id` kwarg for callers that can supply it at span creation time.
 
+### 6.11 Operator execution control (V0.9.11)
+
+File: `app/engine/dag_runner.py`, `app/workers/tasks.py`, `app/api/workflows.py`, `app/api/sse.py`
+
+Operators can **pause** a run (resume later), **cancel** cooperatively (stop after the current node), or **discard** a **paused** run. This is distinct from **HITL suspension** (`suspended` + `POST …/callback`): pause uses `paused` + `POST …/resume-paused`.
+
+| Mechanism | API | Worker | Terminal status |
+|-----------|-----|--------|-------------------|
+| Pause (between nodes) | `POST …/pause` → `pause_requested` | `_abort_if_cancel_or_pause` → `_finalize_paused` | `paused` |
+| Resume from pause | `POST …/resume-paused` (`ResumePausedRequest`) | `resume_paused_workflow_task` → `resume_paused_graph` | `running` → … |
+| Cancel (between nodes) | `POST …/cancel` → `cancel_requested` | `_finalize_cancelled` | `cancelled` |
+| Abandon paused run | `POST …/cancel` when status is `paused` | synchronous in API | `cancelled` |
+
+**Semantics:** Checks run at the same points as cooperative cancel (top of ready-queue iterations, after single-node and parallel batches, inside ForEach/Loop inner loops). **Cancel is evaluated before pause** on each check. A parallel batch cannot be interrupted mid-batch; the next check runs before the following batch.
+
+**Celery tasks:** `execute_workflow_task`, `resume_workflow_task` (HITL), `retry_workflow_task`, `resume_paused_workflow_task` (operator pause).
+
+**Parent project client:** `tools/orchestrator_client.py` — `pause()`, `cancel()`, `resume_paused()`; `run_and_wait()` treats `paused` and `cancelled` as terminal and returns the context snapshot.
+
 ---
 
 ## 7. MCP Tool Bridge (Streamable HTTP)
@@ -971,7 +1001,7 @@ When **sync** mode is active (`orchestrator_wait_for_result` or `ORCHESTRATOR_BR
 | File | Role |
 |------|------|
 | `gateway/message_gateway.py` | Detects `orchestrator_workflow_id`, merges payload, async vs sync `_invoke_workflow_bridge()` |
-| `tools/orchestrator_client.py` | HTTP client: `execute()`, `get_context()`, `run_and_wait()` (optional `return_on_suspended`) |
+| `tools/orchestrator_client.py` | HTTP client: `execute()`, `get_context()`, `pause()`, `cancel()`, `resume_paused()`, `run_and_wait()` (optional `return_on_suspended`; returns on `paused` / `cancelled`) |
 | `config/settings.py` | `ORCHESTRATOR_BASE_URL`, `ORCHESTRATOR_TENANT_ID`, `ORCHESTRATOR_API_TOKEN`, `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT`, `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` |
 | `.env` | Base URL, tenant, optional token; optional `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true`; optional `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE=auto` or `full_context` |
 

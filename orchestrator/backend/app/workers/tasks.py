@@ -51,3 +51,19 @@ def retry_workflow_task(self, instance_id: str, from_node_id: str | None = None)
     finally:
         db.close()
 
+
+@celery_app.task(bind=True, name="orchestrator.resume_paused_workflow")
+def resume_paused_workflow_task(
+    self,
+    instance_id: str,
+    context_patch: dict | None = None,
+):
+    """Resume a workflow paused between nodes (operator pause, not HITL)."""
+    db = SessionLocal()
+    try:
+        from app.engine.dag_runner import resume_paused_graph
+
+        resume_paused_graph(db, instance_id, context_patch=context_patch)
+    finally:
+        db.close()
+

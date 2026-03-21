@@ -18,6 +18,7 @@ from app.api.schemas import (
     ExecuteRequest,
     CallbackRequest,
     RetryRequest,
+    ResumePausedRequest,
     InstanceOut,
     InstanceDetailOut,
     InstanceContextOut,
@@ -242,6 +243,112 @@ def retry_workflow(
     retry_workflow_task.delay(str(instance.id), body.from_node_id)
 
     instance.status = "running"
+    db.commit()
+    db.refresh(instance)
+    return instance
+
+
+@router.post("/{workflow_id}/instances/{instance_id}/pause", response_model=InstanceOut)
+def pause_workflow(
+    workflow_id: uuid.UUID,
+    instance_id: uuid.UUID,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Request cooperative pause: the runner stops after the current node finishes."""
+    instance = (
+        db.query(WorkflowInstance)
+        .filter_by(
+            id=instance_id,
+            workflow_def_id=workflow_id,
+            tenant_id=tenant_id,
+        )
+        .first()
+    )
+    if not instance:
+        raise HTTPException(404, "Instance not found")
+    if instance.status not in ("queued", "running"):
+        raise HTTPException(
+            409,
+            f"Cannot pause instance in status {instance.status!r} (only queued or running)",
+        )
+    instance.pause_requested = True
+    db.commit()
+    db.refresh(instance)
+    return instance
+
+
+@router.post("/{workflow_id}/instances/{instance_id}/resume-paused", response_model=InstanceOut)
+def resume_paused_workflow(
+    workflow_id: uuid.UUID,
+    instance_id: uuid.UUID,
+    body: ResumePausedRequest = ResumePausedRequest(),
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Resume a workflow that was paused between nodes (not HITL ``suspended``)."""
+    instance = (
+        db.query(WorkflowInstance)
+        .filter_by(
+            id=instance_id,
+            workflow_def_id=workflow_id,
+            tenant_id=tenant_id,
+            status="paused",
+        )
+        .first()
+    )
+    if not instance:
+        raise HTTPException(
+            404,
+            f"Paused instance {instance_id} not found for this workflow",
+        )
+
+    from app.workers.tasks import resume_paused_workflow_task
+
+    resume_paused_workflow_task.delay(str(instance.id), body.context_patch)
+
+    instance.status = "running"
+    db.commit()
+    db.refresh(instance)
+    return instance
+
+
+@router.post("/{workflow_id}/instances/{instance_id}/cancel", response_model=InstanceOut)
+def cancel_workflow(
+    workflow_id: uuid.UUID,
+    instance_id: uuid.UUID,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Request cooperative cancellation: the runner stops after the current node finishes.
+
+    For ``queued`` or ``running``, sets ``cancel_requested``. For ``paused``, abandons the run immediately.
+    """
+    instance = (
+        db.query(WorkflowInstance)
+        .filter_by(
+            id=instance_id,
+            workflow_def_id=workflow_id,
+            tenant_id=tenant_id,
+        )
+        .first()
+    )
+    if not instance:
+        raise HTTPException(404, "Instance not found")
+    if instance.status == "paused":
+        instance.status = "cancelled"
+        instance.cancel_requested = False
+        instance.pause_requested = False
+        instance.completed_at = _utcnow()
+        db.commit()
+        db.refresh(instance)
+        return instance
+    if instance.status not in ("queued", "running"):
+        raise HTTPException(
+            409,
+            f"Cannot cancel instance in status {instance.status!r}",
+        )
+    instance.cancel_requested = True
     db.commit()
     db.refresh(instance)
     return instance

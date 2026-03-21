@@ -10,6 +10,8 @@ import {
   CircleCheck,
   CircleX,
   Pause,
+  PauseCircle,
+  Ban,
   Layers,
   Cpu,
   Undo2,
@@ -32,6 +34,8 @@ const STATUS_CONFIG: Record<string, { icon: typeof CircleDot; label: string; cla
   completed: { icon: CircleCheck, label: "Completed", className: "text-green-500" },
   failed: { icon: CircleX, label: "Failed", className: "text-red-500" },
   suspended: { icon: Pause, label: "Suspended", className: "text-yellow-500" },
+  paused: { icon: PauseCircle, label: "Paused", className: "text-cyan-600" },
+  cancelled: { icon: Ban, label: "Cancelled", className: "text-orange-500" },
 };
 
 export function Toolbar() {

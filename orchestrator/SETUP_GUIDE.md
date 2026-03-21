@@ -1,3 +1,5 @@
+> - **V0.9.11 Operator execution control (2026-03-22)**: `workflow_instances` gains `cancel_requested` and `pause_requested` (Alembic `0005`, `0006`). Run `alembic upgrade head` after pull. API: `POST …/pause`, `POST …/resume-paused`, `POST …/cancel` — see `TECHNICAL_BLUEPRINT.md` §6.11.
+>
 > - **V0.9 Execution Enhancements (2026-03-21)**: New env variables `ORCHESTRATOR_MAX_SNAPSHOTS` and `ORCHESTRATOR_MCP_POOL_SIZE`. ForEach loop node added to node_registry.json. MCP client upgraded with connection pooling. Retry-from-failed endpoint added. Snapshot pruning via Celery Beat. Safe expression evaluator enhanced with whitelisted function/method calls. Env variable mapping (`{{ env.SECRET_NAME }}`) for node configs.
 > - **V0.8 Enterprise Features (2026-03-20)**:OIDC federation config + `VITE_AUTH_MODE`. New env variables for OIDC provider settings. `workflow_snapshots` table added (Alembic migration 0002). Project structure updated for new files. Troubleshooting table updated. Environment variable table expanded.
 >
@@ -5,8 +7,8 @@
 
 ## AE AI Hub — Orchestrator Setup Guide
 
-**Version:** 0.9
-**Last updated:** 2026-03-21
+**Version:** 0.9.11
+**Last updated:** 2026-03-22
 
 ---
 
@@ -62,6 +64,7 @@ orchestrator/
 ├── TECHNICAL_BLUEPRINT.md          # Architecture documentation
 ├── SETUP_GUIDE.md                  # This file
 ├── HOW_IT_WORKS.md                 # Runtime walkthrough
+├── DEVELOPER_GUIDE.md              # Extend nodes, debugging, API deep dives
 │
 ├── frontend/                       # React + TypeScript visual builder
 │   └── src/
@@ -96,15 +99,13 @@ orchestrator/
 │   ├── main.py                     # App entry point (v0.8.0)
 │   ├── requirements.txt            # Python dependencies
 │   ├── alembic.ini                 # Migration config
-│   ├── alembic/versions/
-│   │   ├── 0001_enable_rls_policies.py     # PostgreSQL RLS
-│   │   └── 0002_workflow_snapshots.py      # Version history table
+│   ├── alembic/versions/           # 0001 … 0006 — see §5.2
 │   └── app/
 │       ├── config.py               # Settings from env (incl. OIDC)
 │       ├── database.py             # SQLAlchemy setup
 │       ├── observability.py        # Langfuse tracing
 │       ├── api/
-│       │   ├── workflows.py        # CRUD + execute + versions + rollback
+│       │   ├── workflows.py        # CRUD + execute + pause/resume/cancel + versions
 │       │   ├── tools.py            # MCP palette + cache invalidation
 │       │   ├── sse.py              # Server-Sent Events stream
 │       │   ├── schemas.py          # Pydantic request/response models
@@ -123,7 +124,7 @@ orchestrator/
 │       │   └── tenant.py           # TenantToolOverride, TenantSecret
 │       ├── workers/
 │       │   ├── celery_app.py       # Celery configuration
-│       │   ├── tasks.py            # execute, resume, retry workflow tasks
+│       │   ├── tasks.py            # execute, resume, retry, resume_paused tasks
 │       │   └── scheduler.py        # Celery Beat cron scheduler + snapshot pruning
 │       └── security/
 │           ├── jwt_auth.py         # JWT creation + validation
@@ -245,9 +246,16 @@ cd orchestrator/backend
 alembic upgrade head
 ```
 
-This applies two migrations:
+This applies all revisions under `alembic/versions/`, including (among others):
+
 - **0001** — PostgreSQL Row-Level Security policies for tenant isolation
 - **0002** — `workflow_snapshots` table for version history
+- **0003** — `conversation_sessions` (stateful DAG pattern)
+- **0004** — `instance_checkpoints`
+- **0005** — `workflow_instances.cancel_requested`
+- **0006** — `workflow_instances.pause_requested`
+
+Use `alembic current` to verify the DB revision after upgrading.
 
 ### 5.3 Schema Overview
 
@@ -261,6 +269,8 @@ workflow_definitions     1 ──── * workflow_instances     1 ──── 
   created_at                      current_node_id                 input_json (JSONB)
   updated_at                      started_at                      output_json (JSONB)
                                   completed_at                    error
+                                  cancel_requested (0005)
+                                  pause_requested (0006)
 
 workflow_definitions     1 ──── * workflow_snapshots
                                   id (PK, UUID)

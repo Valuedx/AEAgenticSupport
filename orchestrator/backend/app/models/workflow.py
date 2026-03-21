@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Column,
     String,
     Integer,
@@ -61,6 +62,10 @@ class WorkflowInstance(Base):
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
+    # Set by POST …/cancel; the DAG runner checks between nodes and sets status cancelled.
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    # Set by POST …/pause; runner checks between nodes and sets status paused.
+    pause_requested = Column(Boolean, nullable=False, default=False)
 
     definition = relationship("WorkflowDefinition", back_populates="instances")
     execution_logs = relationship("ExecutionLog", back_populates="instance")

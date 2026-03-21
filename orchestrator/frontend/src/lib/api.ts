@@ -198,6 +198,37 @@ export const api = {
     );
   },
 
+  /** Cooperative cancel: runner stops after the current node (between nodes). */
+  cancelInstance(workflowId: string, instanceId: string): Promise<InstanceOut> {
+    return request(
+      `/api/v1/workflows/${workflowId}/instances/${instanceId}/cancel`,
+      { method: "POST" },
+    );
+  },
+
+  /** Cooperative pause: runner pauses after the current node (between nodes). */
+  pauseInstance(workflowId: string, instanceId: string): Promise<InstanceOut> {
+    return request(
+      `/api/v1/workflows/${workflowId}/instances/${instanceId}/pause`,
+      { method: "POST" },
+    );
+  },
+
+  /** Resume a run that was paused between nodes (not HITL suspended). */
+  resumePausedInstance(
+    workflowId: string,
+    instanceId: string,
+    contextPatch?: Record<string, unknown> | null,
+  ): Promise<InstanceOut> {
+    return request(
+      `/api/v1/workflows/${workflowId}/instances/${instanceId}/resume-paused`,
+      {
+        method: "POST",
+        body: JSON.stringify({ context_patch: contextPatch ?? null }),
+      },
+    );
+  },
+
   listInstances(workflowId: string): Promise<InstanceOut[]> {
     return request(`/api/v1/workflows/${workflowId}/status`);
   },

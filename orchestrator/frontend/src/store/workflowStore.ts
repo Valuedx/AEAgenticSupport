@@ -44,6 +44,16 @@ interface WorkflowState {
   markDirty: () => void;
 
   executeWorkflow: (triggerPayload?: Record<string, unknown>) => Promise<void>;
+  /** Ask backend to cancel after the current node finishes (between nodes). */
+  cancelInstance: (workflowId: string, instanceId: string) => Promise<void>;
+  /** Ask backend to pause after the current node finishes (between nodes). */
+  pauseInstance: (workflowId: string, instanceId: string) => Promise<void>;
+  /** Resume an instance paused between nodes. */
+  resumePausedInstance: (
+    workflowId: string,
+    instanceId: string,
+    contextPatch?: Record<string, unknown>,
+  ) => Promise<void>;
   retryInstance: (workflowId: string, instanceId: string, fromNodeId?: string) => Promise<void>;
   /** Fetch and cache the context snapshot for a suspended instance. */
   fetchInstanceContext: (workflowId: string, instanceId: string) => Promise<void>;
@@ -190,6 +200,44 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     }
   },
 
+  cancelInstance: async (workflowId, instanceId) => {
+    try {
+      const updated = await api.cancelInstance(workflowId, instanceId);
+      const inst = get().activeInstance;
+      if (inst && inst.id === instanceId) {
+        set({ activeInstance: { ...inst, status: updated.status } });
+      }
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  pauseInstance: async (workflowId, instanceId) => {
+    try {
+      const updated = await api.pauseInstance(workflowId, instanceId);
+      const inst = get().activeInstance;
+      if (inst && inst.id === instanceId) {
+        set({ activeInstance: { ...inst, status: updated.status } });
+      }
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  resumePausedInstance: async (workflowId, instanceId, contextPatch) => {
+    set({ isExecuting: true, error: null });
+    try {
+      const instance = await api.resumePausedInstance(workflowId, instanceId, contextPatch);
+      set({
+        activeInstance: { ...instance, logs: get().activeInstance?.logs ?? [] },
+        isExecuting: true,
+      });
+      get().streamInstance(workflowId, instance.id);
+    } catch (e) {
+      set({ error: String(e), isExecuting: false });
+    }
+  },
+
   retryInstance: async (workflowId, instanceId, fromNodeId) => {
     set({ isExecuting: true, error: null });
     try {
@@ -278,7 +326,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         const detail = await api.getInstanceDetail(workflowId, instanceId);
         set({ activeInstance: detail });
 
-        if (["completed", "failed", "suspended"].includes(detail.status)) {
+        if (
+          ["completed", "failed", "suspended", "cancelled", "paused"].includes(
+            detail.status,
+          )
+        ) {
           set({ isExecuting: false });
           return;
         }

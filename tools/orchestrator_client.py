@@ -6,6 +6,9 @@ Wraps the three operations Studio needs:
   - execute()          → fire a workflow, returns instance metadata (status='queued')
   - get_context()      → poll current instance state (InstanceContextOut)
   - run_and_wait()     → execute + block until terminal status, return context
+  - cancel()           → request cooperative cancellation (stops between nodes)
+  - pause()            → request cooperative pause (pauses between nodes)
+  - resume_paused()    → resume after operator pause
 """
 from __future__ import annotations
 
@@ -136,6 +139,22 @@ class OrchestratorClient:
         )
         return resp.json()
 
+    def cancel(
+        self,
+        workflow_id: str,
+        instance_id: str,
+    ) -> dict[str, Any]:
+        """POST /workflows/{id}/instances/{id}/cancel — cooperative stop between nodes."""
+        resp = self._client.post(
+            self._url(f"/workflows/{workflow_id}/instances/{instance_id}/cancel"),
+            headers=self._headers(),
+        )
+        _raise_for_orchestrator_status(
+            resp,
+            what=f"cancelling instance {instance_id!r}",
+        )
+        return resp.json()
+
     def get_context(
         self,
         workflow_id: str,
@@ -180,6 +199,10 @@ class OrchestratorClient:
             ctx = self.get_context(workflow_id, instance_id)
             status = ctx.get("status")
             if status == "completed":
+                return ctx
+            if status == "cancelled":
+                return ctx
+            if status == "paused":
                 return ctx
             if status == "failed":
                 snippet = json.dumps(ctx.get("context_json", {}), default=str)[:400]

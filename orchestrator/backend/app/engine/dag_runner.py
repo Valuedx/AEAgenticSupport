@@ -28,6 +28,63 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _finalize_cancelled(
+    db: Session,
+    instance: WorkflowInstance,
+    context: dict[str, Any],
+) -> None:
+    """Mark instance cancelled and persist context (cooperative cancel between nodes)."""
+    trace = context.get("_trace")
+    if trace:
+        try:
+            trace.update(output={"status": "cancelled"})
+        except Exception:
+            pass
+    instance.status = "cancelled"
+    instance.cancel_requested = False
+    instance.pause_requested = False
+    instance.context_json = context
+    instance.completed_at = _utcnow()
+    db.commit()
+    logger.info("Workflow %s cancelled (cooperative, between nodes)", instance.id)
+
+
+def _finalize_paused(
+    db: Session,
+    instance: WorkflowInstance,
+    context: dict[str, Any],
+) -> None:
+    """Mark instance paused and persist context (cooperative pause between nodes)."""
+    trace = context.get("_trace")
+    if trace:
+        try:
+            trace.update(output={"status": "paused"})
+        except Exception:
+            pass
+    instance.status = "paused"
+    instance.pause_requested = False
+    instance.cancel_requested = False
+    instance.context_json = context
+    db.commit()
+    logger.info("Workflow %s paused (cooperative, between nodes)", instance.id)
+
+
+def _abort_if_cancel_or_pause(
+    db: Session,
+    instance: WorkflowInstance,
+    context: dict[str, Any],
+) -> bool:
+    """If cancel or pause was requested, finalize and return True (cancel wins over pause)."""
+    db.refresh(instance)
+    if instance.cancel_requested:
+        _finalize_cancelled(db, instance, context)
+        return True
+    if instance.pause_requested:
+        _finalize_paused(db, instance, context)
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Graph parsing (handle-aware)
 # ---------------------------------------------------------------------------
@@ -125,6 +182,20 @@ def execute_graph(db: Session, instance_id: str, deterministic_mode: bool = Fals
     instance.started_at = _utcnow()
     db.commit()
 
+    db.refresh(instance)
+    if instance.cancel_requested:
+        ctx_early: dict[str, Any] = dict(instance.context_json or {})
+        if instance.trigger_payload:
+            ctx_early["trigger"] = instance.trigger_payload
+        _finalize_cancelled(db, instance, ctx_early)
+        return
+    if instance.pause_requested:
+        ctx_pause: dict[str, Any] = dict(instance.context_json or {})
+        if instance.trigger_payload:
+            ctx_pause["trigger"] = instance.trigger_payload
+        _finalize_paused(db, instance, ctx_pause)
+        return
+
     graph = instance.definition.graph_json
     nodes_map, edges = parse_graph(graph)
     forward, reverse, in_degree = _build_graph_structures(nodes_map, edges)
@@ -202,6 +273,70 @@ def resume_graph(
     _execute_ready_queue(
         db, instance, nodes_map, forward, reverse, in_degree, context,
         skipped=already_executed,
+    )
+
+
+def resume_paused_graph(
+    db: Session,
+    instance_id: str,
+    context_patch: dict | None = None,
+) -> None:
+    """Resume a paused workflow (user pause between nodes — not HITL suspended)."""
+    instance: WorkflowInstance | None = (
+        db.query(WorkflowInstance).filter_by(id=instance_id).first()
+    )
+    if not instance or instance.status != "paused":
+        raise ValueError(
+            f"WorkflowInstance {instance_id} not found or not paused"
+        )
+
+    instance.status = "running"
+    db.commit()
+
+    graph = instance.definition.graph_json
+    nodes_map, edges = parse_graph(graph)
+    forward, reverse, in_degree = _build_graph_structures(nodes_map, edges)
+
+    context: dict[str, Any] = dict(instance.context_json or {})
+    context.pop("_trace", None)
+    context["_instance_id"] = str(instance.id)
+    if context_patch:
+        context.update(context_patch)
+        logger.info(
+            "Workflow %s resumed from pause with context_patch keys: %s",
+            instance_id,
+            list(context_patch.keys()),
+        )
+
+    already_executed = set(context.keys()) - {"trigger", "approval"}
+
+    from app.observability import trace_workflow, flush
+
+    with trace_workflow(
+        workflow_id=str(instance.workflow_def_id),
+        instance_id=str(instance.id),
+        tenant_id=instance.tenant_id,
+        workflow_name=instance.definition.name,
+        trigger_payload=instance.trigger_payload,
+        tags=["resume-paused"],
+    ) as trace:
+        context["_trace"] = trace
+        _execute_ready_queue(
+            db, instance, nodes_map, forward, reverse, in_degree, context,
+            skipped=already_executed,
+        )
+        trace.update(
+            output={
+                "status": instance.status,
+                "resumed_from": "paused",
+            }
+        )
+
+    flush()
+    logger.info(
+        "Workflow %s resumed from pause with final status %s",
+        instance.id,
+        instance.status,
     )
 
 
@@ -300,6 +435,9 @@ def _execute_ready_queue(
         if not ready:
             break
 
+        if _abort_if_cancel_or_pause(db, instance, context):
+            return
+
         # ForEach / Loop nodes must always be processed individually so that
         # their post-execution iteration dispatch fires.  If such a node is in
         # the ready batch alongside other nodes, pull just the first one out
@@ -321,6 +459,8 @@ def _execute_ready_queue(
                 return
             if result == "failed":
                 return
+            if _abort_if_cancel_or_pause(db, instance, context):
+                return
 
             # ── ForEach / Loop iteration ──
             node_data = nodes_map.get(node_id, {}).get("data", {})
@@ -339,6 +479,9 @@ def _execute_ready_queue(
                 )
             else:
                 _propagate_edges(node_id, forward, nodes_map, context, satisfied, pruned)
+
+            if instance.status in ("cancelled", "paused"):
+                return
         else:
             results = _execute_parallel(
                 db, instance, nodes_map, ready, context,
@@ -354,6 +497,9 @@ def _execute_ready_queue(
             for node_id in ready:
                 if results.get(node_id) == "completed":
                     _propagate_edges(node_id, forward, nodes_map, context, satisfied, pruned)
+
+            if _abort_if_cancel_or_pause(db, instance, context):
+                return
 
         ready = _find_ready_nodes(
             nodes_map, reverse, satisfied, context, skipped, pruned,
@@ -697,6 +843,9 @@ def _run_forEach_iterations(
     all_iteration_results: dict[str, list] = {nid: [] for nid in downstream_node_ids}
 
     for idx, item in enumerate(items):
+        if _abort_if_cancel_or_pause(db, instance, context):
+            return
+
         # Inject current loop item into context
         context["_loop_item"] = item
         context["_loop_item_var"] = item_var
@@ -718,6 +867,9 @@ def _run_forEach_iterations(
                 all_iteration_results[downstream_nid].append({"error": "failed", "iteration": idx})
             elif result == "suspended":
                 return  # Stop the forEach loop if any iteration suspends
+
+            if _abort_if_cancel_or_pause(db, instance, context):
+                return
 
     # Store aggregated results
     for nid in downstream_node_ids:
@@ -808,6 +960,9 @@ def _run_loop_iterations(
     actual_iterations = 0
 
     for idx in range(max_iterations):
+        if _abort_if_cancel_or_pause(db, instance, context):
+            return
+
         # Pre-check: evaluate condition before executing the body
         if not _eval_condition(idx):
             break
@@ -839,6 +994,9 @@ def _run_loop_iterations(
                 context.pop("_loop_index", None)
                 context.pop("_loop_iteration", None)
                 return  # Suspend propagates via instance status
+
+            if _abort_if_cancel_or_pause(db, instance, context):
+                return
 
         actual_iterations = idx + 1
 

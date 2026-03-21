@@ -1,9 +1,15 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.9
+> - **V0.9.11 (2026-03-22):** **§24** — operator pause / cancel / resume (`cancel_requested`, `pause_requested`, migrations `0005`/`0006`); **§4** clarified HITL `suspended` vs operator `paused`; **§21** SSE terminal statuses. **§23** — Bridge User Reply + `displayName` pointers (V0.9.10).
+>
+> - **Earlier sections:** Custom nodes (§1), `safe_eval` (§2), ReAct (§3), ForEach / retry / HITL (§4), vault (§5), conversational memory (§6), through Loop node (§22).
+
+**Version:** 0.9.11
 **Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
+
+**Doc map:** Architecture and API reference → `TECHNICAL_BLUEPRINT.md`. Setup, migrations, env → `SETUP_GUIDE.md`. End-user runtime walkthrough → `HOW_IT_WORKS.md`. This file focuses on **how to extend and debug** the orchestrator as a developer.
 
 If you are a fresher or new to this codebase, you are in the right place. This guide is written specifically to help you understand how the **Agentic Orchestrator** works under the hood, step-by-step, with plain English explanations and heavily commented code examples.
 
@@ -178,6 +184,9 @@ The backend code (`react_loop.py`) runs a loop that goes like this:
 
 ## 🔄 4. Advanced Tricks: Loops, Retries, and Suspensions
 
+> **Operator pause / cancel / resume** (Execution panel **Pause**, **Stop**, **Resume**) is a separate feature — cooperative stops **between nodes**, statuses `paused` / `cancelled`. See **§23**.  
+> **HITL** below uses **`suspended`** and **`POST …/callback`** — do not confuse the two.
+
 ### The "ForEach" Loop (Doing things repeatedly)
 Introduced in V0.9, the ForEach node takes a list, and runs every node attached to it *once per item* in the list.
 
@@ -189,10 +198,10 @@ If your list is `["Alice", "Bob"]`:
 If a workflow runs 10 steps successfully, but fails on step 11 because the internet blinked, you don't want to start over from step 1!
 The backend now tracks `current_node_id`. If it fails, a user can hit **Retry** in the UI. The backend deletes the error log, loads the memory right before step 11, and simply presses 'play' again.
 
-### Human-in-the-Loop (The Pause Button)
+### Human-in-the-Loop — approval gate (status `suspended`)
 Sometimes it is too dangerous to let an AI delete a database automatically. It needs human approval.
-If a Node's config contains an `approvalMessage` (e.g., `"Approve deletion?"`), the python code (`dag_runner.py`) will literally put itself to sleep, mark its status as `suspended`, and free up its memory.
-When a human clicks "Approve" via a webhook/Slack API, the backend wakes back up, loads its context, and continues the workflow exactly where it left off.
+If a Node's config contains an `approvalMessage` (e.g., `"Approve deletion?"`), the engine stops after that node, marks the instance as **`suspended`** (not `paused`), and persists context.
+When a human approves via the hub UI, **`POST /api/v1/workflows/{workflow_id}/instances/{instance_id}/callback`** runs `resume_graph` with `approval_payload` / optional `context_patch` — the workflow continues from the same graph position.
 
 #### HITL Review UI (V0.9.4)
 
@@ -1023,6 +1032,10 @@ while True:
 
 For node types that should **not** stream (e.g., LLM Router which needs a deterministic 64-token classification response), continue using `call_llm` directly — `call_llm_streaming` is not called unless `instance_id` and `node_id` are provided.
 
+### SSE terminal statuses (execution stream)
+
+The SSE loop (`app/api/sse.py`) ends with `event: done` when the instance reaches a terminal or wait state, including **`completed`**, **`failed`**, **`suspended`** (HITL), **`cancelled`**, and **`paused`** (operator). The client then refreshes instance detail; for **`paused`**, the operator can call **`POST …/resume-paused`** and open a **new** SSE stream after the worker sets status back to **`running`**.
+
 ---
 
 ## 🔁 22. Loop Node — Controlled Agentic Cycles (V0.9.9)
@@ -1096,3 +1109,68 @@ Example: `node_3.score < 0.9 and _loop_index < 5`
 ### Adding a new "Loop-aware" node type
 
 Nodes run inside a Loop body behave identically to any other node — they read from context and write their output back. No special handling is needed. Inside their `systemPrompt` or `condition`, use `{{ _loop_index }}` (Jinja2) or `_loop_index` (safe_eval expressions) to reference the current iteration.
+
+---
+
+## 🌉 23. Bridge User Reply + Canvas `displayName` (V0.9.10)
+
+When the **parent** AI Studio proxy completes a DAG run synchronously, it needs a single user-facing string. The **Bridge User Reply** action node (`bridge_user_reply` in `shared/node_registry.json`) sets `orchestrator_user_reply` in the node output; `dag_runner._promote_orchestrator_user_reply()` copies it to **context root** so `GET …/instances/{id}/context` exposes it for the gateway.
+
+**Files to read:**
+- `backend/app/engine/node_handlers.py` — `_handle_bridge_user_reply`
+- `backend/app/engine/dag_runner.py` — `_promote_orchestrator_user_reply`
+- Parent `gateway/message_gateway.py` — sync reply extraction, `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE`
+- Frontend: `displayName` on node data (`types/nodes.ts`, `AgenticNode.tsx`, `nodeCanvasTitle()`) — registry **`label`** remains the engine key; **`displayName`** is UI-only for canvas titles and validation messages
+
+Add Bridge nodes on **each terminal branch** when multiple LLM paths exist so chat text is explicit.
+
+---
+
+## 🎛️ 24. Operator Pause, Cancel, and Resume (V0.9.11)
+
+These controls are **cooperative**: the runner observes flags **between nodes** (after the current node’s handler returns). There is **no** mid-token cancellation inside an LLM call.
+
+### How it differs from HITL (§4)
+
+| | Operator (this section) | HITL approval (§4) |
+|--|-------------------------|---------------------|
+| **Status** | `paused` or `cancelled` | `suspended` |
+| **Resume API** | `POST …/resume-paused` + optional `context_patch` | `POST …/callback` + `approval_payload` / `context_patch` |
+| **Trigger** | User clicks Pause / Stop in Execution panel | Node has `approvalMessage` in config |
+
+### Database (run `alembic upgrade head`)
+
+| Column | Migration | Meaning |
+|--------|-----------|---------|
+| `cancel_requested` | `0005_workflow_cancel_requested.py` | Set by `POST …/cancel` while instance is `queued` or `running` |
+| `pause_requested` | `0006_workflow_pause_requested.py` | Set by `POST …/pause` while instance is `queued` or `running` |
+
+### Backend implementation
+
+- **`dag_runner.py`:** `_finalize_cancelled`, `_finalize_paused`, and `_abort_if_cancel_or_pause` (single refresh — **cancel is checked before pause**).
+- **Early exit:** If the worker sees `cancel_requested` or `pause_requested` immediately after setting `running`, it finalizes without executing the graph.
+- **Resume:** `resume_paused_graph(db, instance_id, context_patch=None)` — loads `context_json`, pops stale `_trace`, re-injects `_instance_id`, rebuilds skipped set from context keys, calls `_execute_ready_queue`. Task: `resume_paused_workflow_task` in `workers/tasks.py`.
+- **Abandon paused run:** `POST …/cancel` when status is **`paused`** sets **`cancelled`** synchronously (no Celery round-trip).
+
+### REST endpoints (prefix `/api/v1/workflows`)
+
+| Method | Path | Notes |
+|--------|------|------|
+| `POST` | `/{workflow_id}/instances/{instance_id}/pause` | Sets `pause_requested` |
+| `POST` | `/{workflow_id}/instances/{instance_id}/resume-paused` | Body: `ResumePausedRequest` — optional `context_patch` |
+| `POST` | `/{workflow_id}/instances/{instance_id}/cancel` | Queued/running: `cancel_requested`; **paused**: immediate `cancelled` |
+
+### Frontend
+
+- **`frontend/src/lib/api.ts`:** `pauseInstance`, `resumePausedInstance`, `cancelInstance`
+- **`frontend/src/store/workflowStore.ts`:** same three actions; `resumePausedInstance` re-attaches SSE via `streamInstance`
+- **`frontend/src/components/toolbar/ExecutionPanel.tsx`:** **Pause** / **Stop** while `queued` or `running`; **Resume** + **Stop** (discard) when `paused`
+
+### Parent project HTTP client
+
+**`tools/orchestrator_client.py`:** `pause()`, `cancel()`, `resume_paused()`; `run_and_wait()` treats **`paused`** and **`cancelled`** as terminal and returns the context snapshot (same idea as **`suspended`** with `return_on_suspended`).
+
+### Further reading
+
+- `TECHNICAL_BLUEPRINT.md` §4.5 (API table), §5.2 (`WorkflowInstance` columns), §6.11 (full semantics)
+- `HOW_IT_WORKS.md` — Step 6 (Execution), Pause / Stop / Resume subsection
