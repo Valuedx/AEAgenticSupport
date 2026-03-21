@@ -230,6 +230,7 @@ export const api = {
     onLog: (log: Partial<ExecutionLogOut>) => void,
     onStatus: (status: { instance_status: string; current_node_id?: string | null }) => void,
     onDone: () => void,
+    onToken?: (token: { node_id: string; token: string; done: boolean }) => void,
   ): () => void {
     const url = `${API_BASE}/api/v1/workflows/${workflowId}/instances/${instanceId}/stream?x_tenant_id=${TENANT_ID}`;
     const es = new EventSource(url);
@@ -239,6 +240,9 @@ export const api = {
     });
     es.addEventListener("status", (e) => {
       onStatus(JSON.parse(e.data));
+    });
+    es.addEventListener("token", (e) => {
+      if (onToken) onToken(JSON.parse(e.data));
     });
     es.addEventListener("done", (e) => {
       onDone();

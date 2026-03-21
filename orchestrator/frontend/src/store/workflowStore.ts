@@ -21,6 +21,14 @@ interface WorkflowState {
   /** Context snapshot loaded for HITL review of a suspended instance. */
   instanceContext: InstanceContextOut | null;
 
+  /**
+   * Live streaming token buffer per node_id.
+   * Cleared when execution starts; accumulated as ``token`` SSE events arrive.
+   * When a node's ``done: true`` message arrives the buffer is preserved
+   * (the final LLM response will overwrite it via the log event shortly after).
+   */
+  streamingTokens: Record<string, string>;
+
   loading: boolean;
   error: string | null;
 
@@ -58,6 +66,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   activeInstance: null,
   isExecuting: false,
   instanceContext: null,
+  streamingTokens: {},
   loading: false,
   error: null,
   _sseCleanup: null,
@@ -165,7 +174,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const wf = get().currentWorkflow;
     if (!wf) return;
 
-    set({ isExecuting: true, error: null });
+    set({ isExecuting: true, error: null, streamingTokens: {} });
     try {
       if (get().isDirty) {
         await get().saveWorkflow();
@@ -217,7 +226,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         set({ activeInstance: { ...inst, status: status.instance_status, current_node_id: status.current_node_id ?? inst.current_node_id } });
       },
       () => {
-        set({ isExecuting: false, _sseCleanup: null });
+        set({ isExecuting: false, _sseCleanup: null, streamingTokens: {} });
         const wf = get().currentWorkflow;
         const inst = get().activeInstance;
         if (wf && inst) {
@@ -225,6 +234,15 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             set({ activeInstance: detail });
           }).catch(() => {});
         }
+      },
+      (tokenEvent) => {
+        if (tokenEvent.done) return; // keep buffer; log event will overwrite shortly
+        set((state) => ({
+          streamingTokens: {
+            ...state.streamingTokens,
+            [tokenEvent.node_id]: (state.streamingTokens[tokenEvent.node_id] ?? "") + tokenEvent.token,
+          },
+        }));
       },
     );
 

@@ -84,7 +84,7 @@ def _handle_agent(
         from app.engine.react_loop import run_react_loop
         return run_react_loop(node_data, context, tenant_id)
 
-    from app.engine.llm_providers import call_llm
+    from app.engine.llm_providers import call_llm, call_llm_streaming
     from app.engine.prompt_template import render_prompt, build_user_message
 
     provider = config.get("provider", "google")
@@ -96,18 +96,24 @@ def _handle_agent(
     system_prompt = render_prompt(raw_prompt, context)
     user_message = build_user_message(context)
 
+    instance_id: str = context.get("_instance_id", "")
+    node_id: str = context.get("_current_node_id", "")
+
     logger.info(
-        "Agent node [%s/%s]: prompt_len=%d, user_msg_len=%d",
+        "Agent node [%s/%s]: prompt_len=%d, user_msg_len=%d, streaming=%s",
         provider, model, len(system_prompt), len(user_message),
+        bool(instance_id and node_id),
     )
 
-    result = call_llm(
+    result = call_llm_streaming(
         provider=provider,
         model=model,
         system_prompt=system_prompt,
         user_message=user_message,
         temperature=temperature,
         max_tokens=max_tokens,
+        instance_id=instance_id,
+        node_id=node_id,
     )
 
     logger.info(

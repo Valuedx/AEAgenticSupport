@@ -47,6 +47,51 @@ def call_llm(
     )
 
 
+def call_llm_streaming(
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+    instance_id: str = "",
+    node_id: str = "",
+) -> dict[str, Any]:
+    """Stream a response from the provider, publishing tokens to Redis as they arrive.
+
+    Falls back to the non-streaming ``call_llm`` variant if:
+    - ``instance_id`` or ``node_id`` are empty (no channel to publish to)
+    - Redis is unavailable (publish errors are non-fatal in streaming_llm.py)
+    - The provider doesn't support streaming
+
+    Returns the same standardized dict as ``call_llm``.
+    """
+    if not instance_id or not node_id:
+        logger.debug("call_llm_streaming: missing instance_id/node_id, falling back to non-streaming")
+        return call_llm(provider, model, system_prompt, user_message, temperature, max_tokens)
+
+    from app.engine.streaming_llm import stream_google, stream_openai, stream_anthropic
+
+    streaming_providers = {
+        "google": stream_google,
+        "openai": stream_openai,
+        "anthropic": stream_anthropic,
+    }
+    handler = streaming_providers.get(provider)
+    if not handler:
+        raise ValueError(f"Unknown LLM provider: {provider}")
+
+    return handler(
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        instance_id=instance_id,
+        node_id=node_id,
+    )
+
+
 def _call_google(
     model: str,
     system_prompt: str,

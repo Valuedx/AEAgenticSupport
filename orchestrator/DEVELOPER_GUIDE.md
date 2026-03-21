@@ -1,6 +1,6 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.7
+**Version:** 0.9.8
 **Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
@@ -920,3 +920,105 @@ When `checkpoint_id` is provided at span creation time, it is written into the L
 In `_execute_single_node`, the node runs inside a `with span_node(...) as span:` block. The checkpoint is saved AFTER `dispatch_node` returns but BEFORE the `with` block exits — so the span is still live.
 
 In `_execute_parallel`, each node runs in a `ThreadPoolExecutor` thread. The thread's `_run_node` function creates its own `with span_node(...)` block, which exits when the thread returns. The main thread then collects the future result in `_apply_result` — by then the span is already committed to Langfuse. We embed the checkpoint_id in the execution log as a fallback linkage mechanism.
+
+---
+
+## 🌊 21. Rich Token Streaming — Live LLM Output in the Browser
+
+**Introduced in V0.9.8**
+
+LLM Agent nodes stream tokens to the browser in real time as the model generates them — no waiting for the full response.
+
+### Architecture
+
+```
+Celery worker (LLM call)               Redis                FastAPI SSE
+────────────────────────               ─────                ──────────
+  stream_google / stream_openai
+  / stream_anthropic
+        │
+        │ each token arrives
+        ▼
+  publish_token(instance_id, node_id, token)
+        │                              │
+        └──────────▶ PUBLISH ─────────▶ orch:stream:{instance_id}
+                                       │
+                                       │ SUBSCRIBE
+                                       ◀─────────── _subscribe_tokens task
+                                                         │
+                                                   asyncio.Queue
+                                                         │
+                                                   event_generator loop
+                                                         │
+                                              event: token
+                                              data: {"node_id": "node_2",
+                                                     "token": "The ",
+                                                     "done": false}
+                                                         │
+                                                    Browser SSE
+```
+
+### File: `backend/app/engine/streaming_llm.py`
+
+Three streaming functions — `stream_google`, `stream_openai`, `stream_anthropic` — each:
+1. Call the provider's streaming API
+2. Accumulate the full text
+3. Call `publish_token(instance_id, node_id, token)` for each chunk
+4. Call `publish_stream_end(instance_id, node_id)` after the last chunk
+5. Return the same `{response, usage, model, provider}` dict as the non-streaming path
+
+Redis publish failures are caught and logged as warnings — execution is never blocked.
+
+### File: `backend/app/engine/llm_providers.py`
+
+`call_llm_streaming(...)` routes to the streaming variants when `instance_id` and `node_id` are non-empty. Falls back to `call_llm` silently if either is empty (e.g., Reflection node calls, ReAct loop).
+
+### How node_id gets into the handler
+
+```python
+# execute_graph — once per execution
+context["_instance_id"] = str(instance.id)
+
+# _execute_single_node — before each sequential node
+context["_current_node_id"] = node_id
+
+# _handle_agent reads:
+instance_id = context.get("_instance_id", "")
+node_id = context.get("_current_node_id", "")
+result = call_llm_streaming(..., instance_id=instance_id, node_id=node_id)
+```
+
+### File: `backend/app/api/sse.py`
+
+```python
+token_queue: asyncio.Queue = asyncio.Queue()
+redis_task = asyncio.create_task(_subscribe_tokens(instance_id, token_queue))
+
+while True:
+    # Drain token queue (non-blocking, no sleep needed)
+    while not token_queue.empty():
+        token_msg = token_queue.get_nowait()
+        yield f"event: token\ndata: {json.dumps(token_msg)}\n\n"
+
+    # DB poll every 1s for log/status/done events
+    ...
+    await asyncio.sleep(1.0)
+```
+
+`_subscribe_tokens` uses `redis.asyncio` (bundled in `redis>=5.0.0` — no new dependency) and terminates cleanly when the asyncio task is cancelled.
+
+### Frontend
+
+| Layer | Change |
+|-------|--------|
+| `api.ts` | `streamInstance` gains optional `onToken` callback for `event: token` events |
+| `workflowStore.ts` | `streamingTokens: Record<string, string>` state; accumulated per `node_id`; cleared on execution start and done |
+| `ExecutionPanel.tsx` | `LogEntry` receives `streamingText` prop; running nodes show a pulsing blue dot + live text in expanded view |
+
+### Adding streaming support to a new node type
+
+1. In your handler (`node_handlers.py`), read `instance_id` and `node_id` from context
+2. Call `call_llm_streaming(...)` instead of `call_llm(...)`
+3. The streaming infrastructure handles Redis publish automatically
+
+For node types that should **not** stream (e.g., LLM Router which needs a deterministic 64-token classification response), continue using `call_llm` directly — `call_llm_streaming` is not called unless `instance_id` and `node_id` are provided.

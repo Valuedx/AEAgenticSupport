@@ -145,7 +145,13 @@ const STATUS_COLOR: Record<string, string> = {
   suspended: "text-yellow-500",
 };
 
-function LogEntry({ log }: { log: ExecutionLogOut }) {
+function LogEntry({
+  log,
+  streamingText,
+}: {
+  log: ExecutionLogOut;
+  streamingText?: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const Icon = STATUS_ICON[log.status] ?? CircleDot;
   const color = STATUS_COLOR[log.status] ?? "text-muted-foreground";
@@ -190,6 +196,18 @@ function LogEntry({ log }: { log: ExecutionLogOut }) {
               {log.error}
             </div>
           )}
+          {/* Live token stream — shown for running nodes while the LLM is generating */}
+          {log.status === "running" && streamingText && (
+            <div>
+              <p className="text-[10px] font-medium text-muted-foreground mb-0.5 flex items-center gap-1">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
+                Generating…
+              </p>
+              <pre className="text-xs bg-muted rounded p-2 max-h-32 overflow-y-auto font-mono whitespace-pre-wrap break-words">
+                {streamingText}
+              </pre>
+            </div>
+          )}
           {log.output_json && (
             <JsonBlock label="Output" data={log.output_json} />
           )}
@@ -209,6 +227,7 @@ export function ExecutionPanel() {
   const currentWorkflow = useWorkflowStore((s) => s.currentWorkflow);
   const instanceContext = useWorkflowStore((s) => s.instanceContext);
   const fetchInstanceContext = useWorkflowStore((s) => s.fetchInstanceContext);
+  const streamingTokens = useWorkflowStore((s) => s.streamingTokens);
   const [hitlOpen, setHitlOpen] = useState(false);
 
   if (!activeInstance) return null;
@@ -277,7 +296,11 @@ export function ExecutionPanel() {
             </p>
           ) : (
             activeInstance.logs.map((log) => (
-              <LogEntry key={log.id} log={log} />
+              <LogEntry
+                key={log.id}
+                log={log}
+                streamingText={streamingTokens[log.node_id]}
+              />
             ))
           )}
         </div>

@@ -133,6 +133,8 @@ def execute_graph(db: Session, instance_id: str, deterministic_mode: bool = Fals
     context: dict[str, Any] = dict(instance.context_json or {})
     if instance.trigger_payload:
         context["trigger"] = instance.trigger_payload
+    # Expose instance_id so node handlers can route LLM tokens to the right Redis channel
+    context["_instance_id"] = str(instance.id)
 
     det_tag = ["deterministic"] if deterministic_mode else []
     with trace_workflow(
@@ -473,6 +475,10 @@ def _execute_single_node(
             db.commit()
             logger.info("Workflow %s suspended at node %s for human approval", instance.id, node_id)
             return "suspended"
+
+    # Expose node_id so _handle_agent can route streaming tokens correctly.
+    # Safe here — _execute_single_node is always sequential.
+    context["_current_node_id"] = node_id
 
     with span_node(
         trace,
