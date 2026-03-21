@@ -107,9 +107,15 @@ The `useNodeValidation` hook (`src/lib/useNodeValidation.ts`) runs `validateWork
 
 ---
 
-## 3. Step 2 — Drag-and-Drop: Palette to Canvas
+## 3. Step 2 — Finding and Dragging Nodes: Palette to Canvas
 
 **Code:** `components/sidebar/NodePalette.tsx` → `components/canvas/FlowCanvas.tsx` → `store/flowStore.ts`
+
+The palette has a **search input** at the top. Typing filters nodes by label and description:
+- Categories with zero matches are hidden entirely
+- Categories with matches auto-expand (collapsing is disabled during a search)
+- Category headers show `matched/total` count while a query is active
+- A ✕ button clears the search
 
 The data flow for a drag-and-drop operation:
 

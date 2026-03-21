@@ -13,6 +13,8 @@ import {
   History,
   Save,
   ChevronRight,
+  Search,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -90,6 +92,7 @@ export function NodePalette({ collapsed, onToggle }: NodePaletteProps) {
   const [openCategories, setOpenCategories] = useState<Set<NodeCategory>>(
     new Set(CATEGORIES),
   );
+  const [search, setSearch] = useState("");
 
   const toggle = (cat: NodeCategory) => {
     setOpenCategories((prev) => {
@@ -99,6 +102,16 @@ export function NodePalette({ collapsed, onToggle }: NodePaletteProps) {
       return next;
     });
   };
+
+  const q = search.trim().toLowerCase();
+  const filterItems = (items: PaletteItem[]) =>
+    q
+      ? items.filter(
+          (i) =>
+            i.label.toLowerCase().includes(q) ||
+            i.description.toLowerCase().includes(q),
+        )
+      : items;
 
   if (collapsed) {
     return (
@@ -152,27 +165,58 @@ export function NodePalette({ collapsed, onToggle }: NodePaletteProps) {
         </button>
       </div>
       <Separator />
+
+      {/* Search input */}
+      <div className="px-3 py-2">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search nodes…"
+            className="w-full rounded-md border border-input bg-background pl-8 pr-7 py-1.5 text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+              title="Clear search"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+      </div>
+      <Separator />
+
       <ScrollArea className="flex-1 px-3 py-2">
         <div className="space-y-1">
           {CATEGORIES.map((cat) => {
             const meta = CATEGORY_META[cat];
-            const items = NODE_PALETTE.filter((i) => i.nodeCategory === cat);
+            const allItems = NODE_PALETTE.filter((i) => i.nodeCategory === cat);
+            const items = filterItems(allItems);
+
+            // Hide entire category when search has no matches in it
+            if (q && items.length === 0) return null;
+
             return (
               <Collapsible
                 key={cat}
-                open={openCategories.has(cat)}
-                onOpenChange={() => toggle(cat)}
+                // Auto-expand categories that have search matches
+                open={q ? true : openCategories.has(cat)}
+                onOpenChange={() => !q && toggle(cat)}
               >
                 <CollapsibleTrigger className="flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-sm font-medium hover:bg-accent transition-colors">
                   <ChevronRight
                     className={cn(
                       "h-3.5 w-3.5 transition-transform",
-                      openCategories.has(cat) && "rotate-90",
+                      (q || openCategories.has(cat)) && "rotate-90",
                     )}
                   />
                   <span className={meta.color}>{meta.label}</span>
                   <span className="ml-auto text-xs text-muted-foreground">
-                    {items.length}
+                    {q ? `${items.length}/${allItems.length}` : allItems.length}
                   </span>
                 </CollapsibleTrigger>
                 <CollapsibleContent className="space-y-1.5 py-1.5 pl-2">
@@ -183,6 +227,13 @@ export function NodePalette({ collapsed, onToggle }: NodePaletteProps) {
               </Collapsible>
             );
           })}
+
+          {/* Empty state when nothing matches */}
+          {q && CATEGORIES.every((cat) => filterItems(NODE_PALETTE.filter((i) => i.nodeCategory === cat)).length === 0) && (
+            <p className="text-xs text-muted-foreground text-center py-4">
+              No nodes match "{search}"
+            </p>
+          )}
         </div>
       </ScrollArea>
     </div>
