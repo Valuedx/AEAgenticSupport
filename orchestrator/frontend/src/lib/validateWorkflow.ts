@@ -14,7 +14,7 @@
  */
 
 import type { Node, Edge } from "@xyflow/react";
-import type { AgenticNodeData } from "@/types/nodes";
+import { nodeCanvasTitle, type AgenticNodeData } from "@/types/nodes";
 
 export interface ValidationError {
   nodeId: string;
@@ -33,11 +33,13 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   "LLM Router":              [],   // intents check done separately
   "Reflection":              ["reflectionPrompt"],
   "Loop":                    ["continueExpression"],
+  "Bridge User Reply":       [], // at least one of messageExpression / responseNodeId — checked below
 };
 
 // Fields that reference another node ID by value — must exist in the graph
 const NODE_ID_REF_FIELDS: Record<string, string[]> = {
   "Save Conversation State": ["responseNodeId"],
+  "Bridge User Reply":       ["responseNodeId"],
   "LLM Router":              ["historyNodeId"],
 };
 
@@ -80,10 +82,11 @@ export function validateWorkflow(
     for (const node of nodes) {
       if (!reachable.has(node.id)) {
         const data = node.data as AgenticNodeData;
+        const title = nodeCanvasTitle(data);
         errors.push({
           nodeId: node.id,
-          nodeLabel: data.label,
-          message: `"${data.label}" (${node.id}) is not connected to any trigger. Either connect it or remove it.`,
+          nodeLabel: title,
+          message: `"${title}" (${node.id}) is not connected to any trigger. Either connect it or remove it.`,
           severity: "warning",
         });
       }
@@ -93,6 +96,7 @@ export function validateWorkflow(
   // ── 3. Required field checks ───────────────────────────────────────────────
   for (const node of nodes) {
     const data = node.data as AgenticNodeData;
+    const title = nodeCanvasTitle(data);
     const requiredFields = REQUIRED_FIELDS[data.label];
 
     if (requiredFields) {
@@ -101,8 +105,8 @@ export function validateWorkflow(
         if (val === undefined || val === null || val === "") {
           errors.push({
             nodeId: node.id,
-            nodeLabel: data.label,
-            message: `"${data.label}" (${node.id}): field "${field}" is required but empty.`,
+            nodeLabel: title,
+            message: `"${title}" (${node.id}): field "${field}" is required but empty.`,
             severity: "error",
           });
         }
@@ -115,8 +119,22 @@ export function validateWorkflow(
       if (!Array.isArray(intents) || intents.length === 0) {
         errors.push({
           nodeId: node.id,
-          nodeLabel: data.label,
-          message: `"LLM Router" (${node.id}): "intents" must have at least one intent label.`,
+          nodeLabel: title,
+          message: `"${title}" (${node.id}): "intents" must have at least one intent label.`,
+          severity: "error",
+        });
+      }
+    }
+
+    if (data.label === "Bridge User Reply") {
+      const cfg = data.config as Record<string, unknown>;
+      const expr = String(cfg.messageExpression ?? "").trim();
+      const rid = String(cfg.responseNodeId ?? "").trim();
+      if (!expr && !rid) {
+        errors.push({
+          nodeId: node.id,
+          nodeLabel: title,
+          message: `"${title}" (${node.id}): set messageExpression or responseNodeId (at least one).`,
           severity: "error",
         });
       }
@@ -128,8 +146,8 @@ export function validateWorkflow(
       if (typeof maxIter === "number" && maxIter > 25) {
         errors.push({
           nodeId: node.id,
-          nodeLabel: data.label,
-          message: `"Loop" (${node.id}): maxIterations is ${maxIter} but the backend hard cap is 25 — the loop will stop at 25.`,
+          nodeLabel: title,
+          message: `"${title}" (${node.id}): maxIterations is ${maxIter} but the backend hard cap is 25 — the loop will stop at 25.`,
           severity: "warning",
         });
       }
@@ -142,6 +160,7 @@ export function validateWorkflow(
     const refFields = NODE_ID_REF_FIELDS[data.label];
 
     if (refFields) {
+      const title = nodeCanvasTitle(data);
       for (const field of refFields) {
         const refId = (data.config as Record<string, unknown>)[field] as string | undefined;
         // Only validate if a non-empty value was provided
@@ -149,8 +168,8 @@ export function validateWorkflow(
           if (!nodeMap.has(refId.trim())) {
             errors.push({
               nodeId: node.id,
-              nodeLabel: data.label,
-              message: `"${data.label}" (${node.id}): field "${field}" references "${refId}" which does not exist on the canvas.`,
+              nodeLabel: title,
+              message: `"${title}" (${node.id}): field "${field}" references "${refId}" which does not exist on the canvas.`,
               severity: "error",
             });
           }

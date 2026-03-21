@@ -7,10 +7,12 @@ Message Gateway handles:
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 from enum import Enum
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from config.llm_client import llm_client, set_current_trace
 from config.observability import trace_context
@@ -18,6 +20,61 @@ from gateway.progress import ProgressCallback
 from state.conversation_state import ConversationState, ConversationPhase
 
 logger = logging.getLogger("ops_agent.gateway")
+
+
+def _is_short_intent_json(text: str) -> bool:
+    """True if *text* looks like an LLM Router style {"intent": ...} blob (not user-facing)."""
+    t = text.strip()
+    if len(t) > 400 or not t.startswith("{"):
+        return False
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[^{}]+\}", t)
+        if not m:
+            return False
+        try:
+            obj = json.loads(m.group())
+        except json.JSONDecodeError:
+            return False
+    if not isinstance(obj, dict):
+        return False
+    keys = set(obj.keys())
+    return keys <= {"intent", "confidence", "reason"} and "intent" in keys
+
+
+def _extract_user_facing_orchestrator_reply(context_json: dict[str, Any]) -> str | None:
+    """Pick the best assistant-visible string from completed workflow context (e.g. LLM / ReAct nodes).
+
+    Skips ``trigger``, internal ``_*`` keys, and short router classification JSON.
+    Optional explicit override: top-level string key ``orchestrator_user_reply``.
+    """
+    if not context_json:
+        return None
+    explicit = context_json.get("orchestrator_user_reply")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    best: tuple[int, str] | None = None
+    for key, val in context_json.items():
+        if key == "trigger" or (isinstance(key, str) and key.startswith("_")):
+            continue
+        if not isinstance(val, dict):
+            continue
+        text = val.get("response")
+        if not isinstance(text, str) or not text.strip():
+            raw_out = val.get("output")
+            if isinstance(raw_out, str) and raw_out.strip():
+                text = raw_out
+            else:
+                continue
+        text = text.strip()
+        if not text or _is_short_intent_json(text):
+            continue
+        score = len(text)
+        if best is None or score > best[0]:
+            best = (score, text)
+    return best[1] if best else None
 
 
 def _parse_metadata_bool(value, *, default: bool) -> bool:
@@ -141,6 +198,24 @@ class MessageGateway:
             default=default,
         )
 
+    @staticmethod
+    def _orchestrator_bridge_chat_reply_mode(user_metadata: dict | None) -> str:
+        """``auto`` = extract assistant text for Teams/chat when possible; ``full_context`` = JSON only."""
+        from config.settings import CONFIG
+
+        if user_metadata:
+            raw = user_metadata.get("orchestrator_chat_reply_mode")
+            if raw is not None:
+                s = str(raw).strip().lower()
+                if s in ("full_context", "full", "raw", "json"):
+                    return "full_context"
+                if s in ("auto", "friendly", "chat"):
+                    return "auto"
+        cfg = str(CONFIG.get("ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE", "auto") or "auto").strip().lower()
+        if cfg in ("full_context", "full", "raw", "json"):
+            return "full_context"
+        return "auto"
+
     def process_message(
         self, conversation_id: str, user_message: str,
         user_id: str = "", user_role: str = "technical",
@@ -180,6 +255,13 @@ class MessageGateway:
         #   orchestrator_wait_for_result (bool, optional) — if True, block until completed/failed/
         #       suspended (legacy). If omitted, use ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT from config
         #       (default: async — POST /execute only). If present (including False), that value wins.
+        #   orchestrator_chat_reply_mode (str, optional) — ``auto`` (default): sync completion sends
+        #       the main LLM/ReAct ``response`` text for Teams/chat; ``full_context`` keeps JSON-only.
+        #   orchestrator_include_context_json (bool, optional) — if True with ``auto``, append the
+        #       truncated context JSON after the friendly reply (debugging).
+        #
+        # In the visual orchestrator, a **Bridge User Reply** action node sets
+        # ``orchestrator_user_reply`` in context (preferred over heuristic extraction).
         #
         # Default merge: ``message``, ``session_id``, ``user_id``, ``user_role``, ``user_name``,
         # ``user_email`` are copied from the chat request into the trigger payload when absent,
@@ -207,6 +289,7 @@ class MessageGateway:
                 user_role=user_role,
                 user_name=user_name,
                 user_email=user_email,
+                user_metadata=user_metadata,
             )
 
         if not user_message or not user_message.strip():
@@ -296,6 +379,7 @@ class MessageGateway:
         user_role: str = "",
         user_name: str = "",
         user_email: str = "",
+        user_metadata: dict | None = None,
     ) -> str:
         """Direct bridge: execute an orchestrator workflow and return its output.
 
@@ -309,7 +393,6 @@ class MessageGateway:
         thread is not blocked on Celery. When True, behaves as before (poll until
         terminal state, up to *timeout*).
         """
-        import json
         from tools.orchestrator_client import get_orchestrator_client
 
         merged = self._merge_orchestrator_trigger_payload(
@@ -365,25 +448,48 @@ class MessageGateway:
             inst = ctx.get("instance_id", "?")
             node = ctx.get("current_node_id") or "?"
             approval = (ctx.get("approval_message") or "").strip()
-            approval_txt = f"\n\n**Approval required:** {approval}" if approval else ""
             snippet = json.dumps(ctx.get("context_json", {}), default=str, indent=2)
             if len(snippet) > 2_500:
                 snippet = snippet[:2_500] + "\n… [truncated]"
             progress._emit("Workflow suspended for review.", force=True)
+            lead = (
+                f"**Human approval required**\n\n{approval}\n\n"
+                if approval
+                else "**Human approval required**\n\n"
+                "The workflow is waiting in **AE AI Hub → Review & Resume**.\n\n"
+            )
             return (
-                f"Workflow `{workflow_id}` is **suspended** awaiting human approval.\n"
+                f"{lead}"
+                f"- **Workflow:** `{workflow_id}`\n"
                 f"- **Instance id:** `{inst}`\n"
-                f"- **Current node:** `{node}`{approval_txt}\n\n"
-                "Resume from the orchestrator UI (Review & Resume) or call "
+                f"- **Node:** `{node}`\n\n"
+                "Resume from the orchestrator **Review & Resume** UI, or call "
                 f"`POST /api/v1/workflows/{workflow_id}/callback` with "
                 "`approval_payload` (and optional `context_patch`).\n\n"
-                f"```json\n{snippet}\n```"
+                f"*Context (truncated):*\n```json\n{snippet}\n```"
             )
 
-        output = json.dumps(ctx.get("context_json", {}), default=str, indent=2)
+        reply_mode = self._orchestrator_bridge_chat_reply_mode(user_metadata)
+        raw_ctx = ctx.get("context_json") or {}
+        output = json.dumps(raw_ctx, default=str, indent=2)
         if len(output) > 4_000:
             output = output[:4_000] + "\n… [truncated]"
         progress._emit("Workflow complete.", force=True)
+        if reply_mode == "full_context":
+            return f"Workflow `{workflow_id}` completed.\n```json\n{output}\n```"
+
+        friendly = _extract_user_facing_orchestrator_reply(raw_ctx)
+        if friendly:
+            if _parse_metadata_bool(
+                (user_metadata or {}).get("orchestrator_include_context_json"),
+                default=False,
+            ):
+                return (
+                    f"{friendly}\n\n---\n"
+                    f"**Workflow `{workflow_id}` completed.**\n```json\n{output}\n```"
+                )
+            return f"{friendly}\n\n---\n*Workflow `{workflow_id}` completed.*"
+
         return f"Workflow `{workflow_id}` completed.\n```json\n{output}\n```"
 
     def _dispatch(

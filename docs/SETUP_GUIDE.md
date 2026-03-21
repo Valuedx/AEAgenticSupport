@@ -1,4 +1,4 @@
-> - **Visual orchestrator — Studio `.env` (2026-03-21)**: Section 3.1.1 documents `ORCHESTRATOR_BASE_URL`, `ORCHESTRATOR_TENANT_ID`, `ORCHESTRATOR_API_TOKEN`, and `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` for the AI Studio / agent server (distinct from hub `orchestrator/backend/` settings). `.env.example` includes the same optional block.
+> - **Visual orchestrator — Studio `.env` (2026-03-22)**: Section 3.1.1 documents `ORCHESTRATOR_BASE_URL`, `ORCHESTRATOR_TENANT_ID`, `ORCHESTRATOR_API_TOKEN`, `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT`, and `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` for the AI Studio / agent server (distinct from hub `orchestrator/backend/` settings). `.env.example` includes the same optional block when present.
 >
 > - **LangFuse Observability — Full Coverage (2026-03-20)**:
 >   - Added optional LangFuse integration for full LLM observability (traces, generations, spans).
@@ -354,6 +354,7 @@ DOCS_CATALOG_PATH=state/docs_catalog.json
 # ORCHESTRATOR_TENANT_ID=default
 # ORCHESTRATOR_API_TOKEN=
 # ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=false
+# ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE=auto
 ```
 
 ### 3.1.1 Visual orchestrator bridge (optional)
@@ -366,6 +367,7 @@ Use these variables on the **AI Studio / agent server** `.env` (the one read by 
 | `ORCHESTRATOR_TENANT_ID` | No | `default` | Sent as `X-Tenant-Id`; must match hub expectations (JWT mode uses token claims). |
 | `ORCHESTRATOR_API_TOKEN` | When hub uses JWT | *(service token)* | `Authorization: Bearer …` when `ORCHESTRATOR_AUTH_MODE=jwt` on the hub. |
 | `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` | No | `false` | If `true`, Studio blocks on `run_and_wait` for metadata-triggered runs; if `false` (default), only enqueues and returns instance id + poll URLs. Per-request override: `orchestrator_wait_for_result` in `user_metadata`. |
+| `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` | No | `auto` | When sync bridge completes: `auto` returns friendly assistant text (prefers DAG `orchestrator_user_reply` from **Bridge User Reply** nodes, else heuristic); `full_context` forces JSON only. Per-request: `orchestrator_chat_reply_mode` in `user_metadata`. See `orchestrator/TECHNICAL_BLUEPRINT.md` §10. |
 
 ### 3.2 Set environment variables on the server
 

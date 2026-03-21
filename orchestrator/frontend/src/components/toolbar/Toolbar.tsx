@@ -186,14 +186,14 @@ export function Toolbar() {
             if (
               (isDirty || nodeCount > 0) &&
               !window.confirm(
-                "Replace the canvas with the IT helpdesk example workflow? Unsaved changes will be lost if you have not saved.",
+                "Replace the canvas with the IT helpdesk example? It matches AI Studio’s orchestrator bridge (save this DAG, set orchestrator_workflow_id for Teams/webchat). Unsaved changes will be lost if you have not saved.",
               )
             ) {
               return;
             }
             loadExampleComplexWorkflow();
           }}
-          title="Example: IT helpdesk (SLA checklist, L2 approval)"
+          title="Example: IT helpdesk — router, ForEach SLA notes, L2 approval (Studio/Teams bridge)"
         >
           <Layers className="h-4 w-4" />
         </Button>
@@ -205,14 +205,14 @@ export function Toolbar() {
             if (
               (isDirty || nodeCount > 0) &&
               !window.confirm(
-                "Replace the canvas with the AutomationEdge main-app routing example (gateway + specialists)? Unsaved changes will be lost if you have not saved.",
+                "Replace the canvas with the replicated main-app routing example (gateway specialists as a DAG)? Same fields as the AI Studio orchestrator bridge (orchestrator_workflow_id + merged trigger). Unsaved changes will be lost if you have not saved.",
               )
             ) {
               return;
             }
             loadAutomationEdgeMainWorkflow();
           }}
-          title="Example: main app parity — diagnostic / remediation / RCA / ops orchestrator"
+          title="Example: main-app parity — router + specialists + HITL (orchestrator V0.9.x, Studio/Teams)"
         >
           <Cpu className="h-4 w-4" />
         </Button>

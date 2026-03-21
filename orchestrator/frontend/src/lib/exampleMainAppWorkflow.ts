@@ -2,25 +2,48 @@ import type { Edge, Node } from "@xyflow/react";
 import type { AgenticNodeData } from "@/types/nodes";
 
 /**
- * Parity sketch for **AutomationEdge AI Studio** (`main.py` → `MessageGateway` → `AgentRouter`).
+ * Parity sketch for the **AutomationEdge main app** routing story (`gateway/message_gateway.py`,
+ * `agents/agent_router.py`): multi-agent router → diagnostic / remediation / RCA / ops specialists,
+ * with **Human Approval** before persisting risky remediation (same idea as gateway `AWAITING_APPROVAL`).
  *
- * Main app behavior (see repo root `gateway/message_gateway.py`, `agents/agent_router.py`):
- * - Messages enter the gateway; optional multi-agent **router** scores specialists.
- * - **diagnostic_agent** — logs, status, investigation (`allowed_categories` status/logs/…).
- * - **remediation_agent** — restart, fix, execute (`remediation`, `notification`, `config`).
- * - **rca_agent** — RCA / postmortem reports (`generate_rca_report`-style synthesis).
- * - **ops_orchestrator** — default catch-all for RPA/workflow/automation (full orchestrator loop).
- * - Risky remediation aligns with **Human Approval** (gateway uses `AWAITING_APPROVAL` on the monolithic orchestrator).
+ * This DAG encodes that **routing intent** using **LLM Router** + **Condition** chains and
+ * **Load/Save Conversation State** (orchestrator V0.9.x stateful DAGs). Attach MCP tools on the
+ * ReAct nodes to mirror specialist tool categories.
  *
- * This DAG encodes the same **routing intent** with an LLM Router + chained Conditions.
- * Connect your MCP tools in ReAct nodes to approximate specialist tool categories.
+ * ## AI Studio + MS Teams (production-shaped path)
  *
- * Trigger JSON (execute):
+ * Save this graph in **AE AI Hub**, copy the workflow **UUID**, and invoke it from AI Studio **without
+ * spending LLM tokens in Studio** by setting `user_metadata.orchestrator_workflow_id` to that UUID
+ * (see `gateway/message_gateway.py` and `orchestrator/TECHNICAL_BLUEPRINT.md` §10).
+ *
+ * Typical flow: **Teams** → Azure Bot → AI Studio extension / `handle_chat_message()` → bridge
+ * `POST …/execute` with a merged trigger. `orchestrator_payload` (optional) is shallow-merged; if
+ * you omit `message`, `session_id`, `user_id`, `user_role`, `user_name`, or `user_email`, Studio
+ * fills them from the chat turn (`conversation_id` maps to `session_id`; user profile fields when wired).
+ *
+ * **Async by default:** the bridge may enqueue and return instance id + context URL (no long block in
+ * chat). For **Teams**, set `orchestrator_wait_for_result: true` (or env
+ * `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true`) so the bot can return **one message** with the specialist
+ * answer: this graph uses **Bridge User Reply** so `orchestrator_user_reply` is explicit; otherwise
+ * the gateway can pick the longest LLM/ReAct `response` (`auto` mode). Use
+ * `orchestrator_chat_reply_mode: "full_context"` for JSON-only. **Human-in-the-loop**
+ * suspensions are **not** auto-resumed from Teams — use the Hub **Review & Resume** UI or
+ * `POST /api/v1/workflows/{id}/callback`.
+ *
+ * Each specialist branch includes **Bridge User Reply** before save: it sets `orchestrator_user_reply`
+ * so the bridge returns that exact text in sync mode (overrides heuristic `auto` extraction).
+ *
+ * The **Webhook Trigger** is for local **Run** in the builder; in Studio/Teams mode the same
+ * fields arrive as `trigger.*` via the merged execute payload.
+ *
+ * Trigger JSON (Execute in UI, or equivalent merged `orchestrator_payload`):
  * {
- *   "session_id": "ae-session-001",
+ *   "session_id": "teams-thread-or-ae-session-001",
  *   "message": "Workflow 2887 failed — pull the error logs and suggest a fix",
  *   "user_role": "technical",
- *   "user_id": "user@company.com"
+ *   "user_id": "user@company.com",
+ *   "user_name": "Jane Doe",
+ *   "user_email": "jane@company.com"
  * }
  */
 export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[] } = {
@@ -31,6 +54,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 0, y: 260 },
       data: {
         label: "Webhook Trigger",
+        displayName: "Ops intake (webhook or Studio)",
         nodeCategory: "trigger",
         config: {
           icon: "webhook",
@@ -46,6 +70,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 220, y: 260 },
       data: {
         label: "Load Conversation State",
+        displayName: "Load session history",
         nodeCategory: "action",
         config: {
           icon: "history",
@@ -60,6 +85,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 460, y: 260 },
       data: {
         label: "LLM Router",
+        displayName: "Route message to specialist",
         nodeCategory: "agent",
         config: {
           icon: "route",
@@ -79,6 +105,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 700, y: 260 },
       data: {
         label: "Condition",
+        displayName: "If intent = diagnostics",
         nodeCategory: "logic",
         config: {
           icon: "git-branch",
@@ -95,6 +122,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 940, y: 360 },
       data: {
         label: "Condition",
+        displayName: "Else if intent = remediation",
         nodeCategory: "logic",
         config: {
           icon: "git-branch",
@@ -111,6 +139,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1180, y: 460 },
       data: {
         label: "Condition",
+        displayName: "Else if intent = RCA report",
         nodeCategory: "logic",
         config: {
           icon: "git-branch",
@@ -127,6 +156,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 980, y: 80 },
       data: {
         label: "ReAct Agent",
+        displayName: "Diagnostics specialist (ReAct + tools)",
         nodeCategory: "agent",
         config: {
           icon: "repeat",
@@ -148,6 +178,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1180, y: 220 },
       data: {
         label: "ReAct Agent",
+        displayName: "Remediation specialist (ReAct + tools)",
         nodeCategory: "agent",
         config: {
           icon: "repeat",
@@ -169,6 +200,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1420, y: 400 },
       data: {
         label: "LLM Agent",
+        displayName: "RCA report author",
         nodeCategory: "agent",
         config: {
           icon: "brain",
@@ -191,6 +223,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1420, y: 560 },
       data: {
         label: "LLM Agent",
+        displayName: "Default ops orchestrator",
         nodeCategory: "agent",
         config: {
           icon: "brain",
@@ -213,6 +246,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1420, y: 220 },
       data: {
         label: "Human Approval",
+        displayName: "Human gate: approve remediation",
         nodeCategory: "action",
         config: {
           icon: "user-check",
@@ -229,6 +263,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1680, y: 80 },
       data: {
         label: "Save Conversation State",
+        displayName: "Save turn · diagnostics answer",
         nodeCategory: "action",
         config: {
           icon: "save",
@@ -245,6 +280,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1680, y: 220 },
       data: {
         label: "Save Conversation State",
+        displayName: "Save turn · remediation (after approval)",
         nodeCategory: "action",
         config: {
           icon: "save",
@@ -261,6 +297,7 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1680, y: 400 },
       data: {
         label: "Save Conversation State",
+        displayName: "Save turn · RCA answer",
         nodeCategory: "action",
         config: {
           icon: "save",
@@ -277,12 +314,77 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1680, y: 560 },
       data: {
         label: "Save Conversation State",
+        displayName: "Save turn · default ops answer",
         nodeCategory: "action",
         config: {
           icon: "save",
           sessionIdExpression: "trigger.session_id",
           responseNodeId: "node_10",
           userMessageExpression: "trigger.message",
+        },
+        status: "idle",
+      } satisfies AgenticNodeData,
+    },
+    {
+      id: "node_16",
+      type: "agenticNode",
+      position: { x: 1320, y: 80 },
+      data: {
+        label: "Bridge User Reply",
+        displayName: "Chat reply · diagnostics",
+        nodeCategory: "action",
+        config: {
+          icon: "message-square",
+          responseNodeId: "node_7",
+          messageExpression: "",
+        },
+        status: "idle",
+      } satisfies AgenticNodeData,
+    },
+    {
+      id: "node_17",
+      type: "agenticNode",
+      position: { x: 1280, y: 220 },
+      data: {
+        label: "Bridge User Reply",
+        displayName: "Chat reply · remediation",
+        nodeCategory: "action",
+        config: {
+          icon: "message-square",
+          responseNodeId: "node_8",
+          messageExpression: "",
+        },
+        status: "idle",
+      } satisfies AgenticNodeData,
+    },
+    {
+      id: "node_18",
+      type: "agenticNode",
+      position: { x: 1540, y: 400 },
+      data: {
+        label: "Bridge User Reply",
+        displayName: "Chat reply · RCA",
+        nodeCategory: "action",
+        config: {
+          icon: "message-square",
+          responseNodeId: "node_9",
+          messageExpression: "",
+        },
+        status: "idle",
+      } satisfies AgenticNodeData,
+    },
+    {
+      id: "node_19",
+      type: "agenticNode",
+      position: { x: 1540, y: 560 },
+      data: {
+        label: "Bridge User Reply",
+        displayName: "Chat reply · default ops",
+        nodeCategory: "action",
+        config: {
+          icon: "message-square",
+          responseNodeId: "node_10",
+          messageExpression: "",
         },
         status: "idle",
       } satisfies AgenticNodeData,
@@ -346,10 +448,14 @@ export const EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW: { nodes: Node[]; edges: Edge[
       style: { stroke: "#ef4444", strokeWidth: 2 },
       animated: true,
     },
-    { id: "e_7_12", source: "node_7", target: "node_12" },
-    { id: "e_8_11", source: "node_8", target: "node_11" },
+    { id: "e_7_16", source: "node_7", target: "node_16" },
+    { id: "e_16_12", source: "node_16", target: "node_12" },
+    { id: "e_8_17", source: "node_8", target: "node_17" },
+    { id: "e_17_11", source: "node_17", target: "node_11" },
     { id: "e_11_13", source: "node_11", target: "node_13" },
-    { id: "e_9_14", source: "node_9", target: "node_14" },
-    { id: "e_10_15", source: "node_10", target: "node_15" },
+    { id: "e_9_18", source: "node_9", target: "node_18" },
+    { id: "e_18_14", source: "node_18", target: "node_14" },
+    { id: "e_10_19", source: "node_10", target: "node_19" },
+    { id: "e_19_15", source: "node_19", target: "node_15" },
   ],
 };

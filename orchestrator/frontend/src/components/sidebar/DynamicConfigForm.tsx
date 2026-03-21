@@ -66,7 +66,14 @@ function humanize(key: string): string {
 const TEXTAREA_KEYS = new Set(["systemPrompt", "approvalMessage", "body"]);
 
 // Fields that accept safe_eval dot-path expressions (e.g. node_2.intent == "x")
-const EXPRESSION_KEYS = new Set(["condition", "arrayExpression", "continueExpression", "sessionIdExpression", "userMessageExpression"]);
+const EXPRESSION_KEYS = new Set([
+  "condition",
+  "arrayExpression",
+  "continueExpression",
+  "sessionIdExpression",
+  "userMessageExpression",
+  "messageExpression",
+]);
 
 // Fields that accept a bare node ID (e.g. node_3)
 const NODE_ID_KEYS = new Set(["responseNodeId", "historyNodeId"]);

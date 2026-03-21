@@ -2,24 +2,34 @@ import type { Edge, Node } from "@xyflow/react";
 import type { AgenticNodeData } from "@/types/nodes";
 
 /**
- * IT / customer helpdesk — single complete vertical
+ * IT / customer helpdesk — single complete vertical (orchestrator V0.9.x: router, ForEach, HITL).
  *
- * Story: A ticket arrives on POST /support/helpdesk. The workflow loads prior
- * conversation for that session, classifies the message, routes to (1) orders &
- * shipping, (2) technical troubleshooting with tools + optional human gate, or
- * (3) general / deflection. Each path persists the turn. In parallel, a fixed
- * SLA checklist runs (ForEach) to produce internal notes for the ticket record.
+ * Story: A ticket arrives (webhook **POST /support/helpdesk** in the builder, or the same fields
+ * merged from **AI Studio** when using `user_metadata.orchestrator_workflow_id`). The workflow loads
+ * prior conversation, classifies the message, routes to (1) orders & shipping, (2) technical path with
+ * ReAct + **Human Approval**, or (3) general / deflection. Each path persists the turn. In parallel,
+ * a fixed SLA checklist (**ForEach**) produces internal notes.
  *
- * Example trigger payload (execute with JSON body):
+ * **Teams → AI Studio:** configure the bot / extension to call `handle_chat_message` with
+ * `orchestrator_workflow_id` set to this workflow’s saved UUID; optional `orchestrator_payload` may
+ * include `customer_email`, `product`, etc. Studio merges `message`, `session_id`, and user identity
+ * fields when omitted (see `MessageGateway._merge_orchestrator_trigger_payload`). Use
+ * `orchestrator_wait_for_result: true` so Teams gets the **assistant reply text** (not only queue
+ * metadata); **Bridge User Reply** nodes pin that text via `orchestrator_user_reply`. The gateway still
+ * supports `auto` heuristic mode if you omit the bridge. HITL resume is via the Hub or callback API.
+ *
+ * Example trigger payload (Execute in UI or merged orchestrator payload):
  * {
  *   "session_id": "ticket-8821",
  *   "message": "VPN disconnects hourly on my Mac — case 4412",
  *   "customer_email": "alex@acme.com",
- *   "product": "Corporate VPN"
+ *   "product": "Corporate VPN",
+ *   "user_id": "alex@acme.com",
+ *   "user_name": "Alex Rivera"
  * }
  *
- * Technical path: ReAct runs first; Human Approval pauses for L2 sign-off before save
- * (resume via your approval API in production). Orders and general paths skip that gate.
+ * Technical path: ReAct runs first; Human Approval pauses for L2 sign-off before save (resume via
+ * Hub **Review & Resume** or callback API). Orders and general paths skip that gate.
  */
 export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[] } = {
   nodes: [
@@ -29,6 +39,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 0, y: 220 },
       data: {
         label: "Webhook Trigger",
+        displayName: "Helpdesk intake",
         nodeCategory: "trigger",
         config: {
           icon: "webhook",
@@ -44,6 +55,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 240, y: 220 },
       data: {
         label: "Load Conversation State",
+        displayName: "Load ticket thread",
         nodeCategory: "action",
         config: {
           icon: "history",
@@ -58,6 +70,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 500, y: 220 },
       data: {
         label: "LLM Router",
+        displayName: "Classify: orders / technical / general",
         nodeCategory: "agent",
         config: {
           icon: "route",
@@ -76,6 +89,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 760, y: 220 },
       data: {
         label: "Condition",
+        displayName: "If orders & shipping",
         nodeCategory: "logic",
         config: {
           icon: "git-branch",
@@ -92,6 +106,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1020, y: 20 },
       data: {
         label: "LLM Agent",
+        displayName: "Orders & billing assistant",
         nodeCategory: "agent",
         config: {
           icon: "brain",
@@ -114,6 +129,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1020, y: 260 },
       data: {
         label: "Condition",
+        displayName: "Else if technical issue",
         nodeCategory: "logic",
         config: {
           icon: "git-branch",
@@ -130,6 +146,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1240, y: 140 },
       data: {
         label: "ReAct Agent",
+        displayName: "L1 technical support (ReAct + tools)",
         nodeCategory: "agent",
         config: {
           icon: "repeat",
@@ -152,6 +169,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1240, y: 360 },
       data: {
         label: "LLM Agent",
+        displayName: "General & deflection assistant",
         nodeCategory: "agent",
         config: {
           icon: "brain",
@@ -173,6 +191,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 240, y: 440 },
       data: {
         label: "ForEach",
+        displayName: "Parallel SLA checklist",
         nodeCategory: "logic",
         config: {
           icon: "repeat",
@@ -192,6 +211,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 520, y: 440 },
       data: {
         label: "LLM Agent",
+        displayName: "Internal note per checklist step",
         nodeCategory: "agent",
         config: {
           icon: "brain",
@@ -213,6 +233,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1720, y: 20 },
       data: {
         label: "Save Conversation State",
+        displayName: "Save customer reply (orders path)",
         nodeCategory: "action",
         config: {
           icon: "save",
@@ -229,6 +250,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1720, y: 140 },
       data: {
         label: "Save Conversation State",
+        displayName: "Save customer reply (technical path)",
         nodeCategory: "action",
         config: {
           icon: "save",
@@ -245,6 +267,7 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1720, y: 360 },
       data: {
         label: "Save Conversation State",
+        displayName: "Save customer reply (general path)",
         nodeCategory: "action",
         config: {
           icon: "save",
@@ -261,12 +284,61 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       position: { x: 1480, y: 140 },
       data: {
         label: "Human Approval",
+        displayName: "L2 review before customer send",
         nodeCategory: "action",
         config: {
           icon: "user-check",
           approvalMessage:
             "L2 review: confirm the ReAct output is safe to send to the customer (or edit via resume payload).",
           timeout: 86400,
+        },
+        status: "idle",
+      } satisfies AgenticNodeData,
+    },
+    {
+      id: "node_15",
+      type: "agenticNode",
+      position: { x: 1370, y: 20 },
+      data: {
+        label: "Bridge User Reply",
+        displayName: "Chat reply · orders",
+        nodeCategory: "action",
+        config: {
+          icon: "message-square",
+          responseNodeId: "node_5",
+          messageExpression: "",
+        },
+        status: "idle",
+      } satisfies AgenticNodeData,
+    },
+    {
+      id: "node_16",
+      type: "agenticNode",
+      position: { x: 1600, y: 140 },
+      data: {
+        label: "Bridge User Reply",
+        displayName: "Chat reply · technical",
+        nodeCategory: "action",
+        config: {
+          icon: "message-square",
+          responseNodeId: "node_7",
+          messageExpression: "",
+        },
+        status: "idle",
+      } satisfies AgenticNodeData,
+    },
+    {
+      id: "node_17",
+      type: "agenticNode",
+      position: { x: 1480, y: 360 },
+      data: {
+        label: "Bridge User Reply",
+        displayName: "Chat reply · general",
+        nodeCategory: "action",
+        config: {
+          icon: "message-square",
+          responseNodeId: "node_8",
+          messageExpression: "",
         },
         status: "idle",
       } satisfies AgenticNodeData,
@@ -312,10 +384,13 @@ export const EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW: { nodes: Node[]; edges: Edge[
       style: { stroke: "#ef4444", strokeWidth: 2 },
       animated: true,
     },
-    { id: "e_5_11", source: "node_5", target: "node_11" },
+    { id: "e_5_15", source: "node_5", target: "node_15" },
+    { id: "e_15_11", source: "node_15", target: "node_11" },
     { id: "e_7_14", source: "node_7", target: "node_14" },
-    { id: "e_14_12", source: "node_14", target: "node_12" },
-    { id: "e_8_13", source: "node_8", target: "node_13" },
+    { id: "e_14_16", source: "node_14", target: "node_16" },
+    { id: "e_16_12", source: "node_16", target: "node_12" },
+    { id: "e_8_17", source: "node_8", target: "node_17" },
+    { id: "e_17_13", source: "node_17", target: "node_13" },
     { id: "e_1_9", source: "node_1", target: "node_9" },
     { id: "e_9_10", source: "node_9", target: "node_10" },
   ],

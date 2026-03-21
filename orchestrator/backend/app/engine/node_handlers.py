@@ -52,6 +52,8 @@ def dispatch_node(
         return _handle_load_conversation_state(node_data, context, tenant_id)
     if label == "Save Conversation State":
         return _handle_save_conversation_state(node_data, context, tenant_id)
+    if label == "Bridge User Reply":
+        return _handle_bridge_user_reply(node_data, context, tenant_id)
     if label == "LLM Router":
         return _handle_llm_router(node_data, context, tenant_id)
     if label == "Reflection":
@@ -308,6 +310,46 @@ def _resolve_expr(expr: str, context: dict[str, Any]) -> Any:
     except Exception as exc:
         logger.warning("Expression '%s' evaluation error: %s", expr, exc)
         return None
+
+
+def _handle_bridge_user_reply(
+    node_data: dict, context: dict[str, Any], _tenant_id: str
+) -> dict[str, Any]:
+    """Set the user-visible reply for AI Studio / Teams (orchestrator bridge).
+
+    Writes ``orchestrator_user_reply`` which the DAG runner promotes to context
+    root. Prefer *messageExpression* when set; otherwise resolve *responseNodeId*
+    like Save Conversation State (``response`` / ``output`` on that node).
+    """
+    config = node_data.get("config", {})
+    msg_expr = str(config.get("messageExpression", "") or "").strip()
+    response_node_id = str(config.get("responseNodeId", "") or "").strip()
+
+    text = ""
+    if msg_expr:
+        raw = _resolve_expr(msg_expr, context)
+        text = str(raw).strip() if raw is not None else ""
+    elif response_node_id and response_node_id in context:
+        node_out = context[response_node_id]
+        if isinstance(node_out, dict):
+            text = str(
+                node_out.get("response", node_out.get("output", ""))
+            ).strip()
+        else:
+            text = str(node_out).strip()
+
+    if not text:
+        logger.warning(
+            "Bridge User Reply: no text resolved (messageExpression=%r responseNodeId=%r)",
+            msg_expr,
+            response_node_id,
+        )
+
+    return {
+        "orchestrator_user_reply": text,
+        "text": text,
+        "source": "messageExpression" if msg_expr else ("responseNodeId" if response_node_id else ""),
+    }
 
 
 def _handle_load_conversation_state(

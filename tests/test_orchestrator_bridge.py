@@ -12,8 +12,35 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import CONFIG
-from gateway.message_gateway import MessageGateway
+from gateway.message_gateway import (
+    MessageGateway,
+    _extract_user_facing_orchestrator_reply,
+    _is_short_intent_json,
+)
 from tools.orchestrator_client import OrchestratorClient
+
+
+class TestExtractUserFacingOrchestratorReply(unittest.TestCase):
+    def test_prefers_longest_agent_response_over_short_json(self):
+        ctx = {
+            "node_3": {"intent": "x", "raw_response": '{"intent": "diagnostics"}'},
+            "node_7": {"response": "Here is the diagnosis with details."},
+        }
+        self.assertEqual(
+            _extract_user_facing_orchestrator_reply(ctx),
+            "Here is the diagnosis with details.",
+        )
+
+    def test_explicit_orchestrator_user_reply_wins(self):
+        ctx = {
+            "orchestrator_user_reply": "Fixed reply",
+            "node_1": {"response": "ignored"},
+        }
+        self.assertEqual(_extract_user_facing_orchestrator_reply(ctx), "Fixed reply")
+
+    def test_detects_short_intent_json(self):
+        self.assertTrue(_is_short_intent_json('{"intent": "orders_and_shipping"}'))
+        self.assertFalse(_is_short_intent_json("Here is a full answer " * 20))
 
 
 class TestMergeOrchestratorTriggerPayload(unittest.TestCase):
@@ -279,6 +306,55 @@ class TestMessageGatewayBridgeAsyncSync(unittest.TestCase):
         self.assertTrue(r_kw["return_on_suspended"])
         self.assertIn("completed", out.lower())
         self.assertIn("node_a", out)
+
+    @patch("tools.orchestrator_client.get_orchestrator_client")
+    def test_sync_friendly_reply_when_auto_mode(self, mock_get):
+        mock_client = MagicMock()
+        mock_client.run_and_wait.return_value = {
+            "status": "completed",
+            "context_json": {
+                "node_2": {"response": "Your VPN issue: try resetting the tunnel."},
+            },
+        }
+        mock_get.return_value = mock_client
+
+        gw = MessageGateway()
+        out = gw.process_message(
+            "c-f",
+            "m-f",
+            user_metadata={
+                "orchestrator_workflow_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "orchestrator_wait_for_result": True,
+                "orchestrator_chat_reply_mode": "auto",
+            },
+        )
+        self.assertIn("Your VPN issue", out)
+        self.assertIn("completed", out.lower())
+        self.assertNotIn("```json", out)
+
+    @patch("tools.orchestrator_client.get_orchestrator_client")
+    def test_sync_full_context_when_metadata_requests_json(self, mock_get):
+        mock_client = MagicMock()
+        mock_client.run_and_wait.return_value = {
+            "status": "completed",
+            "context_json": {
+                "node_2": {"response": "Short"},
+            },
+        }
+        mock_get.return_value = mock_client
+
+        gw = MessageGateway()
+        out = gw.process_message(
+            "c-g",
+            "m-g",
+            user_metadata={
+                "orchestrator_workflow_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "orchestrator_wait_for_result": True,
+                "orchestrator_chat_reply_mode": "full_context",
+            },
+        )
+        self.assertIn("```json", out)
+        self.assertIn("node_2", out)
 
     @patch("tools.orchestrator_client.get_orchestrator_client")
     def test_sync_when_config_wait_for_result_true(self, mock_get):

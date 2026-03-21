@@ -508,6 +508,7 @@ def _execute_single_node(
         try:
             output = dispatch_node(node_data, context, instance.tenant_id)
             context[node_id] = output
+            _promote_orchestrator_user_reply(context, output)
 
             log_entry.status = "completed"
             log_entry.output_json = output
@@ -618,6 +619,7 @@ def _execute_parallel(
         log_entry = log_entries[node_id]
         if status == "completed" and output is not None:
             context[node_id] = output
+            _promote_orchestrator_user_reply(context, output)
             log_entry.status = "completed"
             log_entry.completed_at = _utcnow()
             checkpoint_id = _save_checkpoint(db, instance.id, node_id, context)
@@ -881,6 +883,21 @@ def _run_loop_iterations(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _promote_orchestrator_user_reply(
+    context: dict[str, Any], output: dict[str, Any] | None
+) -> None:
+    """Expose Bridge User Reply output at context root for AI Studio / Teams polling.
+
+    ``InstanceContextOut.context_json`` strips ``_*`` keys only, so this key is
+    visible to ``MessageGateway`` without scraping individual node outputs.
+    """
+    if not isinstance(output, dict):
+        return
+    text = output.get("orchestrator_user_reply")
+    if isinstance(text, str) and text.strip():
+        context["orchestrator_user_reply"] = text.strip()
+
 
 def _build_node_input(node_data: dict, context: dict[str, Any]) -> dict:
     """Build the input payload for a node from the accumulated context."""

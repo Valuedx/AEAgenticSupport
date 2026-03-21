@@ -1,3 +1,5 @@
+> - **V0.9.10 Bridge reply + display names (2026-03-22)**: **Bridge User Reply** node promotes `orchestrator_user_reply` to context root for Studio/Teams sync replies; parent `MessageGateway` prefers it, then heuristic extraction, then JSON (`ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE`). Optional **`displayName`** on canvas nodes (registry **`label`** unchanged) — see Step 4 / Step 17 and `TECHNICAL_BLUEPRINT.md` §3.4.1, §6.8, §10.
+>
 > - **Studio Proxy Bridge (2026-03-22)**: Step 17 — AI Studio proxy via `orchestrator_workflow_id` in `user_metadata`. **Default async:** enqueue only; optional `orchestrator_wait_for_result` / `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` enables blocking poll. Merges chat fields into the trigger when absent; `ORCHESTRATOR_API_TOKEN` for JWT; sync mode returns HITL + callback hints. Tests: `tests/test_orchestrator_bridge.py`. See Step 17 and `orchestrator/TECHNICAL_BLUEPRINT.md` §10.
 >
 > - **V0.9.9 Loop Node (2026-03-22)**: New `Loop` logic node for controlled agentic cycles. Drop it between any two nodes; its directly-connected downstream nodes form the loop "body". Configure `continueExpression` (a `safe_eval` expression evaluated before each iteration — loop runs while True) and `maxIterations` (default 10, backend cap 25). An empty `continueExpression` runs the body unconditionally for `maxIterations`. At each iteration `_loop_index` (0-based) and `_loop_iteration` (1-based) are injected into context and accessible from body nodes' prompts/expressions. After the loop, each body node's context key is replaced with `{"loop_results": [...per-iteration outputs...], "iterations": N}` — downstream nodes can reference individual iteration results via expressions. `validateWorkflow` blocks missing `continueExpression` (error) and warns if `maxIterations > 25`. Canvas shows `≤N×` badge and `⟳ expr` preview. New Step 16 added below.
@@ -36,8 +38,8 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.9
-**Last updated:** 2026-03-21
+**Version:** 0.9.10
+**Last updated:** 2026-03-22
 
 ---
 
@@ -197,15 +199,16 @@ When the user clicks a node on the canvas:
 1. `FlowCanvas.onNodeClick` calls `flowStore.selectNode(node.id)`.
 2. `PropertyInspector` reads `selectedNodeId` from the store and finds the matching node.
 3. A **Node ID chip** at the top of the panel shows the node's machine ID (e.g., `node_3`) in a monospace badge with a one-click copy button. This is the value to use in expressions on other nodes (e.g., `node_3.intent`).
-4. It calls `getRegistryNodeType(data.label)` and `getConfigSchema(data.label)` from `lib/registry.ts` to load the node's schema from `shared/node_registry.json`.
-5. It renders `<DynamicConfigForm>` with the schema, current config, and an `onUpdate` callback.
+4. **Display name (canvas)** — optional friendly title stored in `data.displayName`. **Engine type (registry)** is `data.label` and must stay aligned with `node_registry.json` so schemas and execution dispatch work. The canvas card shows `nodeCanvasTitle()` (`displayName` if set, else `label`); hover the card to see the engine type in the tooltip.
+5. It calls `getRegistryNodeType(data.label)` and `getConfigSchema(data.label)` from `lib/registry.ts` to load the node's schema from `shared/node_registry.json`.
+6. It renders `<DynamicConfigForm>` with the schema, current config, and an `onUpdate` callback.
 
 `DynamicConfigForm` renders one field per schema entry:
 
 | Schema field type | Rendered as | Notes |
 |-------------------|-------------|-------|
 | `string` + `enum` | `<Select>` dropdown | Options from enum array |
-| `string` key in `EXPRESSION_KEYS` | `<ExpressionInput>` (expression mode) | Autocomplete: `node_2.intent`, `trigger.body` |
+| `string` key in `EXPRESSION_KEYS` | `<ExpressionInput>` (expression mode) | Autocomplete: `node_2.intent`, `trigger.body`, `messageExpression` (Bridge User Reply), `continueExpression` (Loop) |
 | `string` key in `NODE_ID_KEYS` | `<ExpressionInput>` (nodeId mode) | Autocomplete: `node_3`, `node_5` |
 | `systemPrompt` | `<ExpressionInput>` (jinja2 mode) | Autocomplete: `{{ node_2.response }}` |
 | `string` (`approvalMessage`, `body`) | `<Textarea>` | Multi-line plain text |
@@ -916,7 +919,9 @@ handle_chat_message(
         "orchestrator_workflow_id": "a1b2c3d4-...",          # required
         "orchestrator_payload": {"incident_id": "INC-456"},  # optional; shallow-merged with chat fields
         "orchestrator_timeout": 90,                          # optional; sync mode only, default 120s
-        # "orchestrator_wait_for_result": True,               # optional; block until done (legacy)
+        # "orchestrator_wait_for_result": True,               # optional; block until done (sync path)
+        # "orchestrator_chat_reply_mode": "auto",             # optional: auto | full_context (JSON only)
+        # "orchestrator_include_context_json": True,          # optional: append JSON after friendly text
     },
 )
 ```
@@ -924,6 +929,8 @@ handle_chat_message(
 **Default merge:** If `orchestrator_payload` omits `message`, `session_id`, `user_id`, `user_role`, `user_name`, or `user_email`, those keys are filled from the chat arguments so DAGs can use `trigger.message` / `trigger.session_id` without custom Studio hooks.
 
 **Async vs sync (default: async):** Unless `orchestrator_wait_for_result` is true or `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` in `.env`, the bridge only **`POST /execute`** and returns **instance id + polling URLs** — it does **not** block the Studio thread. Set `orchestrator_wait_for_result: true` (or the env flag) to restore blocking behavior with `run_and_wait` / `orchestrator_timeout`.
+
+**Sync reply text (Teams / webchat):** When sync finishes with `completed`, `MessageGateway` returns human-readable text when possible: first **`orchestrator_user_reply`** from the DAG context (set by **Bridge User Reply** nodes — see `node_registry.json` type `bridge_user_reply`), else heuristic pick of the longest LLM/ReAct `response`, else a JSON dump. Use **`ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE=full_context`** (or metadata `orchestrator_chat_reply_mode`) to force JSON-only. **Suspended** workflows return approval instructions plus truncated context. Example workflows in `frontend/src/lib/exampleMainAppWorkflow.ts` and `exampleComplexWorkflow.ts` place Bridge nodes per branch before Save.
 
 ### Code path
 
@@ -966,6 +973,8 @@ ORCHESTRATOR_BASE_URL=http://localhost:8001   # orchestrator FastAPI server
 ORCHESTRATOR_TENANT_ID=default               # tenant header sent with every request
 # Optional: set to true to block handle_chat_message until the DAG finishes (legacy behavior)
 ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=false
+# Optional: auto = friendly assistant text when possible; full_context = JSON only
+ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE=auto
 ```
 
 ---

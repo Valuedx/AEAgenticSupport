@@ -201,6 +201,25 @@
       }
     },
     {
+      "type": "bridge_user_reply",
+      "category": "action",
+      "label": "Bridge User Reply",
+      "description": "Choose the exact text AI Studio / Teams shows when using the orchestrator bridge (sets orchestrator_user_reply)",
+      "icon": "message-square",
+      "config_schema": {
+        "messageExpression": {
+          "type": "string",
+          "default": "",
+          "description": "Optional safe_eval expression for the reply (e.g. node_7.response). If set, takes precedence over responseNodeId"
+        },
+        "responseNodeId": {
+          "type": "string",
+          "default": "",
+          "description": "Node id whose response or output field becomes the chat reply (same idea as Save Conversation State)"
+        }
+      }
+    },
+    {
       "type": "condition",
       "category": "logic",
       "label": "Condition",

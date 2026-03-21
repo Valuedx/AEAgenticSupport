@@ -82,12 +82,30 @@ export function PropertyInspector() {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="nodeLabel">Label</Label>
+            <Label htmlFor="nodeDisplayName">Display name (canvas)</Label>
+            <Input
+              id="nodeDisplayName"
+              value={typeof data.displayName === "string" ? data.displayName : ""}
+              placeholder={data.label}
+              onChange={(e) =>
+                onUpdate({ displayName: e.target.value || undefined })
+              }
+            />
+            <p className="text-[10px] text-muted-foreground">
+              Shown on the graph. Leave empty to use the engine type below.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="nodeLabel">Engine type (registry)</Label>
             <Input
               id="nodeLabel"
               value={data.label}
               onChange={(e) => onUpdate({ label: e.target.value })}
             />
+            <p className="text-[10px] text-muted-foreground">
+              Must match a palette node type for properties and execution.
+            </p>
           </div>
 
           <div className="flex items-center gap-2">

@@ -13,6 +13,7 @@ import {
   Route,
   History,
   Save,
+  MessageSquare,
   AlertCircle,
   AlertTriangle,
   RefreshCw,
@@ -20,7 +21,7 @@ import {
 } from "lucide-react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import type { AgenticNodeData, NodeCategory } from "@/types/nodes";
+import { nodeCanvasTitle, type AgenticNodeData, type NodeCategory } from "@/types/nodes";
 import { cn } from "@/lib/utils";
 import { useNodeValidation } from "@/lib/useNodeValidation";
 
@@ -37,6 +38,7 @@ const ICON_MAP: Record<string, LucideIcon> = {
   route: Route,
   history: History,
   save: Save,
+  "message-square": MessageSquare,
   "refresh-cw": RefreshCw,
 };
 
@@ -120,8 +122,8 @@ function AgenticNodeComponent({ id, data, selected }: NodeProps) {
             <Icon className="h-4 w-4" />
           </div>
           <div className="flex-1 min-w-0">
-            <CardTitle className="text-sm font-medium truncate">
-              {label}
+            <CardTitle className="text-sm font-medium truncate" title={label}>
+              {nodeCanvasTitle(nodeData)}
             </CardTitle>
           </div>
           {hasError && (

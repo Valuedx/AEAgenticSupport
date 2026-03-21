@@ -1,3 +1,5 @@
+> - **V0.9.10 Bridge reply UX + canvas display names (2026-03-22)**: **Bridge User Reply** action node (`bridge_user_reply` in `node_registry.json`) sets the final chat string for the AI Studio proxy: handler `_handle_bridge_user_reply` resolves `messageExpression` (safe_eval) or `responseNodeId` (same pattern as Save Conversation State); `dag_runner._promote_orchestrator_user_reply()` copies non-empty `orchestrator_user_reply` to **context root** after each completed node so `GET …/context` exposes it for Studio/Teams. Parent `gateway/message_gateway.py`: sync completion prefers top-level `orchestrator_user_reply`, then `_extract_user_facing_orchestrator_reply()` (longest LLM/ReAct `response`, skipping short router JSON); `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` / `orchestrator_chat_reply_mode` (`auto` vs `full_context`); `orchestrator_include_context_json`; clearer **suspended** bridge text. Frontend: optional `displayName` on `AgenticNodeData` + `nodeCanvasTitle()` for human-friendly canvas titles while **registry `label`** stays the engine key; PropertyInspector splits **Display name** vs **Engine type**; expression picker groups use canvas titles; `validateWorkflow` messages use canvas titles. Example workflows (`exampleMainAppWorkflow.ts`, `exampleComplexWorkflow.ts`) use `displayName` and per-branch Bridge nodes. Tests: `tests/test_orchestrator_bridge.py`.
+>
 > - **Studio Proxy Bridge (2026-03-22)**: AI Studio proxy via `orchestrator_workflow_id` in `user_metadata`. **Default async** (enqueue + instance id / poll URLs); `orchestrator_wait_for_result` or `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` selects blocking `run_and_wait`. Merges chat fields into trigger; Bearer via `ORCHESTRATOR_API_TOKEN`; sync suspended path uses `return_on_suspended=True`. Tests: `tests/test_orchestrator_bridge.py`. Config adds `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT`. Section 10 updated.
 >
 > - **V0.9.9 Loop Node (2026-03-22)**: New `Loop` logic node for controlled agentic cycles — repeats its downstream body nodes while a `continueExpression` evaluates to True, up to `maxIterations` times (backend hard cap: 25). Uses pre-check semantics (while-loop): condition is evaluated before each iteration; if False on the first check the body never executes. An empty expression runs unconditionally for `maxIterations` iterations. `_handle_loop` in `node_handlers.py` returns `{"continueExpression": ..., "maxIterations": ...}` — analogous to `_handle_forEach`. New `_run_loop_iterations` in `dag_runner.py` drives the iteration: clears body node context keys before each pass, sets `_loop_index` / `_loop_iteration` in context, calls `_execute_single_node` for each body node, accumulates per-node results into `{"loop_results": [...], "iterations": N}` stored back into each body node's context key after completion. Suspension and failure are handled safely: partial aggregated results are stored before returning. `_execute_ready_queue` detects `label == "Loop"` after single-node execution and routes to `_run_loop_iterations` (same pattern as ForEach). `shared/node_registry.json` — new `loop` type in `logic` category with `continueExpression` (required) and `maxIterations` (default 10) config fields. Frontend: `AgenticNode.tsx` adds `RefreshCw` lucide icon under key `"refresh-cw"`; Loop nodes display a `≤N×` badge and a `⟳ {continueExpression}` expression line. `validateWorkflow.ts` adds `"Loop": ["continueExpression"]` to `REQUIRED_FIELDS` and emits a warning if `maxIterations > 25`. No DB migration required.
@@ -22,9 +24,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9.9
+**Version:** 0.9.10
 **Last updated:** 2026-03-22
-**Status:** V0.9.9 Loop Node, V0.9.8 Rich Token Streaming, V0.9.7 Checkpoint-aware Langfuse, V0.9.6 Checkpointing, V0.9.5 Reflection Node, V0.9.4 HITL UX, V0.9.3 Deterministic batch semantics, V0.9.2 UX improvements, V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Status:** V0.9.10 Bridge User Reply + Studio chat formatting + `displayName`; V0.9.9 Loop Node; V0.9.8 Rich Token Streaming; V0.9.7 Checkpoint-aware Langfuse; V0.9.6 Checkpointing; V0.9.5 Reflection; V0.9.4 HITL UX; V0.9.3 Deterministic batch; V0.9.2 UX; V0.9.1 Stateful DAGs; V0.9 execution; V0.8 enterprise; earlier milestones through V0.1
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -48,12 +50,13 @@
 4. [Backend: Execution Engine](#4-backend-execution-engine)
 5. [Data Models](#5-data-models)
 6. [DAG Execution Engine](#6-dag-execution-engine)
-7. [MCP Tool Bridge](#7-mcp-tool-bridge)
+7. [MCP Tool Bridge (Streamable HTTP)](#7-mcp-tool-bridge-streamable-http)
 8. [Multi-Tenancy and Security](#8-multi-tenancy-and-security)
-9. [Integration with AI Studio (Sidecar Pattern)](#9-integration-with-ai-studio-sidecar-pattern)
-10. [Shared Schemas](#10-shared-schemas)
-11. [Known Limitations (V0.8)](#12-known-limitations-v08)
-12. [Roadmap](#12-roadmap)
+9. [Observability (Langfuse)](#9-observability-langfuse)
+10. [Integration with AI Studio (Proxy Pattern)](#10-integration-with-ai-studio-proxy-pattern)
+11. [Shared Schemas](#11-shared-schemas)
+12. [Known Limitations (V0.8)](#12-known-limitations-v08)
+13. [Roadmap](#13-roadmap)
 
 ---
 
@@ -194,7 +197,7 @@ Four categories, each with distinct visual styling:
 |----------|-------|--------|-------|
 | **Trigger** | Amber | `border-amber-500/60` | Webhook Trigger, Schedule Trigger |
 | **Agent** | Violet | `border-violet-500/60` | LLM Agent, ReAct Agent |
-| **Action** | Sky | `border-sky-500/60` | MCP Tool, HTTP Request, Human Approval |
+| **Action** | Sky | `border-sky-500/60` | MCP Tool, HTTP Request, Human Approval, Bridge User Reply, Load/Save Conversation State |
 | **Logic** | Emerald | `border-emerald-500/60` | Condition, Merge |
 
 The `NODE_PALETTE` array defines every draggable item with its `nodeCategory`, `label`, `description`, `icon`, and `defaultConfig`. A **search input** at the top of the palette filters by label and description: non-matching categories are hidden, matching categories auto-expand, and each category header shows a `matched/total` count while a query is active.
@@ -214,6 +217,17 @@ A single `memo`-ized component renders all node types polymorphically:
   - `blue ring` — node is selected (always takes priority over validation rings)
   - `status dot` — runtime execution status (shown when no validation issue)
 
+#### Canvas display names (`displayName`, V0.9.10)
+
+File: `types/nodes.ts` (`AgenticNodeData`, `nodeCanvasTitle()`)
+
+| Field | Role |
+|-------|------|
+| `label` | **Required.** Must match a palette/registry type (e.g. `Condition`, `ReAct Agent`). Used for backend dispatch, `getConfigSchema(label)`, and execution logs. |
+| `displayName` | **Optional.** Human title on the node card; defaults to `label` when unset. The card’s HTML `title` tooltip still shows `label` so operators can verify the engine type. |
+
+**PropertyInspector** separates **Display name (canvas)** from **Engine type (registry)**. **validateWorkflow** and **expression variable picker** group labels use `nodeCanvasTitle()` (friendly title when set). Shipped examples in `src/lib/exampleMainAppWorkflow.ts` and `exampleComplexWorkflow.ts` set `displayName` per role (e.g. “Route message to specialist”, “Chat reply · diagnostics”).
+
 ### 3.5 Pre-Run Workflow Validation
 
 Files: `src/lib/validateWorkflow.ts`, `src/components/toolbar/ValidationDialog.tsx`
@@ -223,7 +237,7 @@ Before any execution begins, `validateWorkflow(nodes, edges)` is called by the T
 | Field | Type | Description |
 |-------|------|-------------|
 | `nodeId` | `string` | ID of the offending node (empty for graph-level errors) |
-| `nodeLabel` | `string` | Human-readable node name |
+| `nodeLabel` | `string` | Friendly name (`nodeCanvasTitle`, i.e. `displayName` or `label`) |
 | `message` | `string` | Description of the problem |
 | `severity` | `"error" \| "warning"` | Errors block execution; warnings allow "Run Anyway" |
 
@@ -239,7 +253,8 @@ Before any execution begins, `validateWorkflow(nodes, edges)` is called by the T
    - `Save Conversation State` → `responseNodeId`
    - `LLM Router` → `intents` array must have ≥ 1 entry
    - `Reflection` → `reflectionPrompt`
-4. **Node ID cross-references** — `responseNodeId` (Save Conversation State) and `historyNodeId` (LLM Router), when set, must match an existing node ID
+   - `Bridge User Reply` → at least one of `messageExpression` or `responseNodeId`
+4. **Node ID cross-references** — `responseNodeId` (Save Conversation State, Bridge User Reply) and `historyNodeId` (LLM Router), when set, must match an existing node ID
 
 `ValidationDialog` presents errors in red and warnings in yellow. If only warnings exist, a **Run Anyway** button is offered. Hard errors disable execution entirely until fixed.
 
@@ -253,7 +268,7 @@ Fields that accept runtime expressions get an autocomplete dropdown instead of a
 
 | Mode | Format | Fields |
 |------|--------|--------|
-| `expression` | `node_2.intent` | `condition`, `arrayExpression`, `sessionIdExpression`, `userMessageExpression` |
+| `expression` | `node_2.intent` | `condition`, `arrayExpression`, `continueExpression`, `sessionIdExpression`, `userMessageExpression`, `messageExpression` |
 | `nodeId` | `node_3` | `responseNodeId`, `historyNodeId` |
 | `jinja2` | `{{ node_2.response }}` | `systemPrompt` |
 
@@ -270,7 +285,8 @@ Fields that accept runtime expressions get an autocomplete dropdown instead of a
 | MCP Tool | `result` |
 | HTTP Request | `status_code`, `body`, `headers` |
 | Human Approval | `approved`, `approver` |
-| Load Conversation State | `history`, `session_id` |
+| Bridge User Reply | `orchestrator_user_reply`, `text`, `source` |
+| Load Conversation State | `messages`, `session_id`, `message_count` |
 
 **Token detection:** `getCurrentToken()` walks backward from the cursor to the last word boundary (`space`, `(`, `=`, `!`, `<`, `>`, `,`, `"`) and uses that substring as the filter. `insertAtCursor()` replaces only the current token, preserving the rest of the expression.
 
@@ -280,22 +296,17 @@ Fields that accept runtime expressions get an autocomplete dropdown instead of a
 
 File: `components/sidebar/PropertyInspector.tsx`
 
-Category-specific config panels:
+**Display name (canvas)** and **Engine type (registry)** — optional friendly title vs required registry `label` (see §3.4.1).
 
-| Category | Fields |
-|----------|--------|
-| **Agent** | Provider (Google/OpenAI/Anthropic), Model (6 options), System Prompt, Temperature |
-| **Trigger** | Webhook Path *or* Cron Expression (based on default config) |
-| **Action** | MCP Tool Name *or* URL+Method *or* Approval Message |
-| **Logic** | Condition Expression *or* Merge Strategy (waitAll/waitAny) |
+**Config form** — `DynamicConfigForm` renders fields from `getConfigSchema(data.label)` + `getRegistryNodeType().type` (not a fixed table per category). Typical fields include provider/model/prompts for agents, webhook path or cron for triggers, tool/URL/approval/bridge fields for actions, condition or merge/loop/forEach for logic.
 
 All fields write back to the store via `updateNodeData`. A "Delete Node" button removes the selected node.
 
-**Node ID chip** — at the top of the panel (above the Label field) a `bg-muted` chip displays the node's machine ID (e.g., `node_3`) in a monospace font. A copy button (`Copy` icon → 2s `Check` icon) writes the ID to the clipboard so it can be pasted into expression fields on other nodes.
+**Node ID chip** — at the top of the panel a `bg-muted` chip displays the node's machine ID (e.g., `node_3`) in a monospace font. A copy button (`Copy` icon → 2s `Check` icon) writes the ID to the clipboard so it can be pasted into expression fields on other nodes.
 
-**Inline field help text** — `DynamicConfigForm` reads the optional `description` field from each `config_schema` entry and renders it as `<FieldHint>` (10px muted grey text) below the input. All nine renderer branches emit a hint when a description is present. All node type schemas in `shared/node_registry.json` have been populated with descriptions.
+**Inline field help text** — `DynamicConfigForm` reads the optional `description` field from each `config_schema` entry and renders it as `<FieldHint>` (10px muted grey text) below the input. All renderer branches emit a hint when a description is present.
 
-### 3.6 Drag-and-Drop Flow
+### 3.8 Drag-and-Drop Flow
 
 1. `NodePalette` items set `onDragStart` → `dataTransfer.setData("application/reactflow", JSON.stringify({nodeCategory, label, defaultConfig}))`.
 2. `FlowCanvas` handles `onDragOver` (preventDefault) and `onDrop`.
@@ -675,6 +686,9 @@ File: `app/engine/node_handlers.py`
 | `Save Conversation State` | `_handle_save_conversation_state` | Appends turn to session |
 | `LLM Router` | `_handle_llm_router` | Classification call, returns `{intent}` |
 | `Reflection` | `_handle_reflection` (in `reflection_handler.py`) | Builds execution summary, calls LLM, parses JSON — read-only |
+| `Bridge User Reply` | `_handle_bridge_user_reply` | Resolves `messageExpression` (safe_eval) or `responseNodeId` → `{orchestrator_user_reply, text, source}` |
+
+**`orchestrator_user_reply` promotion (V0.9.10):** After any node completes successfully, `dag_runner._promote_orchestrator_user_reply(context, output)` copies a non-empty string `output["orchestrator_user_reply"]` onto **context root** (`context["orchestrator_user_reply"]`). The API strips only `_*` keys, so this field is visible in `GET …/instances/{id}/context` and is the **first** source used by the parent project’s `MessageGateway` when formatting a **sync** bridge reply for Teams/webchat (see §10). Place one Bridge node per terminal branch when multiple LLM paths exist so the chat text is explicit (avoids “longest response” heuristics picking the wrong node). Example workflows demonstrate this pattern.
 
 **MCP tool invocation:** `_call_mcp_tool()` sends `POST {mcp_server_url}/call-tool` with `{"tool_name": ..., "arguments": ...}` and the `X-Tenant-Id` header.
 
@@ -936,10 +950,21 @@ The caller sets these keys in `user_metadata` when calling `handle_chat_message(
 | `orchestrator_payload` | `dict` | No | Trigger input passed to the DAG as `trigger_payload` (shallow-merged with chat fields for any missing keys) |
 | `orchestrator_timeout` | `int` | No | Max seconds to wait (**sync** mode only; default: 120) |
 | `orchestrator_wait_for_result` | `bool` | No | If true, block until terminal state (poll). If false/absent, use `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` env (default **false** = async enqueue-only). |
+| `orchestrator_chat_reply_mode` | `str` | No | `auto` (default): sync completion returns friendly assistant text when possible; `full_context` / `raw` / `json` forces the legacy JSON dump. |
+| `orchestrator_include_context_json` | `bool` | No | If true with `auto`, append truncated `context_json` after the friendly reply (debugging). |
 
 **Default merge:** If `orchestrator_payload` does not set `message`, `session_id`, `user_id`, `user_role`, `user_name`, or `user_email`, those keys are filled from the `handle_chat_message()` arguments so `trigger.message` and `trigger.session_id` work without custom hooks.
 
 **Default behavior:** **Async** — `POST /execute` only; Studio gets instance id + URLs; no blocking poll in `handle_chat_message`.
+
+### Sync completion text (Teams / webchat)
+
+When **sync** mode is active (`orchestrator_wait_for_result` or `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true`), `MessageGateway._invoke_workflow_bridge()` formats the string returned to the chat channel:
+
+1. **`completed`** — If `context_json.orchestrator_user_reply` is set (usually via **Bridge User Reply** in the DAG), that string is returned, optionally with appended JSON when `orchestrator_include_context_json` is true. Otherwise **`auto`** mode runs `_extract_user_facing_orchestrator_reply()` (longest non-trivial `response` / `output` on `node_*` entries, skipping short router intent JSON). If nothing matches, falls back to a truncated full `context_json` dump. Set env `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE=full_context` (or metadata `orchestrator_chat_reply_mode`) to always use the JSON-only format.
+2. **`suspended`** — Returns a short **Human approval required** lead-in, instance id, node id, resume instructions, then truncated context JSON.
+
+**DAG recommendation:** Add **Bridge User Reply** immediately before **Save Conversation State** on each customer-facing branch so Teams users see the intended answer in one sync reply. Async mode still returns only queue metadata unless a separate poller posts back to the channel.
 
 ### Key files
 
@@ -947,8 +972,8 @@ The caller sets these keys in `user_metadata` when calling `handle_chat_message(
 |------|------|
 | `gateway/message_gateway.py` | Detects `orchestrator_workflow_id`, merges payload, async vs sync `_invoke_workflow_bridge()` |
 | `tools/orchestrator_client.py` | HTTP client: `execute()`, `get_context()`, `run_and_wait()` (optional `return_on_suspended`) |
-| `config/settings.py` | `ORCHESTRATOR_BASE_URL`, `ORCHESTRATOR_TENANT_ID`, `ORCHESTRATOR_API_TOKEN`, `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` |
-| `.env` | Base URL, tenant, optional token, optional `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` for global sync |
+| `config/settings.py` | `ORCHESTRATOR_BASE_URL`, `ORCHESTRATOR_TENANT_ID`, `ORCHESTRATOR_API_TOKEN`, `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT`, `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` |
+| `.env` | Base URL, tenant, optional token; optional `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true`; optional `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE=auto` or `full_context` |
 
 ### What the bridge does NOT do
 
@@ -969,8 +994,8 @@ File: `orchestrator/shared/node_registry.json`
 A version-controlled JSON file defining all node types with their `config_schema`. This serves as the canonical schema that both frontend and backend can reference:
 
 - 4 categories: `trigger`, `agent`, `action`, `logic`.
-- 9 node types with typed `config_schema` objects (type, default, enum, min/max).
-- Used for future dynamic form generation and server-side config validation.
+- **10+ node types** (triggers, agents including Router/ReAct/Reflection, actions including MCP/HTTP/Human Approval/**Bridge User Reply**/conversation memory, logic including Condition/Merge/ForEach/**Loop**) with typed `config_schema` objects (type, default, enum, min/max).
+- Drives `DynamicConfigForm` in the UI and server-side config validation on save.
 
 ---
 

@@ -188,6 +188,10 @@ CONFIG = {
     "ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT": os.environ.get(
         "ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT", ""
     ).strip().lower() in ("1", "true", "yes", "y", "on"),
+    # Bridge sync completion: auto = best-effort assistant text for Teams/chat; full_context = JSON only
+    "ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE": os.environ.get(
+        "ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE", "auto"
+    ).strip().lower(),
 
     # Proactive Monitoring & Scheduling (Feature 2.2)
     "ENABLE_PROACTIVE_MONITORING": os.environ.get("ENABLE_PROACTIVE_MONITORING", "true").lower() == "true",

@@ -13,7 +13,7 @@
  */
 
 import type { Node } from "@xyflow/react";
-import type { AgenticNodeData } from "@/types/nodes";
+import { nodeCanvasTitle, type AgenticNodeData } from "@/types/nodes";
 
 export type ExpressionMode = "expression" | "nodeId" | "jinja2";
 
@@ -76,6 +76,7 @@ export function getExpressionVariables(
 
     const data = node.data as AgenticNodeData;
     const label = data.label;
+    const canvasTitle = nodeCanvasTitle(data);
 
     if (data.nodeCategory === "trigger") {
       // Triggers populate `trigger.*` in the context
@@ -87,7 +88,7 @@ export function getExpressionVariables(
         vars.push({
           value: mode === "jinja2" ? `{{ ${raw} }}` : raw,
           label: `trigger.${field}`,
-          group: label,
+          group: canvasTitle,
         });
       }
     } else {
@@ -95,7 +96,7 @@ export function getExpressionVariables(
       if (mode === "nodeId") {
         vars.push({
           value: node.id,
-          label: `${node.id}  —  ${label}`,
+          label: `${node.id}  —  ${canvasTitle}`,
           group: "Nodes",
         });
         continue;
@@ -107,8 +108,8 @@ export function getExpressionVariables(
         // Unknown node type — show bare reference as a fallback
         vars.push({
           value: mode === "jinja2" ? `{{ ${node.id} }}` : node.id,
-          label: `${node.id}  —  ${label}`,
-          group: `${node.id}  —  ${label}`,
+          label: `${node.id}  —  ${canvasTitle}`,
+          group: `${node.id}  —  ${canvasTitle}`,
         });
       } else if (outputFields.length > 0) {
         // Known node with output fields
@@ -117,7 +118,7 @@ export function getExpressionVariables(
           vars.push({
             value: mode === "jinja2" ? `{{ ${raw} }}` : raw,
             label: `${node.id}.${field}`,
-            group: `${node.id}  —  ${label}`,
+            group: `${node.id}  —  ${canvasTitle}`,
           });
         }
         // else: known no-output node (Condition, Merge, ForEach) — omit entirely
