@@ -62,8 +62,8 @@ export function getExpressionVariables(
 ): ExpressionVariable[] {
   const vars: ExpressionVariable[] = [];
 
-  // Always add the loop item variable for ForEach contexts
-  if (mode === "expression") {
+  // _loop_item is only meaningful inside a ForEach body
+  if (mode === "expression" && nodes.some((n) => (n.data as AgenticNodeData).label === "ForEach")) {
     vars.push({
       value: "_loop_item",
       label: "_loop_item  (ForEach iteration value)",
@@ -101,16 +101,17 @@ export function getExpressionVariables(
         continue;
       }
 
-      const outputFields = NODE_OUTPUT_FIELDS[label] ?? [];
+      const outputFields = NODE_OUTPUT_FIELDS[label];
 
-      if (outputFields.length === 0) {
-        // Include bare node reference so user can at least see the node
+      if (outputFields === undefined) {
+        // Unknown node type — show bare reference as a fallback
         vars.push({
           value: mode === "jinja2" ? `{{ ${node.id} }}` : node.id,
           label: `${node.id}  —  ${label}`,
           group: `${node.id}  —  ${label}`,
         });
-      } else {
+      } else if (outputFields.length > 0) {
+        // Known node with output fields
         for (const field of outputFields) {
           const raw = `${node.id}.${field}`;
           vars.push({
@@ -119,6 +120,7 @@ export function getExpressionVariables(
             group: `${node.id}  —  ${label}`,
           });
         }
+        // else: known no-output node (Condition, Merge, ForEach) — omit entirely
       }
     }
   }

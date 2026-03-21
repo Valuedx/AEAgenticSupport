@@ -12,7 +12,7 @@
  *  - object             → Textarea (JSON, validated on blur)
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -81,6 +81,59 @@ const JINJA2_KEYS = new Set(["systemPrompt"]);
 function FieldHint({ text }: { text: string }) {
   return (
     <p className="text-[10px] text-muted-foreground leading-snug">{text}</p>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// JsonTextarea — controlled JSON editor that syncs when the serialised value
+// changes externally (e.g. after an undo/redo that replaces config).
+// ---------------------------------------------------------------------------
+
+function JsonTextarea({
+  id,
+  rows,
+  canonicalValue,   // the authoritative value from the store (as a JS object)
+  onCommit,         // called with the parsed object on valid blur
+}: {
+  id: string;
+  rows: number;
+  canonicalValue: unknown;
+  onCommit: (value: unknown) => void;
+}) {
+  const [raw, setRaw] = useState(() => JSON.stringify(canonicalValue, null, 2));
+  const [hasError, setHasError] = useState(false);
+  // Track the last canonical JSON string so we can detect external changes
+  const lastCanonical = useRef(JSON.stringify(canonicalValue));
+
+  // When the store value changes (e.g. undo/redo), reset the local raw string
+  const canonical = JSON.stringify(canonicalValue);
+  if (canonical !== lastCanonical.current) {
+    lastCanonical.current = canonical;
+    setRaw(JSON.stringify(canonicalValue, null, 2));
+    setHasError(false);
+  }
+
+  const handleBlur = () => {
+    try {
+      onCommit(JSON.parse(raw));
+      setHasError(false);
+    } catch {
+      setHasError(true);
+    }
+  };
+
+  return (
+    <>
+      <Textarea
+        id={id}
+        rows={rows}
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        onBlur={handleBlur}
+        className={hasError ? "border-red-500" : ""}
+      />
+      {hasError && <p className="text-[10px] text-red-500">Invalid JSON</p>}
+    </>
   );
 }
 
@@ -307,7 +360,6 @@ export function DynamicConfigForm({
   config,
   onUpdate,
 }: DynamicConfigFormProps) {
-  const [jsonErrors, setJsonErrors] = useState<Record<string, boolean>>({});
 
   // Expression autocomplete — build variable suggestions from canvas state
   const nodes = useFlowStore((s) => s.nodes);
@@ -318,15 +370,6 @@ export function DynamicConfigForm({
 
   const update = (key: string, value: unknown) => {
     onUpdate({ config: { ...config, [key]: value } });
-  };
-
-  const handleJsonBlur = (key: string, raw: string) => {
-    try {
-      update(key, JSON.parse(raw));
-      setJsonErrors((e) => ({ ...e, [key]: false }));
-    } catch {
-      setJsonErrors((e) => ({ ...e, [key]: true }));
-    }
   };
 
   return (
@@ -376,16 +419,14 @@ export function DynamicConfigForm({
 
         // ---- other array → JSON textarea ----
         if (field.type === "array") {
-          const raw = JSON.stringify(value ?? field.default ?? [], null, 2);
           return (
             <div key={key} className="space-y-2">
               <Label htmlFor={key}>{humanize(key)} (JSON array)</Label>
-              <Textarea
+              <JsonTextarea
                 id={key}
                 rows={3}
-                defaultValue={raw}
-                className={jsonErrors[key] ? "border-red-500" : ""}
-                onBlur={(e) => handleJsonBlur(key, e.target.value)}
+                canonicalValue={value ?? field.default ?? []}
+                onCommit={(v) => update(key, v)}
               />
               {field.description && <FieldHint text={field.description} />}
             </div>
@@ -394,20 +435,15 @@ export function DynamicConfigForm({
 
         // ---- object → JSON textarea ----
         if (field.type === "object") {
-          const raw = JSON.stringify(value ?? field.default ?? {}, null, 2);
           return (
             <div key={key} className="space-y-2">
               <Label htmlFor={key}>{humanize(key)} (JSON)</Label>
-              <Textarea
+              <JsonTextarea
                 id={key}
                 rows={3}
-                defaultValue={raw}
-                className={jsonErrors[key] ? "border-red-500" : ""}
-                onBlur={(e) => handleJsonBlur(key, e.target.value)}
+                canonicalValue={value ?? field.default ?? {}}
+                onCommit={(v) => update(key, v)}
               />
-              {jsonErrors[key] && (
-                <p className="text-[10px] text-red-500">Invalid JSON</p>
-              )}
               {field.description && <FieldHint text={field.description} />}
             </div>
           );
