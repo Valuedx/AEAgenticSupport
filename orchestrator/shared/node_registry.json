@@ -128,6 +128,17 @@
       "config_schema": {
         "strategy": { "type": "string", "default": "waitAll", "enum": ["waitAll", "waitAny"] }
       }
+    },
+    {
+      "type": "forEach",
+      "category": "logic",
+      "label": "ForEach",
+      "description": "Iterate over an array, executing downstream nodes once per element",
+      "icon": "repeat",
+      "config_schema": {
+        "arrayExpression": { "type": "string", "default": "" },
+        "itemVariable": { "type": "string", "default": "item" }
+      }
     }
   ]
 }

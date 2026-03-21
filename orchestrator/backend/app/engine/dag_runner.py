@@ -174,6 +174,71 @@ def resume_graph(
     )
 
 
+def retry_graph(
+    db: Session, instance_id: str, from_node_id: str | None = None
+) -> None:
+    """Retry a failed workflow from the point of failure.
+
+    Re-uses the accumulated context up to the failed node, clears the
+    failed node's output, and re-runs the ready queue from that point.
+    """
+    instance: WorkflowInstance | None = (
+        db.query(WorkflowInstance).filter_by(id=instance_id).first()
+    )
+    if not instance or instance.status != "failed":
+        raise ValueError(
+            f"WorkflowInstance {instance_id} not found or not in failed status"
+        )
+
+    # Determine which node to retry from
+    retry_node = from_node_id or instance.current_node_id
+    if not retry_node:
+        raise ValueError("No node to retry from — instance has no current_node_id")
+
+    # Clean up the failed node from context and logs
+    context: dict[str, Any] = dict(instance.context_json or {})
+    context.pop(retry_node, None)
+
+    # Delete the failed execution log entry so it can be re-created
+    db.query(ExecutionLog).filter_by(
+        instance_id=instance.id, node_id=retry_node, status="failed"
+    ).delete()
+
+    instance.status = "running"
+    instance.completed_at = None
+    db.commit()
+
+    graph = instance.definition.graph_json
+    nodes_map, edges = parse_graph(graph)
+    forward, reverse, in_degree = _build_graph_structures(nodes_map, edges)
+
+    # All nodes whose output is already in context are "already executed"
+    already_executed = {
+        k for k in context.keys()
+        if k.startswith("node_") or k == "trigger"
+    }
+
+    from app.observability import trace_workflow, flush
+    with trace_workflow(
+        workflow_id=str(instance.workflow_def_id),
+        instance_id=str(instance.id),
+        tenant_id=instance.tenant_id,
+        workflow_name=instance.definition.name,
+        trigger_payload=instance.trigger_payload,
+        tags=["retry", f"from:{retry_node}"],
+    ) as trace:
+        context["_trace"] = trace
+        _execute_ready_queue(
+            db, instance, nodes_map, forward, reverse, in_degree, context,
+            skipped=already_executed,
+        )
+        trace.update(output={"status": instance.status, "retried_from": retry_node})
+
+    flush()
+    logger.info("Retry of workflow %s from node %s completed with status %s",
+                instance.id, retry_node, instance.status)
+
+
 def _execute_ready_queue(
     db: Session,
     instance: WorkflowInstance,
@@ -212,7 +277,18 @@ def _execute_ready_queue(
                 return
             if result == "failed":
                 return
-            _propagate_edges(node_id, forward, nodes_map, context, satisfied, pruned)
+
+            # ── ForEach iteration (V0.9) ──
+            node_data = nodes_map.get(node_id, {}).get("data", {})
+            if (node_data.get("nodeCategory") == "logic"
+                    and node_data.get("label") == "ForEach"):
+                _run_forEach_iterations(
+                    db, instance, nodes_map, forward, reverse,
+                    in_degree, context, skipped, pruned, satisfied,
+                    forEach_node_id=node_id,
+                )
+            else:
+                _propagate_edges(node_id, forward, nodes_map, context, satisfied, pruned)
         else:
             results = _execute_parallel(
                 db, instance, nodes_map, ready, context,
@@ -415,6 +491,9 @@ def _execute_parallel(
     Each thread gets its own DB session for writing ExecutionLog entries.
     The shared `context` dict is written to thread-safely since each node
     writes to a unique key (its own node_id).
+
+    V0.9 (Component 7): Trace object is passed explicitly via context["_trace"]
+    so Langfuse spans are correctly stitched even in worker threads.
     """
     results: dict[str, str] = {}
 
@@ -435,21 +514,36 @@ def _execute_parallel(
     instance.current_node_id = ready_nodes[0]
     db.commit()
 
+    # Capture the trace for explicit propagation into threads (Component 7)
+    trace = context.get("_trace")
+
     def _run_node(node_id: str) -> tuple[str, str, dict | None, str | None]:
         node = nodes_map[node_id]
         node_data = node.get("data", {})
         node_category = node_data.get("nodeCategory", "action")
+        node_label = node_data.get("label", "")
 
         if node_category == "action" and node_data.get("config", {}).get("approvalMessage") is not None:
             if "approval" not in context:
                 return node_id, "suspended", None, None
 
-        try:
-            output = dispatch_node(node_data, context, instance.tenant_id)
-            return node_id, "completed", output, None
-        except Exception as exc:
-            logger.exception("Node %s failed in workflow %s", node_id, instance.id)
-            return node_id, "failed", None, str(exc)
+        # V0.9 (Component 7): Use explicit trace object from context
+        from app.observability import span_node
+        with span_node(
+            trace,
+            node_id=node_id,
+            node_type=f"{node_category}:{node_label}",
+            node_label=node_label,
+            input_data=_build_node_input(node_data, context),
+        ) as span:
+            try:
+                output = dispatch_node(node_data, context, instance.tenant_id)
+                span.update(output={"status": "completed", "has_output": output is not None})
+                return node_id, "completed", output, None
+            except Exception as exc:
+                logger.exception("Node %s failed in workflow %s", node_id, instance.id)
+                span.update(output={"status": "failed", "error": str(exc)})
+                return node_id, "failed", None, str(exc)
 
     with ThreadPoolExecutor(max_workers=min(len(ready_nodes), _MAX_PARALLEL)) as pool:
         futures = {pool.submit(_run_node, nid): nid for nid in ready_nodes}
@@ -480,15 +574,107 @@ def _execute_parallel(
 
 
 # ---------------------------------------------------------------------------
+# ForEach iteration (V0.9 — Component 1)
+# ---------------------------------------------------------------------------
+
+def _run_forEach_iterations(
+    db: Session,
+    instance: WorkflowInstance,
+    nodes_map: dict,
+    forward: dict[str, list[_Edge]],
+    reverse: dict[str, list[_Edge]],
+    in_degree: dict[str, int],
+    context: dict[str, Any],
+    skipped: set[str],
+    pruned: set[str],
+    satisfied: dict[str, set[str]],
+    forEach_node_id: str,
+) -> None:
+    """Execute downstream nodes of a ForEach node once per array item.
+
+    For each item in the ForEach output's 'items' list, injects the item
+    into the context and runs all immediately-downstream nodes sequentially.
+    Results from each iteration are collected into a list.
+    """
+    forEach_output = context.get(forEach_node_id, {})
+    items = forEach_output.get("items", [])
+    item_var = forEach_output.get("itemVariable", "item")
+
+    if not items:
+        # No items — just propagate as normal to satisfy edges
+        _propagate_edges(forEach_node_id, forward, nodes_map, context, satisfied, pruned)
+        return
+
+    # Collect downstream node IDs
+    downstream_edges = forward.get(forEach_node_id, [])
+    downstream_node_ids = [e.target for e in downstream_edges]
+
+    # Collect all iteration results
+    all_iteration_results: dict[str, list] = {nid: [] for nid in downstream_node_ids}
+
+    for idx, item in enumerate(items):
+        # Inject current loop item into context
+        context["_loop_item"] = item
+        context["_loop_item_var"] = item_var
+        context[item_var] = item
+        context["_loop_index"] = idx
+
+        for downstream_nid in downstream_node_ids:
+            # Clear any previous iteration output
+            context.pop(downstream_nid, None)
+
+            result = _execute_single_node(
+                db, instance, nodes_map, downstream_nid, context,
+            )
+
+            if result == "completed":
+                iteration_output = context.get(downstream_nid)
+                all_iteration_results[downstream_nid].append(iteration_output)
+            elif result == "failed":
+                all_iteration_results[downstream_nid].append({"error": "failed", "iteration": idx})
+            elif result == "suspended":
+                return  # Stop the forEach loop if any iteration suspends
+
+    # Store aggregated results
+    for nid in downstream_node_ids:
+        context[nid] = {"forEach_results": all_iteration_results[nid], "iterations": len(items)}
+
+    # Clean up loop context
+    context.pop("_loop_item", None)
+    context.pop("_loop_item_var", None)
+    context.pop("_loop_index", None)
+
+    # Propagate edges from the forEach node AND from downstream nodes
+    _propagate_edges(forEach_node_id, forward, nodes_map, context, satisfied, pruned)
+    for nid in downstream_node_ids:
+        satisfied[nid] = set()
+        _propagate_edges(nid, forward, nodes_map, context, satisfied, pruned)
+
+    logger.info(
+        "ForEach node %s completed: %d iterations across %d downstream nodes",
+        forEach_node_id, len(items), len(downstream_node_ids),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _build_node_input(node_data: dict, context: dict[str, Any]) -> dict:
     """Build the input payload for a node from the accumulated context."""
-    return {
+    node_input = {
         "config": node_data.get("config", {}),
         "upstream_outputs": {
             k: v for k, v in context.items() if k.startswith("node_")
         },
         "trigger": context.get("trigger"),
     }
+
+    # Include loop item if inside a ForEach iteration
+    if "_loop_item" in context:
+        node_input["loop_item"] = context["_loop_item"]
+        node_input["loop_index"] = context.get("_loop_index", 0)
+        node_input["loop_variable"] = context.get("_loop_item_var", "item")
+
+    return node_input
+

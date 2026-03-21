@@ -156,6 +156,20 @@ export const api = {
     });
   },
 
+  retryInstance(
+    workflowId: string,
+    instanceId: string,
+    fromNodeId?: string,
+  ): Promise<InstanceOut> {
+    return request(
+      `/api/v1/workflows/${workflowId}/instances/${instanceId}/retry`,
+      {
+        method: "POST",
+        body: JSON.stringify({ from_node_id: fromNodeId ?? null }),
+      },
+    );
+  },
+
   listInstances(workflowId: string): Promise<InstanceOut[]> {
     return request(`/api/v1/workflows/${workflowId}/status`);
   },

@@ -1,11 +1,12 @@
-> - **V0.8 Enterprise Features (2026-03-20)**: OIDC federation config + `VITE_AUTH_MODE`. New env variables for OIDC provider settings. `workflow_snapshots` table added (Alembic migration 0002). Project structure updated for new files. Troubleshooting table updated. Environment variable table expanded.
+> - **V0.9 Execution Enhancements (2026-03-21)**: New env variables `ORCHESTRATOR_MAX_SNAPSHOTS` and `ORCHESTRATOR_MCP_POOL_SIZE`. ForEach loop node added to node_registry.json. MCP client upgraded with connection pooling. Retry-from-failed endpoint added. Snapshot pruning via Celery Beat. Safe expression evaluator enhanced with whitelisted function/method calls. Env variable mapping (`{{ env.SECRET_NAME }}`) for node configs.
+> - **V0.8 Enterprise Features (2026-03-20)**:OIDC federation config + `VITE_AUTH_MODE`. New env variables for OIDC provider settings. `workflow_snapshots` table added (Alembic migration 0002). Project structure updated for new files. Troubleshooting table updated. Environment variable table expanded.
 >
 > - **Initial Setup (2026-03-20)**: V0.1 scaffold — frontend dev server, backend API, prerequisites, and configuration. See `TECHNICAL_BLUEPRINT.md` for architecture and `HOW_IT_WORKS.md` for runtime walkthrough.
 
 ## AE AI Hub — Orchestrator Setup Guide
 
-**Version:** 0.8
-**Last updated:** 2026-03-20
+**Version:** 0.9
+**Last updated:** 2026-03-21
 
 ---
 
@@ -115,15 +116,15 @@ orchestrator/
 │       │   ├── react_loop.py       # ReAct tool-calling loop
 │       │   ├── mcp_client.py       # MCP SDK client (TTL cache)
 │       │   ├── prompt_template.py  # Jinja2 prompt templating
-│       │   ├── safe_eval.py        # AST-based expression evaluator
+│       │   ├── safe_eval.py        # AST-based expression evaluator (whitelisted functions V0.9)
 │       │   └── config_validator.py # Graph config validation
 │       ├── models/
 │       │   ├── workflow.py         # WorkflowDefinition, Instance, Snapshot, Log
 │       │   └── tenant.py           # TenantToolOverride, TenantSecret
 │       ├── workers/
 │       │   ├── celery_app.py       # Celery configuration
-│       │   ├── tasks.py            # execute_workflow_task, resume_workflow_task
-│       │   └── scheduler.py        # Celery Beat cron scheduler
+│       │   ├── tasks.py            # execute, resume, retry workflow tasks
+│       │   └── scheduler.py        # Celery Beat cron scheduler + snapshot pruning
 │       └── security/
 │           ├── jwt_auth.py         # JWT creation + validation
 │           ├── vault.py            # Fernet-encrypted credential vault
@@ -358,6 +359,8 @@ Backend settings use the `ORCHESTRATOR_` prefix; frontend uses `VITE_` variables
 | `ORCHESTRATOR_OIDC_REDIRECT_URI` | No | `http://localhost:8001/auth/oidc/callback` | Callback URL registered with the OIDC provider |
 | `ORCHESTRATOR_OIDC_TENANT_CLAIM` | No | `email` | ID token claim used as `tenant_id` (e.g. `email`, `sub`, `org_id`) |
 | `ORCHESTRATOR_OIDC_SCOPES` | No | `openid email profile` | OIDC scopes to request |
+| `ORCHESTRATOR_MAX_SNAPSHOTS` | No | `20` | Max snapshots to keep per workflow (0 = unlimited). Pruned daily by Celery Beat |
+| `ORCHESTRATOR_MCP_POOL_SIZE` | No | `4` | Number of warm MCP client sessions in the connection pool |
 
 ### 7.2 Frontend Variables
 
@@ -500,8 +503,12 @@ Only works when `ORCHESTRATOR_AUTH_MODE=dev`. Use the token as `Authorization: B
 | OIDC login redirects to error | Wrong redirect_uri | Ensure `ORCHESTRATOR_OIDC_REDIRECT_URI` matches exactly what is registered in the IdP |
 | OIDC state expired | User took >5 minutes | Retry login — PKCE state TTL is 5 minutes |
 | ReAct agent has no tools | MCP server offline at startup | Cache empty — restart backend after starting MCP server, or hit `POST /api/v1/tools/invalidate-cache` |
+| Retry returns 404 | Instance not in `failed` status | Only failed instances can be retried. Check `GET /instances/{id}` status |
+| ForEach does nothing | `arrayExpression` resolves to empty | Ensure the upstream node outputs an array at the expected path |
+| Snapshot pruning not running | Celery Beat not started | Start Celery Beat: `celery -A app.workers.celery_app beat --loglevel=info` |
+| `{{ env.SECRET }}` not resolved | Secret not in vault | Add the secret via the vault API first |
 
 ---
 
-**Document version:** 0.8
-**Last updated:** 2026-03-20
+**Document version:** 0.9
+**Last updated:** 2026-03-21

@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     oidc_tenant_claim: str = "email"               # ID token claim used as tenant_id
     oidc_scopes: str = "openid email profile"
 
+    # Snapshot pruning — max snapshots per workflow (0 = unlimited)
+    max_snapshots: int = 20
+
+    # MCP connection pool size
+    mcp_pool_size: int = 4
+
     model_config = {"env_prefix": "ORCHESTRATOR_", "env_file": ".env"}
 
 

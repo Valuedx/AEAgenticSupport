@@ -109,3 +109,48 @@ def build_user_message(context: dict[str, Any]) -> str:
         return "No upstream data available. Please respond based on your system instructions."
 
     return "\n\n".join(parts)
+
+
+def resolve_config_env_vars(config: dict, tenant_id: str) -> dict:
+    """Resolve {{ env.SECRET_NAME }} references in node config values.
+
+    Scans all string values in the config dict, replaces any
+    ``{{ env.XYZ }}`` pattern by looking up secret ``XYZ`` from
+    the tenant's encrypted vault.  Non-string values are returned as-is.
+    """
+    import re
+    _ENV_PATTERN = re.compile(r"\{\{\s*env\.(\w+)\s*\}\}")
+
+    resolved = {}
+    for key, value in config.items():
+        if not isinstance(value, str) or "{{" not in value:
+            resolved[key] = value
+            continue
+
+        matches = _ENV_PATTERN.findall(value)
+        if not matches:
+            resolved[key] = value
+            continue
+
+        result = value
+        for secret_name in matches:
+            try:
+                from app.security.vault import get_tenant_secret
+                secret_value = get_tenant_secret(tenant_id, secret_name)
+                if secret_value is not None:
+                    result = result.replace(
+                        f"{{{{ env.{secret_name} }}}}", secret_value
+                    )
+                    # Also replace without spaces around the expression
+                    result = result.replace(
+                        f"{{{{env.{secret_name}}}}}", secret_value
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Could not resolve env.%s for tenant %s: %s",
+                    secret_name, tenant_id, exc,
+                )
+        resolved[key] = result
+
+    return resolved
+

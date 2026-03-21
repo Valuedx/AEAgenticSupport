@@ -1,3 +1,4 @@
+> - **V0.9 Execution Enhancements (2026-03-21)**: New Step 14 — ForEach Loop iteration with downstream node re-execution per array element. New Step 15 — Retry from Failed Node (API + engine). Step 11 MCP section updated — connection pooling with configurable pool size. Step 8 updated — enhanced safe expression evaluator supports whitelisted functions (`len`, `lower`, `matches` etc.) and method calls. New config: `ORCHESTRATOR_MAX_SNAPSHOTS` (snapshot pruning) and `ORCHESTRATOR_MCP_POOL_SIZE`. Environment variable mapping via `{{ env.SECRET_NAME }}` for node config values. Langfuse context fix for parallel execution.
 > - **V0.8 Enterprise Features (2026-03-20)**: Step 4 updated — property forms now generated from registry schemas via DynamicConfigForm; no more hardcoded panels. Step 5 updated — each graph save creates a snapshot in workflow_snapshots. New Step 12 — Version History & Rollback. Step 13 MCP section updated — 5-minute TTL cache + invalidate-cache endpoint. New Step 14 — OIDC Authentication. ReAct section updated for auto-discovery.
 >
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration — root trace per workflow, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport — replaces raw REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions fetched live from MCP server. TenantToolOverride consumed by tools endpoint.
@@ -17,8 +18,8 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it.
 
-**Version:** 0.8
-**Last updated:** 2026-03-20
+**Version:** 0.9
+**Last updated:** 2026-03-21
 
 ---
 
@@ -38,7 +39,9 @@
 12. [Step 11 — MCP Tool Bridge (Streamable HTTP)](#12-step-11--mcp-tool-bridge-streamable-http)
 13. [Step 12 — Version History and Rollback](#13-step-12--version-history-and-rollback)
 14. [Step 13 — OIDC Authentication Flow](#14-step-13--oidc-authentication-flow)
-15. [End-to-End Example](#15-end-to-end-example)
+15. [Step 14 — ForEach Loop Iteration](#15-step-14--foreach-loop-iteration)
+16. [Step 15 — Retry from Failed Node](#16-step-15--retry-from-failed-node)
+17. [End-to-End Example](#17-end-to-end-example)
 
 ---
 
@@ -564,7 +567,90 @@ Once stored, all API calls use `Authorization: Bearer <token>` instead of `X-Ten
 
 ---
 
-## 15. End-to-End Example
+## 15. Step 14 — ForEach Loop Iteration
+
+**Code:** `backend/app/engine/dag_runner.py` → `_run_forEach_iterations()`, `backend/app/engine/node_handlers.py` → `_handle_forEach()`
+
+The **ForEach** node (category: `logic`) enables iterating over an array, executing all immediately-downstream nodes once per element.
+
+### Configuration
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `arrayExpression` | string | Expression that resolves to an iterable from the context (e.g. `trigger.items`) |
+| `itemVariable` | string | Variable name injected into context per iteration (default: `item`) |
+
+### Execution Flow
+
+```
+_execute_ready_queue
+  │
+  ├─ Detects ForEach node completed
+  │
+  └─ _run_forEach_iterations()
+       │
+       for each element in items:
+       │  ├─ context["_loop_item"] = element
+       │  ├─ context["_loop_index"] = idx
+       │  ├─ context[itemVariable] = element
+       │  │
+       │  └─ for each downstream node:
+       │       └─ _execute_single_node(...)
+       │           → output collected into iteration_results
+       │
+       └─ context[downstream_id] = {
+            "forEach_results": [...all_outputs...],
+            "iterations": N
+          }
+```
+
+Downstream nodes receive `loop_item`, `loop_index`, and `loop_variable` in their input payload, allowing prompts and expressions to reference the current iteration item.
+
+---
+
+## 16. Step 15 — Retry from Failed Node
+
+**Code:** `backend/app/engine/dag_runner.py` → `retry_graph()`, `backend/app/api/workflows.py` → `POST /{id}/instances/{iid}/retry`, `backend/app/workers/tasks.py` → `retry_workflow_task`
+
+When a workflow instance fails, users can retry execution from the point of failure instead of re-running the entire workflow.
+
+### API
+
+```http
+POST /api/v1/workflows/{workflow_id}/instances/{instance_id}/retry
+X-Tenant-Id: acme-corp
+Content-Type: application/json
+
+{
+  "from_node_id": "node_5"  // optional — defaults to current_node_id
+}
+```
+
+### Engine Behavior
+
+```
+retry_graph(db, instance_id, from_node_id)
+  │
+  ├─ Validate instance.status == "failed"
+  ├─ Determine retry node (from_node_id or instance.current_node_id)
+  ├─ Remove failed node output from context
+  ├─ Delete failed ExecutionLog entry
+  ├─ Set instance.status = "running"
+  │
+  ├─ Re-parse graph, build forward/reverse/in_degree
+  ├─ All nodes with context entries = "already_executed" (skipped)
+  │
+  └─ _execute_ready_queue(... skipped=already_executed)
+       → Only the failed node and its downstream successors re-execute
+```
+
+### Frontend
+
+The `workflowStore.retryInstance(workflowId, instanceId, fromNodeId?)` action calls the retry API and re-streams the instance logs via SSE.
+
+---
+
+## 17. End-to-End Example
 
 **Scenario:** An IT support agent that diagnoses a failed AE request using a ReAct loop with auto-discovered tools.
 

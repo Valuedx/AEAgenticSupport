@@ -27,6 +27,7 @@ interface WorkflowState {
   markDirty: () => void;
 
   executeWorkflow: (triggerPayload?: Record<string, unknown>) => Promise<void>;
+  retryInstance: (workflowId: string, instanceId: string, fromNodeId?: string) => Promise<void>;
   pollInstance: (workflowId: string, instanceId: string) => Promise<void>;
   streamInstance: (workflowId: string, instanceId: string) => void;
   clearExecution: () => void;
@@ -146,6 +147,20 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         isExecuting: true,
       });
       get().streamInstance(wf.id, instance.id);
+    } catch (e) {
+      set({ error: String(e), isExecuting: false });
+    }
+  },
+
+  retryInstance: async (workflowId, instanceId, fromNodeId) => {
+    set({ isExecuting: true, error: null });
+    try {
+      const instance = await api.retryInstance(workflowId, instanceId, fromNodeId);
+      set({
+        activeInstance: { ...instance, logs: [] },
+        isExecuting: true,
+      });
+      get().streamInstance(workflowId, instance.id);
     } catch (e) {
       set({ error: String(e), isExecuting: false });
     }

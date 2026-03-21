@@ -1,4 +1,11 @@
+> - **V0.9 Execution Enhancements (2026-03-21)**: ForEach loop node (`_handle_forEach`, `_run_forEach_iterations`) — iterates downstream subgraph per array element. Retry from failed node (`retry_graph()`, `POST /{id}/instances/{iid}/retry`). MCP connection pooling (`_MCPSessionPool`). Enhanced safe expression evaluator with whitelisted function/method calls (`len`, `lower`, `matches`, etc.). Snapshot pruning via Celery Beat (`prune_old_snapshots`, `ORCHESTRATOR_MAX_SNAPSHOTS`). Environment variable mapping (`{{ env.SECRET_NAME }}` resolved from vault). Langfuse parallel context fix — explicit trace propagation into threads. Frontend `retryInstance` action.
 > - **V0.8 Enterprise Features (2026-03-20)**: Dynamic property forms generated from `shared/node_registry.json` schemas (`DynamicConfigForm.tsx`) — PropertyInspector no longer hardcoded. ReAct agent auto-discovers all MCP tools when `tools` config is empty; MCP tool cache upgraded to 5-minute TTL with `POST /api/v1/tools/invalidate-cache`. Workflow versioning: `workflow_snapshots` table + Alembic migration 0002; snapshot saved before each overwrite; `GET /{id}/versions` and `POST /{id}/rollback/{v}` endpoints; `VersionHistoryDialog` with Restore button in Toolbar. OIDC federation: Authorization Code + PKCE flow (`app/api/auth.py`), `authlib` for ID token validation, Redis PKCE state, issues internal JWT; frontend `LoginPage` + `VITE_AUTH_MODE=oidc` gate in `App.tsx`.
+
+## AE AI Hub — Agentic Orchestrator Technical Blueprint
+
+**Version:** 0.9
+**Last updated:** 2026-03-21
+**Status:** V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -11,12 +18,6 @@
 >
 > - **V0.2 UI Wiring (2026-03-20)**: Added frontend API client + workflow toolbar (save/load/execute), a saved-workflow list dialog, and an execution log panel with polling against backend instance status. See `orchestrator/HOW_IT_WORKS.md` for runtime walkthrough.
 > - **Initial Scaffold (2026-03-20)**: V0.1 — React Flow visual builder (frontend), FastAPI DAG execution engine (backend), Zustand state management, shadcn/ui component library, SQLAlchemy data models with multi-tenant isolation, Celery worker stubs, and MCP tool bridge. See `SETUP_GUIDE.md` for installation and `HOW_IT_WORKS.md` for runtime walkthrough.
-
-## AE AI Hub — Agentic Orchestrator Technical Blueprint
-
-**Version:** 0.8
-**Last updated:** 2026-03-20
-**Status:** V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 
 ---
 

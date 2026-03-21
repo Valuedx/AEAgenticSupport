@@ -2,8 +2,8 @@
 
 Replaces Python's built-in eval() with a restricted AST-walking evaluator
 that only allows comparison, boolean, and arithmetic operations on data
-from the execution context.  No attribute access, function calls, imports,
-or code execution of any kind.
+from the execution context.  Function calls are permitted only for an
+explicit whitelist of safe built-in functions and string methods.
 
 Supported syntax examples:
     context.node_1.status == "completed"
@@ -11,6 +11,9 @@ Supported syntax examples:
     output.node_1.count >= 5 and output.node_2.active == true
     trigger.priority in ["high", "critical"]
     not output.node_3.error
+    len(output.node_1.items) > 0
+    lower(trigger.status) == "active"
+    matches(trigger.email, r"^[a-z]+@example\\.com$")
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import ast
 import logging
 import operator
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,50 @@ _BIN_OPS = {
     ast.Mult: operator.mul,
     ast.Div: operator.truediv,
     ast.Mod: operator.mod,
+}
+
+
+# ---------------------------------------------------------------------------
+# Whitelisted functions for safe_eval condition expressions
+# ---------------------------------------------------------------------------
+
+def _safe_matches(text: str, pattern: str) -> bool:
+    """Regex full-match with a 1-second timeout guard."""
+    try:
+        return re.fullmatch(pattern, str(text)) is not None
+    except re.error as exc:
+        raise SafeEvalError(f"Invalid regex pattern: {exc}") from exc
+
+
+def _safe_contains(haystack, needle) -> bool:
+    """Check if needle is in haystack (safe 'in' wrapper)."""
+    return needle in haystack
+
+
+_WHITELISTED_FUNCTIONS: dict[str, Any] = {
+    "len": len,
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "lower": lambda s: str(s).lower(),
+    "upper": lambda s: str(s).upper(),
+    "strip": lambda s: str(s).strip(),
+    "startswith": lambda s, prefix: str(s).startswith(str(prefix)),
+    "endswith": lambda s, suffix: str(s).endswith(str(suffix)),
+    "contains": _safe_contains,
+    "matches": _safe_matches,
+}
+
+# String methods allowed via obj.method() syntax
+_WHITELISTED_METHODS: set[str] = {
+    "lower", "upper", "strip", "lstrip", "rstrip",
+    "startswith", "endswith", "replace", "split",
+    "join", "count", "find", "rfind", "isdigit", "isalpha",
+    "get", "keys", "values", "items",
 }
 
 
@@ -155,7 +203,40 @@ def _eval_node(node: ast.AST, env: dict[str, Any]) -> Any:
         test = _eval_node(node.test, env)
         return _eval_node(node.body, env) if test else _eval_node(node.orelse, env)
 
+    # ── Whitelisted function and method calls ──
+    if isinstance(node, ast.Call):
+        args = [_eval_node(a, env) for a in node.args]
+
+        # Case 1: top-level function call — e.g. len(x), lower(x), matches(x, y)
+        if isinstance(node.func, ast.Name):
+            fn_name = node.func.id
+            fn = _WHITELISTED_FUNCTIONS.get(fn_name)
+            if fn is None:
+                raise SafeEvalError(
+                    f"Function '{fn_name}' is not allowed. "
+                    f"Allowed: {', '.join(sorted(_WHITELISTED_FUNCTIONS))}"
+                )
+            return fn(*args)
+
+        # Case 2: method call — e.g. x.lower(), x.startswith("abc")
+        if isinstance(node.func, ast.Attribute):
+            obj = _eval_node(node.func.value, env)
+            method_name = node.func.attr
+            if method_name not in _WHITELISTED_METHODS:
+                raise SafeEvalError(
+                    f"Method '.{method_name}()' is not allowed. "
+                    f"Allowed: {', '.join(sorted(_WHITELISTED_METHODS))}"
+                )
+            method = getattr(obj, method_name, None)
+            if method is None or not callable(method):
+                raise SafeEvalError(
+                    f"Object of type {type(obj).__name__} has no method '{method_name}'"
+                )
+            return method(*args)
+
+        raise SafeEvalError("Only named function calls and method calls are allowed.")
+
     raise SafeEvalError(
         f"Disallowed expression node: {type(node).__name__}. "
-        "Only comparisons, boolean ops, arithmetic, and variable lookups are allowed."
+        "Only comparisons, boolean ops, arithmetic, function calls, and variable lookups are allowed."
     )

@@ -18,13 +18,29 @@ logger = logging.getLogger(__name__)
 def dispatch_node(
     node_data: dict, context: dict[str, Any], tenant_id: str
 ) -> dict[str, Any]:
+    # ── Resolve {{ env.* }} references in config (Component 6) ──
+    try:
+        from app.engine.prompt_template import resolve_config_env_vars
+        node_data = dict(node_data)  # shallow copy to avoid mutating original
+        node_data["config"] = resolve_config_env_vars(
+            node_data.get("config", {}), tenant_id
+        )
+    except Exception as exc:
+        logger.warning("Env var resolution failed (non-fatal): %s", exc)
+
     category = node_data.get("nodeCategory", "action")
+    label = node_data.get("label", "")
     handlers = {
         "trigger": _handle_trigger,
         "agent": _handle_agent,
         "action": _handle_action,
         "logic": _handle_logic,
     }
+
+    # ForEach is a logic node with special dispatch
+    if category == "logic" and label == "ForEach":
+        return _handle_forEach(node_data, context, tenant_id)
+
     handler = handlers.get(category, _handle_action)
     return handler(node_data, context, tenant_id)
 
@@ -184,3 +200,44 @@ def _handle_logic(
 
     logger.warning("Logic node '%s' has no handler", label)
     return {"output": None}
+
+
+def _handle_forEach(
+    node_data: dict, context: dict[str, Any], _tenant_id: str
+) -> dict[str, Any]:
+    """Evaluate the array expression and return metadata for the DAG runner.
+
+    The actual iteration over downstream nodes is handled by dag_runner.py,
+    which reads the returned 'items' list and 'itemVariable' name.
+    """
+    from app.engine.safe_eval import safe_eval, SafeEvalError
+
+    config = node_data.get("config", {})
+    array_expr = config.get("arrayExpression", "")
+    item_var = config.get("itemVariable", "item")
+
+    if not array_expr:
+        logger.warning("ForEach node has no arrayExpression configured")
+        return {"items": [], "itemVariable": item_var}
+
+    upstream = {k: v for k, v in context.items() if k.startswith("node_")}
+    eval_env = {"output": upstream, "context": context, "trigger": context.get("trigger", {})}
+    eval_env.update(upstream)
+
+    # Add loop item from parent forEach if nested
+    if "_loop_item" in context:
+        eval_env[context.get("_loop_item_var", "item")] = context["_loop_item"]
+
+    try:
+        items = safe_eval(array_expr, eval_env)
+    except SafeEvalError as exc:
+        logger.warning("ForEach arrayExpression rejected: %s", exc)
+        items = []
+
+    if not isinstance(items, (list, tuple)):
+        logger.warning("ForEach expression did not evaluate to a list: %s", type(items).__name__)
+        items = [items] if items is not None else []
+
+    logger.info("ForEach node evaluated: %d items, variable='%s'", len(items), item_var)
+    return {"items": list(items), "itemVariable": item_var}
+

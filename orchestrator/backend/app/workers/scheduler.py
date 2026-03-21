@@ -2,6 +2,7 @@
 
 Periodically scans workflow definitions for Schedule Trigger nodes and
 creates workflow instances for those whose cron expressions are due.
+Also prunes old workflow snapshots (V0.9).
 
 Run alongside the Celery worker:
     celery -A app.workers.celery_app beat --loglevel=info
@@ -18,7 +19,7 @@ from croniter import croniter
 
 from app.workers.celery_app import celery_app
 from app.database import SessionLocal
-from app.models.workflow import WorkflowDefinition, WorkflowInstance
+from app.models.workflow import WorkflowDefinition, WorkflowInstance, WorkflowSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ celery_app.conf.beat_schedule = {
     "check-scheduled-workflows": {
         "task": "orchestrator.check_scheduled_workflows",
         "schedule": 60.0,
+    },
+    "prune-old-snapshots": {
+        "task": "orchestrator.prune_old_snapshots",
+        "schedule": crontab(hour=3, minute=0),  # daily at 3:00 AM
     },
 }
 
@@ -78,6 +83,51 @@ def check_scheduled_workflows():
         db.close()
 
 
+@celery_app.task(name="orchestrator.prune_old_snapshots")
+def prune_old_snapshots():
+    """Delete old workflow snapshots beyond the configured max_snapshots limit.
+
+    Keeps the most recent N snapshots per workflow and deletes the rest.
+    """
+    from app.config import settings
+    max_keep = settings.max_snapshots
+    if max_keep <= 0:
+        return  # 0 = unlimited, no pruning
+
+    db = SessionLocal()
+    try:
+        workflow_ids = [
+            row[0] for row in
+            db.query(WorkflowSnapshot.workflow_def_id).distinct().all()
+        ]
+
+        total_pruned = 0
+        for wf_id in workflow_ids:
+            snapshots = (
+                db.query(WorkflowSnapshot)
+                .filter_by(workflow_def_id=wf_id)
+                .order_by(WorkflowSnapshot.version.desc())
+                .all()
+            )
+
+            if len(snapshots) <= max_keep:
+                continue
+
+            to_delete = snapshots[max_keep:]
+            for snap in to_delete:
+                db.delete(snap)
+            total_pruned += len(to_delete)
+
+        if total_pruned:
+            db.commit()
+            logger.info("Pruned %d old snapshots across %d workflows", total_pruned, len(workflow_ids))
+    except Exception:
+        logger.exception("Error in snapshot pruning")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _extract_schedule_cron(graph_json: dict) -> str | None:
     """Find a Schedule Trigger node and return its cron expression."""
     for node in graph_json.get("nodes", []):
@@ -96,3 +146,4 @@ def _is_due(cron_expr: str, now: datetime) -> bool:
     except (ValueError, KeyError):
         logger.warning("Invalid cron expression: %s", cron_expr)
         return False
+

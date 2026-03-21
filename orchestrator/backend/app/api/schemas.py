@@ -50,6 +50,13 @@ class CallbackRequest(BaseModel):
     approval_payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class RetryRequest(BaseModel):
+    """Retry a failed workflow instance from the failed node or a specific node."""
+    from_node_id: str | None = Field(
+        None, description="Optional node ID to retry from. Defaults to the node that failed."
+    )
+
+
 class InstanceOut(BaseModel):
     id: uuid.UUID
     tenant_id: str

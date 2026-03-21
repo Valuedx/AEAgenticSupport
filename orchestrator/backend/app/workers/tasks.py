@@ -23,3 +23,15 @@ def resume_workflow_task(self, instance_id: str, approval_payload: dict | None =
         resume_graph(db, instance_id, approval_payload or {})
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, name="orchestrator.retry_workflow")
+def retry_workflow_task(self, instance_id: str, from_node_id: str | None = None):
+    """Retry a failed workflow instance from the failed node."""
+    db = SessionLocal()
+    try:
+        from app.engine.dag_runner import retry_graph
+        retry_graph(db, instance_id, from_node_id)
+    finally:
+        db.close()
+
