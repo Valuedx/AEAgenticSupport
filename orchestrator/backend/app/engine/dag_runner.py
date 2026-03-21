@@ -489,8 +489,11 @@ def _execute_single_node(
             log_entry.output_json = output
             log_entry.completed_at = _utcnow()
             db.commit()
-            _save_checkpoint(db, instance.id, node_id, context)
-            span.update(output={"status": "completed", "has_output": output is not None})
+            checkpoint_id = _save_checkpoint(db, instance.id, node_id, context)
+            span_meta: dict = {"status": "completed", "has_output": output is not None}
+            if checkpoint_id:
+                span_meta["checkpoint_id"] = checkpoint_id
+            span.update(output=span_meta)
             return "completed"
 
         except Exception as exc:
@@ -592,9 +595,11 @@ def _execute_parallel(
         if status == "completed" and output is not None:
             context[node_id] = output
             log_entry.status = "completed"
-            log_entry.output_json = output
             log_entry.completed_at = _utcnow()
-            _save_checkpoint(db, instance.id, node_id, context)
+            checkpoint_id = _save_checkpoint(db, instance.id, node_id, context)
+            # Embed checkpoint_id in the log output so it is queryable via the
+            # execution log API even though the Langfuse span has already closed.
+            log_entry.output_json = {**(output or {}), "_checkpoint_id": checkpoint_id} if checkpoint_id else output
         elif status == "suspended":
             log_entry.status = "suspended"
             instance.status = "suspended"
@@ -734,12 +739,15 @@ def _build_node_input(node_data: dict, context: dict[str, Any]) -> dict:
 
 def _save_checkpoint(
     db: Session, instance_id: Any, node_id: str, context: dict[str, Any]
-) -> None:
+) -> str | None:
     """Persist a context snapshot immediately after a node succeeds.
 
     Strips internal runtime keys (prefixed with '_') before storage so
     the snapshot contains only user-visible data.  Failures here are
     non-fatal — a warning is logged and execution continues.
+
+    Returns:
+        The checkpoint UUID as a string, or None if the write failed.
     """
     try:
         clean_context = {k: v for k, v in context.items() if not k.startswith("_")}
@@ -751,11 +759,13 @@ def _save_checkpoint(
         )
         db.add(checkpoint)
         db.commit()
-        logger.debug("Checkpoint saved: instance=%s node=%s", instance_id, node_id)
+        logger.debug("Checkpoint saved: instance=%s node=%s id=%s", instance_id, node_id, checkpoint.id)
+        return str(checkpoint.id)
     except Exception as exc:
         logger.warning(
             "Failed to save checkpoint for instance=%s node=%s: %s",
             instance_id, node_id, exc,
         )
         db.rollback()
+        return None
 

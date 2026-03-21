@@ -1,6 +1,6 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.6
+**Version:** 0.9.7
 **Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
@@ -835,6 +835,88 @@ Returns the full checkpoint including `context_json`.
 
 Rows are cascade-deleted when the parent `WorkflowInstance` is deleted.
 
-### Coming next
+---
 
-Item 5 (Checkpoint-aware Langfuse) will annotate each `trace_workflow` and `span_node` call with the `checkpoint_id` produced by that node, creating a direct link between Langfuse traces and DB checkpoints for cross-tool debugging.
+## 🔬 20. Checkpoint-aware Langfuse — Linking Traces to DB Snapshots
+
+**Introduced in V0.9.7**
+
+After Item 4 introduced DB checkpoints, Item 5 connects them to Langfuse so that every node span in the Langfuse UI carries a direct reference to its DB context snapshot.
+
+### How it works
+
+**`_save_checkpoint` now returns the checkpoint UUID:**
+
+```python
+# Before (returned None):
+_save_checkpoint(db, instance.id, node_id, context)
+
+# After (returns str UUID or None):
+checkpoint_id = _save_checkpoint(db, instance.id, node_id, context)
+```
+
+**For sequential nodes** (`_execute_single_node`), the span is still open when the checkpoint is saved. The checkpoint_id is passed directly to `span.update()`:
+
+```python
+checkpoint_id = _save_checkpoint(db, instance.id, node_id, context)
+span_meta = {"status": "completed", "has_output": output is not None}
+if checkpoint_id:
+    span_meta["checkpoint_id"] = checkpoint_id
+span.update(output=span_meta)
+```
+
+In Langfuse, the node's span now shows `checkpoint_id: "abc123-..."` in its output metadata. You can copy this UUID and look up the exact context snapshot via:
+```
+GET /api/v1/workflows/{wf_id}/instances/{inst_id}/checkpoints/{checkpoint_id}
+```
+
+**For parallel nodes** (`_apply_result`), the Langfuse span has already exited by the time `_apply_result` runs. Instead, the checkpoint_id is embedded in the execution log entry's `output_json`:
+
+```python
+checkpoint_id = _save_checkpoint(db, instance.id, node_id, context)
+log_entry.output_json = (
+    {**(output or {}), "_checkpoint_id": checkpoint_id}
+    if checkpoint_id else output
+)
+```
+
+This means the checkpoint_id is accessible via `GET /instances/{id}` → `logs[i].output_json._checkpoint_id`.
+
+### `span_node` signature update
+
+`observability.py` → `span_node()` now accepts an optional `checkpoint_id` kwarg:
+
+```python
+@contextmanager
+def span_node(
+    parent,
+    *,
+    node_id: str,
+    node_type: str,
+    node_label: str = "",
+    input_data: Any = None,
+    checkpoint_id: str | None = None,   # ← new
+) -> Generator:
+```
+
+When `checkpoint_id` is provided at span creation time, it is written into the Langfuse span's metadata immediately. This kwarg is available for any future caller that has the checkpoint_id before the span opens (e.g., resume-from-checkpoint scenarios in Item 7).
+
+### Debugging workflow: sequential node
+
+1. Open Langfuse → find the workflow trace
+2. Click a node span
+3. In **Output metadata**, find `checkpoint_id`
+4. Call `GET .../checkpoints/{checkpoint_id}` → get exact context snapshot at that point
+5. Compare with the next checkpoint to see exactly what the node added
+
+### Debugging workflow: parallel node
+
+1. Call `GET .../instances/{id}` → find the node's log entry
+2. Read `output_json._checkpoint_id`
+3. Call `GET .../checkpoints/{checkpoint_id}` → full snapshot
+
+### Why different for sequential vs parallel?
+
+In `_execute_single_node`, the node runs inside a `with span_node(...) as span:` block. The checkpoint is saved AFTER `dispatch_node` returns but BEFORE the `with` block exits — so the span is still live.
+
+In `_execute_parallel`, each node runs in a `ThreadPoolExecutor` thread. The thread's `_run_node` function creates its own `with span_node(...)` block, which exits when the thread returns. The main thread then collects the future result in `_apply_result` — by then the span is already committed to Langfuse. We embed the checkpoint_id in the execution log as a fallback linkage mechanism.

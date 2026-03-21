@@ -152,8 +152,17 @@ def span_node(
     node_type: str,
     node_label: str = "",
     input_data: Any = None,
+    checkpoint_id: str | None = None,
 ) -> Generator:
-    """Child span for a single node execution."""
+    """Child span for a single node execution.
+
+    Args:
+        checkpoint_id: UUID of the InstanceCheckpoint written after this node
+            completes.  When provided, it is stored in span metadata so the
+            Langfuse trace links directly to the DB snapshot.  Pass ``None``
+            (the default) when the checkpoint is not yet available at span
+            creation time — callers can supply it later via ``span.update()``.
+    """
     if isinstance(parent, _NoOpSpan):
         yield _NoOpSpan()
         return
@@ -164,11 +173,14 @@ def span_node(
         return
 
     try:
+        meta: dict = {"node_id": node_id, "node_type": node_type}
+        if checkpoint_id is not None:
+            meta["checkpoint_id"] = checkpoint_id
         with lf.start_as_current_observation(
             name=f"node:{node_label or node_id}",
             as_type="span",
             input=input_data,
-            metadata={"node_id": node_id, "node_type": node_type},
+            metadata=meta,
         ) as span:
             yield span
     except Exception as exc:
