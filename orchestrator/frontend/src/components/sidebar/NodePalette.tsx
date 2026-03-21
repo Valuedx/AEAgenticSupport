@@ -12,6 +12,7 @@ import {
   Route,
   History,
   Save,
+  RefreshCw,
   ChevronRight,
   Search,
   X,
@@ -40,6 +41,7 @@ const ICON_MAP: Record<string, LucideIcon> = {
   route: Route,
   history: History,
   save: Save,
+  "refresh-cw": RefreshCw,
 };
 
 const CATEGORY_META: Record<NodeCategory, { label: string; color: string }> = {

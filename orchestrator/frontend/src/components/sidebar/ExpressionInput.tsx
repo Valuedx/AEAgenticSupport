@@ -164,7 +164,7 @@ export function ExpressionInput({
 
   // ── Render grouped dropdown via portal ───────────────────────────────────
   const renderDropdown = () => {
-    if (!open || capped.length === 0 || !dropdownPos) return null;
+    if (!open || !dropdownPos) return null;
 
     let lastGroup = "";
     return createPortal(
