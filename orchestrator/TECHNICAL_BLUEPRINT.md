@@ -1,3 +1,5 @@
+> - **V0.9.3 Deterministic Batch Semantics (2026-03-22)**: Added opt-in `deterministic_mode` flag to `ExecuteRequest`. When `true`, `_execute_parallel` sorts the ready-node batch by node ID before submitting to `ThreadPoolExecutor` and processes futures in submission order (instead of `as_completed`) so execution logs are written in a stable, reproducible sequence every run. The `execute_graph` and `_execute_ready_queue` signatures accept `deterministic_mode: bool = False`; `execute_workflow_task` forwards it through Celery. A `deterministic` Langfuse tag is added to the root trace when the flag is active. No DB migration required. Frontend `api.ts` `executeWorkflow` accepts an optional third `deterministicMode` parameter. Default (`false`) preserves existing as-completed throughput behaviour — no breaking changes.
+>
 > - **V0.9.2 UX Improvements (2026-03-21)**: Execution log UX — `JsonBlock` component adds Copy button (clipboard + 2s checkmark) and Expand button (opens `FullJsonDialog` with full scrollable JSON) to every input/output block in `ExecutionPanel`; "polling…" label corrected to "streaming…". Palette search — filter input in `NodePalette` hides non-matching categories, auto-expands matching ones, shows `n/total` count per category, clears with ✕ button. Validation highlighting on node cards — `useNodeValidation` hook runs `validateWorkflow()` reactively on every canvas change; `AgenticNode` applies red ring + `AlertCircle` icon for errors, yellow ring + `AlertTriangle` for warnings; selection ring always takes priority. MCP Tool node `toolName` field replaced with `ToolSingleSelect` — searchable list with tool title, description, safety tier badge, and clear button; live from `/api/v1/tools`. Expression variable picker (`src/lib/expressionVariables.ts`, `ExpressionInput.tsx`) — autocomplete dropdown on condition, *Expression, *NodeId, and systemPrompt fields; three modes (expression / nodeId / jinja2); cursor-aware token detection; keyboard navigation; fixed-position portal dropdown. Pre-run workflow validation (`src/lib/validateWorkflow.ts`) — checks for missing trigger, disconnected nodes, required empty fields (condition, url, toolName, arrayExpression, responseNodeId), and broken node-ID cross-references (responseNodeId, historyNodeId). `ValidationDialog` surfaces errors and warnings before execution; hard errors block run, warnings allow "Run Anyway". `Toolbar.tsx` now calls `validateWorkflow()` on every Run click. Undo/Redo — `flowStore.ts` gains `past[]`/`future[]` snapshot arrays (max 50) with `_pushHistory()` called before every destructive canvas action; `FlowCanvas.tsx` registers Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z global keyboard handlers; Toolbar shows Undo/Redo buttons with disabled state when history is empty. Node ID chip — `PropertyInspector.tsx` now shows the node's machine ID (e.g., `node_3`) in a monospace chip at the top of the panel with a one-click copy button (2s checkmark confirmation), so users can easily reference nodes in expressions like `node_3.intent`. Inline field help text — every `config_schema` property in `node_registry.json` now carries a `description` string; `DynamicConfigForm.tsx` renders these as `text-[10px] text-muted-foreground` subtext below each field via a `FieldHint` helper, covering all nine renderer branches (enum, array, object, boolean, number, ToolMultiSelect, ToolSingleSelect, ExpressionInput, plain input). ForEach/Merge canvas clarity — `AgenticNode` now renders a `waitAll`/`waitAny` strategy badge for Merge nodes (same slot as the agent model badge) and a `↻ arrayExpression` monospace line below the badge row for ForEach nodes when the expression is set, so both nodes are interpretable without opening the properties panel.
 >
 > - **V0.9.1 Stateful DAGs (2026-03-21)**: Added robust Stateful Re-Trigger DAG Pattern. Added `ConversationSession` PostgreSQL table with Alembic migration `0003_conversation_sessions.py` + unique index `(tenant_id, session_id)`. Added REST APIs in `conversations.py` (`GET /api/v1/conversations`, `GET /{id}`, `DELETE /{id}`). Exposes 3 new conversational memory nodes in `node_registry.json`: `Load Conversation State`, `Save Conversation State`, and `LLM Router`.
@@ -6,9 +8,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9.1
-**Last updated:** 2026-03-21
-**Status:** V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Version:** 0.9.3
+**Last updated:** 2026-03-22
+**Status:** V0.9.3 Deterministic batch semantics, V0.9.2 UX improvements, V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -575,6 +577,20 @@ When multiple nodes are ready simultaneously (e.g. two branches after a fan-out)
 - Each node writes to a unique key in the shared context dict (`context[node_id]`), so no locking is needed.
 - `ExecutionLog` entries are created before dispatch and updated after all futures complete.
 - If any parallel node fails or suspends, the engine stops after the current batch.
+
+#### Deterministic Mode (V0.9.3)
+
+By default, `as_completed` is used so results are processed as threads finish — maximising throughput. Set `deterministic_mode: true` in the execute request to enable stable ordering:
+
+| Aspect | Default (`false`) | Deterministic (`true`) |
+|--------|-------------------|------------------------|
+| Node submission order | Arbitrary list order | Sorted by node ID |
+| Result processing order | Completion order (`as_completed`) | Submission order (`.result()` in order) |
+| Log write order | Non-deterministic across runs | Stable across runs |
+| Throughput | Maximum | Slightly reduced for large batches |
+| Use case | Production | Debugging, replay, test assertions |
+
+A `deterministic` tag is added to the Langfuse root trace when the flag is active.
 
 ### 6.6 Merge / Wait-All
 

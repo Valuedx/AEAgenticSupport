@@ -104,8 +104,15 @@ def _detect_cycles(nodes_map: dict, forward: dict, in_degree: dict) -> None:
 # Execution — ready-queue model
 # ---------------------------------------------------------------------------
 
-def execute_graph(db: Session, instance_id: str) -> None:
-    """Run a full workflow instance with branch-aware parallel execution."""
+def execute_graph(db: Session, instance_id: str, deterministic_mode: bool = False) -> None:
+    """Run a full workflow instance with branch-aware parallel execution.
+
+    Args:
+        deterministic_mode: When True, parallel node batches are submitted and
+            their results processed in stable sorted node-ID order, giving fully
+            reproducible execution logs.  Slightly reduces throughput for large
+            parallel batches; leave False for production hot-paths.
+    """
     from app.observability import trace_workflow, flush
 
     instance: WorkflowInstance | None = (
@@ -127,18 +134,20 @@ def execute_graph(db: Session, instance_id: str) -> None:
     if instance.trigger_payload:
         context["trigger"] = instance.trigger_payload
 
+    det_tag = ["deterministic"] if deterministic_mode else []
     with trace_workflow(
         workflow_id=str(instance.workflow_def_id),
         instance_id=str(instance.id),
         tenant_id=instance.tenant_id,
         workflow_name=instance.definition.name,
         trigger_payload=instance.trigger_payload,
-        tags=[f"nodes:{len(nodes_map)}"],
+        tags=[f"nodes:{len(nodes_map)}"] + det_tag,
     ) as trace:
         context["_trace"] = trace
         _execute_ready_queue(
             db, instance, nodes_map, forward, reverse, in_degree, context,
             skipped=set(),
+            deterministic_mode=deterministic_mode,
         )
         trace.update(output={"status": instance.status, "nodes_executed": len([k for k in context if k.startswith("node_")])})
 
@@ -248,6 +257,7 @@ def _execute_ready_queue(
     in_degree: dict[str, int],
     context: dict[str, Any],
     skipped: set[str],
+    deterministic_mode: bool = False,
 ) -> None:
     """Process nodes in ready-order, respecting condition branches and
     running independent nodes in parallel."""
@@ -292,6 +302,7 @@ def _execute_ready_queue(
         else:
             results = _execute_parallel(
                 db, instance, nodes_map, ready, context,
+                deterministic_mode=deterministic_mode,
             )
             for node_id, result in results.items():
                 if result == "suspended":
@@ -485,6 +496,7 @@ def _execute_parallel(
     nodes_map: dict,
     ready_nodes: list[str],
     context: dict[str, Any],
+    deterministic_mode: bool = False,
 ) -> dict[str, str]:
     """Execute multiple independent nodes concurrently.
 
@@ -494,11 +506,19 @@ def _execute_parallel(
 
     V0.9 (Component 7): Trace object is passed explicitly via context["_trace"]
     so Langfuse spans are correctly stitched even in worker threads.
+
+    V0.9.3 deterministic_mode: when True, nodes are submitted and their results
+    processed in stable sorted node-ID order, giving fully reproducible log
+    sequences regardless of which thread finishes first.  When False (default),
+    the original as_completed ordering is used for maximum throughput.
     """
     results: dict[str, str] = {}
 
+    # Deterministic mode: fix the processing order up-front
+    ordered_nodes = sorted(ready_nodes) if deterministic_mode else list(ready_nodes)
+
     log_entries: dict[str, ExecutionLog] = {}
-    for node_id in ready_nodes:
+    for node_id in ordered_nodes:
         node = nodes_map[node_id]
         node_data = node.get("data", {})
         log_entry = ExecutionLog(
@@ -511,7 +531,7 @@ def _execute_parallel(
         )
         db.add(log_entry)
         log_entries[node_id] = log_entry
-    instance.current_node_id = ready_nodes[0]
+    instance.current_node_id = ordered_nodes[0]
     db.commit()
 
     # Capture the trace for explicit propagation into threads (Component 7)
@@ -545,29 +565,40 @@ def _execute_parallel(
                 span.update(output={"status": "failed", "error": str(exc)})
                 return node_id, "failed", None, str(exc)
 
-    with ThreadPoolExecutor(max_workers=min(len(ready_nodes), _MAX_PARALLEL)) as pool:
-        futures = {pool.submit(_run_node, nid): nid for nid in ready_nodes}
-        for future in as_completed(futures):
-            node_id, status, output, error = future.result()
-            results[node_id] = status
-            log_entry = log_entries[node_id]
+    def _apply_result(node_id: str, status: str, output: dict | None, error: str | None) -> None:
+        results[node_id] = status
+        log_entry = log_entries[node_id]
+        if status == "completed" and output is not None:
+            context[node_id] = output
+            log_entry.status = "completed"
+            log_entry.output_json = output
+            log_entry.completed_at = _utcnow()
+        elif status == "suspended":
+            log_entry.status = "suspended"
+            instance.status = "suspended"
+            instance.context_json = context
+        elif status == "failed":
+            log_entry.status = "failed"
+            log_entry.error = error
+            log_entry.completed_at = _utcnow()
+            instance.status = "failed"
+            instance.context_json = context
+            instance.completed_at = _utcnow()
 
-            if status == "completed" and output is not None:
-                context[node_id] = output
-                log_entry.status = "completed"
-                log_entry.output_json = output
-                log_entry.completed_at = _utcnow()
-            elif status == "suspended":
-                log_entry.status = "suspended"
-                instance.status = "suspended"
-                instance.context_json = context
-            elif status == "failed":
-                log_entry.status = "failed"
-                log_entry.error = error
-                log_entry.completed_at = _utcnow()
-                instance.status = "failed"
-                instance.context_json = context
-                instance.completed_at = _utcnow()
+    with ThreadPoolExecutor(max_workers=min(len(ready_nodes), _MAX_PARALLEL)) as pool:
+        if deterministic_mode:
+            # Submit in sorted order; block on each future in submission order so
+            # log writes are stable regardless of which thread finishes first.
+            futures_ordered = [(nid, pool.submit(_run_node, nid)) for nid in ordered_nodes]
+            for nid, future in futures_ordered:
+                node_id, status, output, error = future.result()
+                _apply_result(node_id, status, output, error)
+        else:
+            # Default: process results as they complete for maximum throughput.
+            futures = {pool.submit(_run_node, nid): nid for nid in ready_nodes}
+            for future in as_completed(futures):
+                node_id, status, output, error = future.result()
+                _apply_result(node_id, status, output, error)
 
     db.commit()
     return results

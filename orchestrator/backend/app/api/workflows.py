@@ -179,7 +179,7 @@ def execute_workflow(
     db.refresh(instance)
 
     from app.workers.tasks import execute_workflow_task
-    execute_workflow_task.delay(str(instance.id))
+    execute_workflow_task.delay(str(instance.id), body.deterministic_mode)
 
     return instance
 

@@ -4,12 +4,18 @@ from app.database import SessionLocal
 
 
 @celery_app.task(bind=True, name="orchestrator.execute_workflow")
-def execute_workflow_task(self, instance_id: str):
+def execute_workflow_task(self, instance_id: str, deterministic_mode: bool = False):
     """Celery task that picks up a queued workflow instance and runs it
-    through the DAG execution engine."""
+    through the DAG execution engine.
+
+    Args:
+        deterministic_mode: Forwarded to execute_graph — when True, parallel
+            batches are processed in stable sorted node-ID order for
+            reproducible execution logs.
+    """
     db = SessionLocal()
     try:
-        execute_graph(db, instance_id)
+        execute_graph(db, instance_id, deterministic_mode=deterministic_mode)
     finally:
         db.close()
 

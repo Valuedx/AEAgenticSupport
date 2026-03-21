@@ -44,6 +44,16 @@ class WorkflowOut(BaseModel):
 
 class ExecuteRequest(BaseModel):
     trigger_payload: dict[str, Any] | None = None
+    deterministic_mode: bool = Field(
+        False,
+        description=(
+            "When True, parallel node batches are submitted and logged in stable "
+            "sorted node-ID order. Results are processed in submission order rather "
+            "than completion order, giving fully reproducible execution logs. "
+            "Slightly reduces throughput for large parallel batches; leave False "
+            "for production hot-paths."
+        ),
+    )
 
 
 class CallbackRequest(BaseModel):

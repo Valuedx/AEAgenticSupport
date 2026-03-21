@@ -1,3 +1,5 @@
+> - **V0.9.3 Deterministic Batch Semantics (2026-03-22)**: Step 6 updated — `POST /{id}/execute` now accepts an optional `deterministic_mode: true` flag. When set, the execution engine sorts every parallel ready-batch by node ID and processes futures in submission order instead of completion order, giving identical log sequences on every run. Default behaviour (non-deterministic, maximum throughput) is unchanged.
+>
 > - **V0.9.2 UX Improvements (2026-03-21)**: New Step 5b (pre-run validation) — `validateWorkflow()` runs client-side before every execution. Checks: trigger presence, node reachability (BFS from triggers), required empty fields, broken node-ID cross-references. `ValidationDialog` blocks hard errors and allows "Run Anyway" for warnings only. Undo/Redo — `flowStore.past[]`/`future[]` history stacks (max 50); `_pushHistory()` called before add/delete/connect/drag-start/edge-delete; Ctrl+Z/Ctrl+Y keyboard shortcuts in `FlowCanvas.tsx`; toolbar Undo/Redo buttons with disabled state. Node ID chip — `PropertyInspector` now shows the node's machine ID (e.g., `node_3`) in a monospace chip at the top of the panel with a one-click copy button so users can easily reference it in expression fields on other nodes. Inline field help text — every field in `DynamicConfigForm` now renders a `FieldHint` (10px muted subtext) when the field's `config_schema` entry carries a `description`; all node types in `node_registry.json` have been populated with descriptions. ForEach/Merge canvas clarity — `AgenticNode` renders a `waitAll`/`waitAny` strategy badge for Merge nodes and a `↻ arrayExpression` monospace hint for ForEach nodes, making both nodes interpretable at a glance without opening the properties panel.
 >
 > - **V0.9 Execution Enhancements (2026-03-21)**: New Step 14 — ForEach Loop iteration with downstream node re-execution per array element. New Step 15 — Retry from Failed Node (API + engine). Step 11 MCP section updated — connection pooling with configurable pool size. Step 8 updated — enhanced safe expression evaluator supports whitelisted functions (`len`, `lower`, `matches` etc.) and method calls. New config: `ORCHESTRATOR_MAX_SNAPSHOTS` (snapshot pruning) and `ORCHESTRATOR_MCP_POOL_SIZE`. Environment variable mapping via `{{ env.SECRET_NAME }}` for node config values. Langfuse context fix for parallel execution.
@@ -341,19 +343,36 @@ The frontend `Run` button calls this endpoint (only after validation passes). Re
 Client                          API Gateway                     Celery Worker
 ──────                          ───────────                     ─────────────
 POST /execute                        │                               │
-  {trigger_payload: {...}}           │                               │
+  {trigger_payload: {...},           │                               │
+   deterministic_mode: false}        │                               │
                                      │                               │
                               Create WorkflowInstance                │
                               status = "queued"                      │
                               ─────────────────────▶           │
                               202 Accepted                     execute_workflow_task
-                              {id: <instance_id>}              │
-                                                               │ execute_graph(db, instance_id)
+                              {id: <instance_id>}              (instance_id, deterministic_mode)
+                                                               │
+                                                               │ execute_graph(db, instance_id,
+                                                               │   deterministic_mode)
                                                                ▼
                                                          (DAG execution begins)
 ```
 
 The API immediately returns `202 Accepted` with the new instance ID. The actual execution happens asynchronously in the Celery worker.
+
+### Deterministic Mode (V0.9.3)
+
+Pass `"deterministic_mode": true` in the request body to enable reproducible log ordering:
+
+```json
+POST /api/v1/workflows/{id}/execute
+{
+  "trigger_payload": { "input": "hello" },
+  "deterministic_mode": true
+}
+```
+
+When enabled, every parallel ready-batch is sorted by node ID before submission, and the engine waits for each future in that fixed order rather than using `as_completed`. Execution logs will appear in the same node sequence on every run, which makes debugging and test assertions against log order reliable. Default is `false` (maximum throughput).
 
 ---
 

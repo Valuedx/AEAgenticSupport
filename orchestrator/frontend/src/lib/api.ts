@@ -139,10 +139,14 @@ export const api = {
   executeWorkflow(
     id: string,
     triggerPayload?: Record<string, unknown>,
+    deterministicMode?: boolean,
   ): Promise<InstanceOut> {
     return request(`/api/v1/workflows/${id}/execute`, {
       method: "POST",
-      body: JSON.stringify({ trigger_payload: triggerPayload ?? null }),
+      body: JSON.stringify({
+        trigger_payload: triggerPayload ?? null,
+        deterministic_mode: deterministicMode ?? false,
+      }),
     });
   },
 

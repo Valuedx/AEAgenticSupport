@@ -1,7 +1,7 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.1
-**Last updated:** 2026-03-21
+**Version:** 0.9.3
+**Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
 
@@ -565,3 +565,60 @@ The line is `truncate` (with full text in `title` for hover) so it doesn't blow 
 ### Adding similar hints for your own node
 
 Follow the same pattern — guard with `label === "YourNodeLabel" && config?.yourField` and render a `<p>` or `<Badge>` inside `CardHeader` after the badge `<div>`. Keep the text short and `truncate` anything that could be long.
+
+---
+
+## ⚙️ 17. Deterministic Batch Execution — Reproducible Log Ordering
+
+**Introduced in V0.9.3**
+
+By default, when multiple nodes in a workflow are ready at the same time (e.g., two parallel branches after a fan-out), they are submitted to a `ThreadPoolExecutor` and their results are processed as each thread completes (`as_completed`). This maximises throughput but means execution logs may appear in a different order on each run.
+
+For debugging, testing, or replay scenarios where you need the **same log sequence every time**, you can enable **deterministic mode**.
+
+### How to enable it
+
+Pass `"deterministic_mode": true` in the execute request body:
+
+```json
+POST /api/v1/workflows/{workflow_id}/execute
+{
+  "trigger_payload": { "input": "test value" },
+  "deterministic_mode": true
+}
+```
+
+Or from the frontend API client:
+
+```ts
+await api.executeWorkflow(workflowId, triggerPayload, /* deterministicMode */ true);
+```
+
+### What changes when it's on
+
+| Aspect | Default (`false`) | Deterministic (`true`) |
+|--------|-------------------|------------------------|
+| Submission order | Arbitrary | Sorted by node ID |
+| Result processing | `as_completed` (fastest thread first) | `.result()` in sorted order |
+| Log write order | Non-deterministic | Stable across every run |
+| Langfuse tag | — | `"deterministic"` tag added |
+| Throughput | Maximum | Slightly lower for large parallel batches |
+
+### When to use it
+
+- **Integration tests** — assert exact log sequences without flaky ordering.
+- **Replay / debugging** — compare two runs of the same workflow and diff their logs.
+- **On-call investigations** — reproduce the exact execution sequence that caused a failure.
+- Leave **off** (`false`) for all production hot-paths.
+
+### Code path (for contributors)
+
+**`backend/app/api/schemas.py`** — `ExecuteRequest.deterministic_mode: bool`
+
+**`backend/app/api/workflows.py`** — passes the flag to `execute_workflow_task.delay()`
+
+**`backend/app/workers/tasks.py`** — `execute_workflow_task(instance_id, deterministic_mode)` forwards it to `execute_graph`
+
+**`backend/app/engine/dag_runner.py`** — `_execute_parallel` reads `deterministic_mode`:
+- `True`: sorts `ready_nodes` → creates log entries in sorted order → submits in sorted order → calls `future.result()` in sorted order
+- `False` (default): original `as_completed` path, unchanged
