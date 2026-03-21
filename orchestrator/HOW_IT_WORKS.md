@@ -523,6 +523,17 @@ This returns the full instance with all execution logs, ordered by start time.
 
 In the AI Studio sidecar pattern, the final Action node in the graph would be an HTTP Request node that POSTs the result back to AI Studio's delivery endpoint, which then formats it for WhatsApp/Teams/Webchat.
 
+### Viewing results in the Execution Panel
+
+The `ExecutionPanel` (`components/toolbar/ExecutionPanel.tsx`) displays each node's log as a collapsible row. Each JSON block (Input and Output) has two action buttons:
+
+| Button | Action |
+|--------|--------|
+| `Copy` (clipboard icon) | Copies full JSON to clipboard; icon becomes a green ✓ for 2 seconds |
+| `Expand` (maximize icon) | Opens `FullJsonDialog` — scrollable full-size view of the JSON, also with a copy button |
+
+The panel header shows "streaming…" while the SSE connection is active (not "polling…" — the frontend uses Server-Sent Events, not HTTP polling).
+
 ---
 
 ## 12. Step 11 — MCP Tool Bridge (Streamable HTTP)

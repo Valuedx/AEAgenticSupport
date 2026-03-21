@@ -7,14 +7,125 @@ import {
   X,
   ChevronDown,
   ChevronUp,
+  Copy,
+  Check,
+  Maximize2,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useWorkflowStore } from "@/store/workflowStore";
 import type { ExecutionLogOut } from "@/lib/api";
+
+// ---------------------------------------------------------------------------
+// CopyButton — clipboard copy with 2s checkmark confirmation
+// ---------------------------------------------------------------------------
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [text]);
+
+  return (
+    <button
+      onClick={handleCopy}
+      title={copied ? "Copied!" : "Copy to clipboard"}
+      className="p-1 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground shrink-0"
+    >
+      {copied ? (
+        <Check className="h-3 w-3 text-green-500" />
+      ) : (
+        <Copy className="h-3 w-3" />
+      )}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FullJsonDialog — full-size JSON viewer in a dialog
+// ---------------------------------------------------------------------------
+
+function FullJsonDialog({
+  open,
+  onClose,
+  title,
+  data,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  data: unknown;
+}) {
+  const json = JSON.stringify(data, null, 2);
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-3xl w-full">
+        <DialogHeader>
+          <div className="flex items-center justify-between">
+            <DialogTitle className="text-sm">{title}</DialogTitle>
+            <CopyButton text={json} />
+          </div>
+        </DialogHeader>
+        <ScrollArea className="max-h-[70vh]">
+          <pre className="text-xs font-mono bg-muted rounded-md p-4 whitespace-pre-wrap break-all">
+            {json}
+          </pre>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// JsonBlock — collapsible JSON preview with copy + expand buttons
+// ---------------------------------------------------------------------------
+
+function JsonBlock({ label, data }: { label: string; data: unknown }) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const json = JSON.stringify(data, null, 2);
+
+  return (
+    <div>
+      <div className="flex items-center gap-1 mb-0.5">
+        <p className="text-[10px] font-medium text-muted-foreground flex-1">{label}</p>
+        <CopyButton text={json} />
+        <button
+          onClick={() => setDialogOpen(true)}
+          title="View full output"
+          className="p-1 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
+        >
+          <Maximize2 className="h-3 w-3" />
+        </button>
+      </div>
+      <pre className="text-xs bg-muted rounded p-2 overflow-x-auto max-h-32 font-mono">
+        {json}
+      </pre>
+      <FullJsonDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        title={label}
+        data={data}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Status maps
+// ---------------------------------------------------------------------------
 
 const STATUS_ICON: Record<string, typeof CircleDot> = {
   pending: CircleDot,
@@ -78,20 +189,10 @@ function LogEntry({ log }: { log: ExecutionLogOut }) {
             </div>
           )}
           {log.output_json && (
-            <div>
-              <p className="text-[10px] font-medium text-muted-foreground mb-0.5">Output</p>
-              <pre className="text-xs bg-muted rounded p-2 overflow-x-auto max-h-32 font-mono">
-                {JSON.stringify(log.output_json, null, 2)}
-              </pre>
-            </div>
+            <JsonBlock label="Output" data={log.output_json} />
           )}
           {log.input_json && (
-            <div>
-              <p className="text-[10px] font-medium text-muted-foreground mb-0.5">Input</p>
-              <pre className="text-xs bg-muted rounded p-2 overflow-x-auto max-h-32 font-mono">
-                {JSON.stringify(log.input_json, null, 2)}
-              </pre>
-            </div>
+            <JsonBlock label="Input" data={log.input_json} />
           )}
         </div>
       )}
@@ -121,7 +222,7 @@ export function ExecutionPanel() {
         </Badge>
         {isExecuting && (
           <span className="text-[10px] text-muted-foreground">
-            polling...
+            streaming…
           </span>
         )}
         <div className="flex-1" />

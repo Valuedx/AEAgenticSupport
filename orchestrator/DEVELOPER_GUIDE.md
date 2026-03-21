@@ -242,7 +242,20 @@ The canonical graph for any chat-enabled workflow is:
 
 ---
 
-## 🔍 7. Palette Search
+## 📋 7. Execution Log — Copy & Expand
+
+After running a workflow, every node's **Input** and **Output** JSON blocks in the execution panel now have two action buttons in the top-right corner:
+
+| Button | What it does |
+|--------|-------------|
+| **Copy** (clipboard icon) | Copies the full JSON string to the clipboard. The icon turns green with a ✓ for 2 seconds to confirm. |
+| **Expand** (maximize icon) | Opens a full-size dialog showing the complete JSON (no height cap) with its own Copy button. |
+
+This is especially useful for large LLM responses or deeply nested tool outputs that are truncated in the 128px preview area.
+
+---
+
+## 🔍 8. Palette Search
 
 The Node Palette has a **search box** at the top. Type any part of a node's label or description (e.g., "http", "loop", "approval") to instantly filter the list.
 
@@ -255,7 +268,7 @@ No code changes needed when you add a new node to `node_registry.json` — the s
 
 ---
 
-## 🔴 8. Validation Highlighting on Node Cards
+## 🔴 9. Validation Highlighting on Node Cards
 
 Node cards show red or yellow visual indicators **in real time** as you edit the canvas — no need to click Run to discover problems.
 
@@ -286,7 +299,7 @@ Because `useNodeValidation` calls the same `validateWorkflow()` function used by
 
 ---
 
-## 🔧 9. MCP Tool Node — Visual Tool Picker
+## 🔧 10. MCP Tool Node — Visual Tool Picker
 
 When you drop an **MCP Tool** node onto the canvas and click it, the `toolName` field is rendered as a searchable visual picker instead of a plain text input.
 
@@ -304,7 +317,7 @@ If the MCP server is unreachable, the component shows a message and you can fall
 
 ---
 
-## ⚡ 10. Expression Variable Picker — Autocomplete in Config Fields
+## ⚡ 11. Expression Variable Picker — Autocomplete in Config Fields
 
 Whenever you click a Condition node, a ForEach, a Save Conversation State, or any node with a **systemPrompt**, the property panel automatically shows an autocomplete dropdown as you type in expression fields.
 
@@ -344,7 +357,7 @@ const EXPRESSION_KEYS = new Set([
 
 ---
 
-## ↩️ 11. Undo / Redo — Canvas History
+## ↩️ 12. Undo / Redo — Canvas History
 
 The workflow canvas supports full undo/redo with **Ctrl+Z** (undo) and **Ctrl+Y** or **Ctrl+Shift+Z** (redo). Toolbar buttons show the same actions with disabled state when history is empty.
 
@@ -373,7 +386,7 @@ Calling `replaceGraph()` (used by load, new workflow, and example loaders) alway
 
 ---
 
-## 🛡️ 12. Pre-Run Validation — Catching Mistakes Before They Run
+## 🛡️ 13. Pre-Run Validation — Catching Mistakes Before They Run
 
 The orchestrator validates your workflow **in the browser** the moment you hit **Run**. This prevents common mistakes without wasting an API call.
 
