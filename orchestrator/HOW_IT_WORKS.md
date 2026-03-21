@@ -168,6 +168,7 @@ When the user clicks a node on the canvas:
 | `number` / `integer` | `<Input type="number">` | `min`/`max`/`step` from schema |
 | `boolean` | `<input type="checkbox">` | |
 | `object` | `<Textarea>` (JSON) | Validated on blur; red border on invalid JSON |
+| `string` key `toolName` on `mcp_tool` | `ToolSingleSelect` | Searchable single-select from live tool list; shows title, description, safety tier |
 | `array` + key is `tools` on `react_agent` | `ToolMultiSelect` | Fetches live tool list from `/api/v1/tools` |
 | `array` (other) | `<Textarea>` (JSON array) | |
 

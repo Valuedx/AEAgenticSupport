@@ -167,6 +167,126 @@ function ToolMultiSelect({
 }
 
 // ---------------------------------------------------------------------------
+// Tool single-select sub-component (for mcp_tool toolName field)
+// ---------------------------------------------------------------------------
+
+function ToolSingleSelect({
+  selected,
+  onChange,
+}: {
+  selected: string;
+  onChange: (name: string) => void;
+}) {
+  const [tools, setTools] = useState<ToolOut[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    api.listTools().then((ts) => {
+      setTools(ts);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return <p className="text-xs text-muted-foreground">Loading tools…</p>;
+  }
+
+  if (tools.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        No tools available (MCP server may be offline). Type the tool name manually below.
+      </p>
+    );
+  }
+
+  const filtered = search.trim()
+    ? tools.filter(
+        (t) =>
+          t.name.toLowerCase().includes(search.toLowerCase()) ||
+          (t.title || "").toLowerCase().includes(search.toLowerCase()) ||
+          (t.description || "").toLowerCase().includes(search.toLowerCase()),
+      )
+    : tools;
+
+  // Group by category
+  const byCategory: Record<string, ToolOut[]> = {};
+  for (const t of filtered) {
+    (byCategory[t.category] ??= []).push(t);
+  }
+
+  return (
+    <div className="space-y-2">
+      {/* Search filter */}
+      <input
+        type="text"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Filter tools…"
+        className="w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      />
+
+      {/* Selected indicator */}
+      {selected && (
+        <div className="flex items-center gap-1.5 rounded-md bg-primary/10 border border-primary/20 px-2.5 py-1.5">
+          <span className="text-xs font-mono text-primary truncate flex-1">{selected}</span>
+          <button
+            onClick={() => onChange("")}
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0"
+            title="Clear selection"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Tool list */}
+      <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
+        {Object.entries(byCategory).map(([cat, catTools]) => (
+          <div key={cat} className="space-y-0.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-1 pt-1">
+              {cat}
+            </p>
+            {catTools.map((t) => {
+              const isSelected = selected === t.name;
+              return (
+                <button
+                  key={t.name}
+                  onClick={() => onChange(isSelected ? "" : t.name)}
+                  className={`w-full text-left rounded-md px-2.5 py-2 transition-colors group ${
+                    isSelected
+                      ? "bg-primary/10 border border-primary/30"
+                      : "hover:bg-accent border border-transparent"
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className={`text-xs font-medium truncate flex-1 ${isSelected ? "text-primary" : "text-foreground"}`}>
+                      {t.title || t.name}
+                    </span>
+                    <Badge variant="outline" className="text-[9px] px-1 py-0 shrink-0">
+                      {t.safety_tier}
+                    </Badge>
+                  </div>
+                  {t.description && (
+                    <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-2 text-left">
+                      {t.description}
+                    </p>
+                  )}
+                  <p className="text-[9px] font-mono text-muted-foreground/70 mt-0.5">{t.name}</p>
+                </button>
+              );
+            })}
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <p className="text-xs text-muted-foreground py-2 px-1">No tools match "{search}"</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -314,6 +434,19 @@ export function DynamicConfigForm({
                       : parseFloat(e.target.value),
                   )
                 }
+              />
+            </div>
+          );
+        }
+
+        // ---- toolName on mcp_tool → ToolSingleSelect ----
+        if (field.type === "string" && key === "toolName" && nodeType === "mcp_tool") {
+          return (
+            <div key={key} className="space-y-2">
+              <Label>{humanize(key)}</Label>
+              <ToolSingleSelect
+                selected={String(value ?? "")}
+                onChange={(name) => update(key, name)}
               />
             </div>
           );

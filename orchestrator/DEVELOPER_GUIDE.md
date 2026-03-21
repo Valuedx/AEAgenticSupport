@@ -242,7 +242,25 @@ The canonical graph for any chat-enabled workflow is:
 
 ---
 
-## ⚡ 7. Expression Variable Picker — Autocomplete in Config Fields
+## 🔧 7. MCP Tool Node — Visual Tool Picker
+
+When you drop an **MCP Tool** node onto the canvas and click it, the `toolName` field is rendered as a searchable visual picker instead of a plain text input.
+
+### What you see
+- A search box to filter by tool name, title, or description
+- Tools grouped by category, each card showing: **title**, **safety tier badge**, description snippet, and the exact `tool.name` in monospace
+- Clicking a card selects it and shows it in a highlighted "selected" bar with a ✕ clear button
+- The selected tool's exact API name is stored in `config.toolName` — no typos possible
+
+### Why it matters
+Previously you had to know the exact internal tool name (e.g., `get_server_status`) and type it correctly. Now you browse the live MCP tool registry the same way you pick tools for a ReAct Agent.
+
+### Offline fallback
+If the MCP server is unreachable, the component shows a message and you can fall back to typing the tool name manually.
+
+---
+
+## ⚡ 8. Expression Variable Picker — Autocomplete in Config Fields
 
 Whenever you click a Condition node, a ForEach, a Save Conversation State, or any node with a **systemPrompt**, the property panel automatically shows an autocomplete dropdown as you type in expression fields.
 
@@ -282,7 +300,7 @@ const EXPRESSION_KEYS = new Set([
 
 ---
 
-## ↩️ 8. Undo / Redo — Canvas History
+## ↩️ 9. Undo / Redo — Canvas History
 
 The workflow canvas supports full undo/redo with **Ctrl+Z** (undo) and **Ctrl+Y** or **Ctrl+Shift+Z** (redo). Toolbar buttons show the same actions with disabled state when history is empty.
 
@@ -311,7 +329,7 @@ Calling `replaceGraph()` (used by load, new workflow, and example loaders) alway
 
 ---
 
-## 🛡️ 9. Pre-Run Validation — Catching Mistakes Before They Run
+## 🛡️ 10. Pre-Run Validation — Catching Mistakes Before They Run
 
 The orchestrator validates your workflow **in the browser** the moment you hit **Run**. This prevents common mistakes without wasting an API call.
 
