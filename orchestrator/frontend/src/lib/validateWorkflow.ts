@@ -32,6 +32,7 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   "Save Conversation State": ["responseNodeId"],
   "LLM Router":              [],   // intents check done separately
   "Reflection":              ["reflectionPrompt"],
+  "Loop":                    ["continueExpression"],
 };
 
 // Fields that reference another node ID by value — must exist in the graph
@@ -117,6 +118,19 @@ export function validateWorkflow(
           nodeLabel: data.label,
           message: `"LLM Router" (${node.id}): "intents" must have at least one intent label.`,
           severity: "error",
+        });
+      }
+    }
+
+    // Loop: warn if maxIterations exceeds the backend hard cap of 25
+    if (data.label === "Loop") {
+      const maxIter = (data.config as Record<string, unknown>).maxIterations;
+      if (typeof maxIter === "number" && maxIter > 25) {
+        errors.push({
+          nodeId: node.id,
+          nodeLabel: data.label,
+          message: `"Loop" (${node.id}): maxIterations is ${maxIter} but the backend hard cap is 25 — the loop will stop at 25.`,
+          severity: "warning",
         });
       }
     }

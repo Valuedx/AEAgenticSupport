@@ -41,9 +41,11 @@ def dispatch_node(
         "logic": _handle_logic,
     }
 
-    # ForEach is a logic node with special dispatch
+    # ForEach / Loop are logic nodes with special dispatch handled by dag_runner
     if category == "logic" and label == "ForEach":
         return _handle_forEach(node_data, context, tenant_id)
+    if category == "logic" and label == "Loop":
+        return _handle_loop(node_data, context, tenant_id)
 
     # Conversational memory nodes — special dispatch regardless of category
     if label == "Load Conversation State":
@@ -261,6 +263,27 @@ def _handle_forEach(
 
     logger.info("ForEach node evaluated: %d items, variable='%s'", len(items), item_var)
     return {"items": list(items), "itemVariable": item_var}
+
+
+def _handle_loop(
+    node_data: dict, context: dict[str, Any], _tenant_id: str
+) -> dict[str, Any]:
+    """Return loop configuration for dag_runner to drive iteration.
+
+    The actual re-execution of downstream body nodes is handled by
+    _run_loop_iterations in dag_runner.py, which reads 'continueExpression'
+    and 'maxIterations' from this node's output.  An empty continueExpression
+    means "run for maxIterations iterations unconditionally".
+    """
+    config = node_data.get("config", {})
+    continue_expr = config.get("continueExpression", "")
+    max_iterations = min(int(config.get("maxIterations", 10)), 25)
+
+    logger.info(
+        "Loop node: continueExpression=%r, maxIterations=%d",
+        continue_expr, max_iterations,
+    )
+    return {"continueExpression": continue_expr, "maxIterations": max_iterations}
 
 
 # ---------------------------------------------------------------------------

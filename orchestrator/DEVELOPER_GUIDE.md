@@ -1,6 +1,6 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.8
+**Version:** 0.9.9
 **Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
@@ -1022,3 +1022,77 @@ while True:
 3. The streaming infrastructure handles Redis publish automatically
 
 For node types that should **not** stream (e.g., LLM Router which needs a deterministic 64-token classification response), continue using `call_llm` directly — `call_llm_streaming` is not called unless `instance_id` and `node_id` are provided.
+
+---
+
+## 🔁 22. Loop Node — Controlled Agentic Cycles (V0.9.9)
+
+The **Loop** node repeats its body (directly-connected downstream nodes) while a condition holds, up to a hard cap of 25 iterations. It is the controlled-cycle complement to ForEach: ForEach iterates over a known array; Loop iterates until a condition changes.
+
+### Typical use cases
+
+- **Quality gate**: call an LLM, score the output, loop until score > threshold.
+- **Retry with backoff**: attempt an HTTP call, loop on failure up to N times.
+- **Agentic refinement**: generate → critique → refine, repeated until satisfied.
+
+### Architecture
+
+```
+node_handlers._handle_loop()          ← evaluates config; returns metadata
+dag_runner._run_loop_iterations()     ← drives body node re-execution
+```
+
+`_handle_loop` only validates config and returns:
+```python
+{"continueExpression": "<expr>", "maxIterations": N}
+```
+
+`_execute_ready_queue` detects `label == "Loop"` after single-node execution and calls `_run_loop_iterations`, which:
+
+1. Evaluates `continueExpression` via `safe_eval` (pre-check — False = don't enter)
+2. Clears body node context keys from previous iteration
+3. Sets `context["_loop_index"]` (0-based) and `context["_loop_iteration"]` (1-based)
+4. Calls `_execute_single_node` for each body node
+5. Appends per-node output to `all_iteration_results`
+6. Repeats from step 1
+
+After the loop ends (condition False or `maxIterations` reached), stores:
+
+```python
+context[body_node_id] = {
+    "loop_results": [<iter-0-output>, <iter-1-output>, ...],
+    "iterations": N,
+}
+```
+
+### Expression context
+
+Inside `continueExpression`, all of the following are available:
+
+| Variable | Meaning |
+|----------|---------|
+| `_loop_index` | Current iteration number (0-based) |
+| `_loop_iteration` | Current iteration number (1-based) |
+| `node_X.field` | Output from any upstream node (updated after each body iteration) |
+| `trigger.*` | Trigger payload |
+
+Example: `node_3.score < 0.9 and _loop_index < 5`
+
+### File changes
+
+| File | Change |
+|------|--------|
+| `backend/app/engine/node_handlers.py` | `_handle_loop()` + dispatch (`label == "Loop"`) |
+| `backend/app/engine/dag_runner.py` | `_run_loop_iterations()` + wired in `_execute_ready_queue` |
+| `shared/node_registry.json` | `loop` type, `logic` category, `continueExpression` + `maxIterations` schema |
+| `frontend/src/components/nodes/AgenticNode.tsx` | `RefreshCw` icon (`"refresh-cw"` key); `≤N×` badge; `⟳ expr` preview line |
+| `frontend/src/lib/validateWorkflow.ts` | `"Loop": ["continueExpression"]` in `REQUIRED_FIELDS`; `maxIterations > 25` warning |
+
+### Validation
+
+- Missing `continueExpression` → **error** (blocks execution)
+- `maxIterations > 25` → **warning** (execution allowed; backend silently caps at 25)
+
+### Adding a new "Loop-aware" node type
+
+Nodes run inside a Loop body behave identically to any other node — they read from context and write their output back. No special handling is needed. Inside their `systemPrompt` or `condition`, use `{{ _loop_index }}` (Jinja2) or `_loop_index` (safe_eval expressions) to reference the current iteration.

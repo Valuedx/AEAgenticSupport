@@ -15,6 +15,7 @@ import {
   Save,
   AlertCircle,
   AlertTriangle,
+  RefreshCw,
   type LucideIcon,
 } from "lucide-react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +37,7 @@ const ICON_MAP: Record<string, LucideIcon> = {
   route: Route,
   history: History,
   save: Save,
+  "refresh-cw": RefreshCw,
 };
 
 const CATEGORY_STYLES: Record<
@@ -146,10 +148,20 @@ function AgenticNodeComponent({ id, data, selected }: NodeProps) {
               {String(config.strategy)}
             </Badge>
           )}
+          {label === "Loop" && config?.maxIterations != null && (
+            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+              ≤{String(config.maxIterations)}×
+            </Badge>
+          )}
         </div>
         {label === "ForEach" && config?.arrayExpression && (
           <p className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight" title={String(config.arrayExpression)}>
             ↻ {String(config.arrayExpression)}
+          </p>
+        )}
+        {label === "Loop" && config?.continueExpression && (
+          <p className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight" title={String(config.continueExpression)}>
+            ⟳ {String(config.continueExpression)}
           </p>
         )}
       </CardHeader>

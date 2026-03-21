@@ -1,3 +1,5 @@
+> - **V0.9.9 Loop Node (2026-03-22)**: New `Loop` logic node for controlled agentic cycles. Drop it between any two nodes; its directly-connected downstream nodes form the loop "body". Configure `continueExpression` (a `safe_eval` expression evaluated before each iteration — loop runs while True) and `maxIterations` (default 10, backend cap 25). An empty `continueExpression` runs the body unconditionally for `maxIterations`. At each iteration `_loop_index` (0-based) and `_loop_iteration` (1-based) are injected into context and accessible from body nodes' prompts/expressions. After the loop, each body node's context key is replaced with `{"loop_results": [...per-iteration outputs...], "iterations": N}` — downstream nodes can reference individual iteration results via expressions. `validateWorkflow` blocks missing `continueExpression` (error) and warns if `maxIterations > 25`. Canvas shows `≤N×` badge and `⟳ expr` preview. New Step 16 added below.
+>
 > - **V0.9.8 Rich Token Streaming (2026-03-22)**: LLM Agent nodes now stream tokens to the browser as they are generated. The Celery worker publishes each token to a Redis pub/sub channel (`orch:stream:{instance_id}`). The FastAPI SSE endpoint subscribes to this channel in a background asyncio task and forwards tokens as `event: token` SSE events. The frontend accumulates tokens per node_id in `streamingTokens` state; the ExecutionPanel shows a live preview under any running node's expanded log entry. Falls back silently to non-streaming if Redis is unavailable. No DB migration required.
 >
 > - **V0.9.7 Checkpoint-aware Langfuse (2026-03-22)**: Checkpoints now link to Langfuse traces. For sequential nodes, after the checkpoint is saved its UUID is included in the node's Langfuse span output (`checkpoint_id` field). For parallel nodes (where the Langfuse span has already exited), the checkpoint UUID is embedded in the execution log's `output_json` under `_checkpoint_id`. This means every completed node in Langfuse now carries a direct reference to its DB context snapshot. No DB migration required.
@@ -823,7 +825,77 @@ The `workflowStore.retryInstance(workflowId, instanceId, fromNodeId?)` action ca
 
 ---
 
-## 17. End-to-End Example
+## 17. Step 16 — Loop Node (Controlled Cycles)
+
+**Code:** `backend/app/engine/dag_runner.py` → `_run_loop_iterations()`, `backend/app/engine/node_handlers.py` → `_handle_loop()`
+
+The **Loop** node (category: `logic`) repeats its directly-connected downstream body nodes while a condition holds, up to a configurable maximum.
+
+### Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `continueExpression` | string | — | `safe_eval` expression evaluated before each iteration. Loop continues while True. Leave empty to run unconditionally. |
+| `maxIterations` | integer | 10 | Maximum iterations (backend hard cap: 25). |
+
+### Execution Flow
+
+```
+_execute_ready_queue
+  │
+  ├─ Detects Loop node completed
+  │
+  └─ _run_loop_iterations()
+       │
+       for idx in range(maxIterations):
+       │  ├─ _eval_condition(idx)  ← pre-check (while-loop semantics)
+       │  │    if False → break
+       │  │
+       │  ├─ context["_loop_index"] = idx
+       │  ├─ context["_loop_iteration"] = idx + 1
+       │  ├─ clear body node outputs from context
+       │  │
+       │  └─ for each body node:
+       │       └─ _execute_single_node(...)
+       │           → output appended to all_iteration_results[nid]
+       │
+       └─ for each body node:
+            context[nid] = {
+              "loop_results": [<iter-0>, <iter-1>, ...],
+              "iterations": N
+            }
+```
+
+### Accessing Loop Results Downstream
+
+After the Loop, a body node `node_3` holds:
+
+```json
+{
+  "loop_results": [
+    { "response": "attempt 1 output" },
+    { "response": "attempt 2 output" }
+  ],
+  "iterations": 2
+}
+```
+
+A downstream node can reference `node_3.loop_results[-1].response` (last iteration) via a Jinja2 expression, or use a Condition to branch on `node_3.iterations < 3`.
+
+### Suspension and Failure
+
+- **Failure in body**: partial `loop_results` up to the failed iteration are stored; instance moves to `failed`.
+- **Suspension in body**: partial results stored; instance moves to `suspended`; HITL Resume continues from the suspended node.
+
+### Visual Indicators
+
+On the canvas the Loop node shows:
+- `≤N×` badge (maxIterations)
+- `⟳ {continueExpression}` monospace line (when expression is set)
+
+---
+
+## 18. End-to-End Example
 
 **Scenario:** An IT support agent that diagnoses a failed AE request using a ReAct loop with auto-discovered tools.
 

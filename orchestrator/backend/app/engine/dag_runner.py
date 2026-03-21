@@ -310,14 +310,20 @@ def _execute_ready_queue(
             if result == "failed":
                 return
 
-            # ── ForEach iteration (V0.9) ──
+            # ── ForEach / Loop iteration ──
             node_data = nodes_map.get(node_id, {}).get("data", {})
-            if (node_data.get("nodeCategory") == "logic"
-                    and node_data.get("label") == "ForEach"):
+            node_label = node_data.get("label", "")
+            if node_data.get("nodeCategory") == "logic" and node_label == "ForEach":
                 _run_forEach_iterations(
                     db, instance, nodes_map, forward, reverse,
                     in_degree, context, skipped, pruned, satisfied,
                     forEach_node_id=node_id,
+                )
+            elif node_data.get("nodeCategory") == "logic" and node_label == "Loop":
+                _run_loop_iterations(
+                    db, instance, nodes_map, forward, reverse,
+                    in_degree, context, skipped, pruned, satisfied,
+                    loop_node_id=node_id,
                 )
             else:
                 _propagate_edges(node_id, forward, nodes_map, context, satisfied, pruned)
@@ -717,6 +723,142 @@ def _run_forEach_iterations(
     logger.info(
         "ForEach node %s completed: %d iterations across %d downstream nodes",
         forEach_node_id, len(items), len(downstream_node_ids),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Loop iteration (V0.9.9)
+# ---------------------------------------------------------------------------
+
+def _run_loop_iterations(
+    db: Session,
+    instance: WorkflowInstance,
+    nodes_map: dict,
+    forward: dict[str, list[_Edge]],
+    reverse: dict[str, list[_Edge]],
+    in_degree: dict[str, int],
+    context: dict[str, Any],
+    skipped: set[str],
+    pruned: set[str],
+    satisfied: dict[str, set[str]],
+    loop_node_id: str,
+) -> None:
+    """Execute downstream body nodes repeatedly while a condition holds.
+
+    Uses pre-check semantics: ``continueExpression`` is evaluated before each
+    iteration.  If it returns False on the first check the body never executes.
+    An empty expression is treated as always-True (run for ``maxIterations``).
+
+    After the loop, each body node's context key is overwritten with::
+
+        {"loop_results": [<iter-0-output>, ...], "iterations": N}
+
+    Downstream nodes reference these aggregated results the same way they
+    would any other node output.
+    """
+    from app.engine.safe_eval import safe_eval, SafeEvalError
+
+    loop_output = context.get(loop_node_id, {})
+    continue_expr: str = loop_output.get("continueExpression", "")
+    max_iterations: int = min(int(loop_output.get("maxIterations", 10)), 25)
+
+    downstream_edges = forward.get(loop_node_id, [])
+    downstream_node_ids = [e.target for e in downstream_edges]
+
+    if not downstream_node_ids:
+        _propagate_edges(loop_node_id, forward, nodes_map, context, satisfied, pruned)
+        return
+
+    def _eval_condition(idx: int) -> bool:
+        if not continue_expr:
+            return True  # No guard — run unconditionally up to max_iterations
+        upstream = {k: v for k, v in context.items() if k.startswith("node_")}
+        eval_env: dict = {
+            "output": upstream,
+            "context": context,
+            "trigger": context.get("trigger", {}),
+            "_loop_index": idx,
+            "_loop_iteration": idx + 1,
+        }
+        eval_env.update(upstream)
+        try:
+            return bool(safe_eval(continue_expr, eval_env))
+        except SafeEvalError as exc:
+            logger.warning("Loop continueExpression rejected by safe_eval: %s", exc)
+            return False
+        except Exception as exc:
+            logger.warning("Loop continueExpression evaluation error: %s", exc)
+            return False
+
+    all_iteration_results: dict[str, list] = {nid: [] for nid in downstream_node_ids}
+    actual_iterations = 0
+
+    for idx in range(max_iterations):
+        # Pre-check: evaluate condition before executing the body
+        if not _eval_condition(idx):
+            break
+
+        context["_loop_index"] = idx
+        context["_loop_iteration"] = idx + 1
+
+        # Clear previous iteration outputs so nodes re-execute cleanly
+        for body_nid in downstream_node_ids:
+            context.pop(body_nid, None)
+
+        failed = False
+        for body_nid in downstream_node_ids:
+            result = _execute_single_node(db, instance, nodes_map, body_nid, context)
+
+            if result == "completed":
+                all_iteration_results[body_nid].append(context.get(body_nid))
+            elif result == "failed":
+                all_iteration_results[body_nid].append({"error": "failed", "iteration": idx})
+                failed = True
+                break  # Stop body execution for this iteration
+            elif result == "suspended":
+                # Persist aggregated results so far before suspending
+                for nid in downstream_node_ids:
+                    context[nid] = {
+                        "loop_results": all_iteration_results[nid],
+                        "iterations": idx,
+                    }
+                return  # Suspend propagates via instance status
+
+        actual_iterations = idx + 1
+
+        if failed:
+            # Store partial results and exit — instance already marked failed
+            for nid in downstream_node_ids:
+                context[nid] = {
+                    "loop_results": all_iteration_results[nid],
+                    "iterations": actual_iterations,
+                }
+            _propagate_edges(loop_node_id, forward, nodes_map, context, satisfied, pruned)
+            for nid in downstream_node_ids:
+                satisfied[nid] = set()
+                _propagate_edges(nid, forward, nodes_map, context, satisfied, pruned)
+            return
+
+    # Store aggregated results under each body node's key
+    for nid in downstream_node_ids:
+        context[nid] = {
+            "loop_results": all_iteration_results[nid],
+            "iterations": actual_iterations,
+        }
+
+    # Clean up loop-scoped context variables
+    context.pop("_loop_index", None)
+    context.pop("_loop_iteration", None)
+
+    # Propagate edges from Loop node and from body nodes so downstream proceeds
+    _propagate_edges(loop_node_id, forward, nodes_map, context, satisfied, pruned)
+    for nid in downstream_node_ids:
+        satisfied[nid] = set()
+        _propagate_edges(nid, forward, nodes_map, context, satisfied, pruned)
+
+    logger.info(
+        "Loop node %s completed: %d/%d iterations, %d body nodes",
+        loop_node_id, actual_iterations, max_iterations, len(downstream_node_ids),
     )
 
 
