@@ -114,6 +114,33 @@ class ExecutionLog(Base):
     instance = relationship("WorkflowInstance", back_populates="execution_logs")
 
 
+class InstanceCheckpoint(Base):
+    """Point-in-time snapshot of workflow context after a node completes.
+
+    One row is written per successful node completion.  The context_json
+    captures everything in the execution context at that moment (internal
+    ``_``-prefixed keys are stripped before storage).  Rows are cascade-
+    deleted when the parent WorkflowInstance is deleted.
+    """
+
+    __tablename__ = "instance_checkpoints"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    instance_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("workflow_instances.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    node_id = Column(String(128), nullable=False)
+    context_json = Column(JSONB, nullable=False, default=dict)
+    saved_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_checkpoint_instance_node", "instance_id", "node_id"),
+    )
+
+
 class ConversationSession(Base):
     """Persistent multi-turn conversation history for the Stateful Re-Trigger Pattern.
 

@@ -1,6 +1,6 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9.5
+**Version:** 0.9.6
 **Last updated:** 2026-03-22
 
 Welcome to the Developer Guide! 🚀 
@@ -765,3 +765,76 @@ The Reflection node **never mutates `context`**. It only returns a value. The da
 - `shared/node_registry.json` — `reflection` type under `agent` category with full `config_schema`
 - `validateWorkflow.ts` — `"Reflection": ["reflectionPrompt"]` in `REQUIRED_FIELDS` blocks execution if prompt is empty
 - `expressionVariables.ts` — `"Reflection": ["_raw_response"]` in `NODE_OUTPUT_FIELDS`; user-defined `outputKeys` fields (e.g., `node_X.next_action`) are also accessible at runtime but can't be statically enumerated
+
+---
+
+## 💾 19. Checkpointing — Per-Node Context Snapshots
+
+**Introduced in V0.9.6**
+
+Every time a node completes successfully, the engine automatically saves a **checkpoint** — a full snapshot of the execution context at that exact moment. This lets you inspect what the workflow "knew" after each step, without having to run it again.
+
+### What a checkpoint contains
+
+A checkpoint stores the `context_json` minus all internal runtime keys (anything starting with `_` — like `_trace`, `_loop_item`, `_loop_index`). What remains is:
+- `trigger` — the original webhook/schedule payload
+- `node_1`, `node_2`, … — outputs from every node that has completed up to that point
+
+### Where checkpoints are written
+
+**File:** `backend/app/engine/dag_runner.py` → `_save_checkpoint(db, instance_id, node_id, context)`
+
+```python
+# After a single node completes (execute_single_node):
+log_entry.completed_at = _utcnow()
+db.commit()
+_save_checkpoint(db, instance.id, node_id, context)   # ← here
+
+# After a parallel batch node completes (_apply_result):
+context[node_id] = output
+log_entry.status = "completed"
+log_entry.completed_at = _utcnow()
+_save_checkpoint(db, instance.id, node_id, context)   # ← here
+```
+
+**ForEach iterations** are covered automatically because they call `_execute_single_node` for each iteration — one checkpoint per iteration per downstream node.
+
+### Non-fatal design
+
+```python
+def _save_checkpoint(db, instance_id, node_id, context):
+    try:
+        clean_context = {k: v for k, v in context.items() if not k.startswith("_")}
+        db.add(InstanceCheckpoint(instance_id=instance_id, node_id=node_id,
+                                  context_json=clean_context, saved_at=_utcnow()))
+        db.commit()
+    except Exception as exc:
+        logger.warning("Failed to save checkpoint: %s", exc)
+        db.rollback()   # ← never propagated upward
+```
+
+If the checkpoint write fails (e.g., transient DB error), execution continues uninterrupted. Only a warning appears in the logs.
+
+### Reading checkpoints via the API
+
+```
+GET /api/v1/workflows/{workflow_id}/instances/{instance_id}/checkpoints
+```
+Returns a list ordered by `saved_at` — each entry has `id`, `instance_id`, `node_id`, `saved_at`. No context payload.
+
+```
+GET /api/v1/workflows/{workflow_id}/instances/{instance_id}/checkpoints/{checkpoint_id}
+```
+Returns the full checkpoint including `context_json`.
+
+### Database
+
+**Table:** `instance_checkpoints`
+**Migration:** `alembic/versions/0004_instance_checkpoints.py`
+**Model:** `app/models/workflow.py` → `InstanceCheckpoint`
+
+Rows are cascade-deleted when the parent `WorkflowInstance` is deleted.
+
+### Coming next
+
+Item 5 (Checkpoint-aware Langfuse) will annotate each `trace_workflow` and `span_node` call with the `checkpoint_id` produced by that node, creating a direct link between Langfuse traces and DB checkpoints for cross-tool debugging.

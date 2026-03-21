@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.security.tenant import get_tenant_id
-from app.models.workflow import WorkflowDefinition, WorkflowInstance, WorkflowSnapshot, ExecutionLog
+from app.models.workflow import WorkflowDefinition, WorkflowInstance, WorkflowSnapshot, ExecutionLog, InstanceCheckpoint
 from app.api.schemas import (
     WorkflowCreate,
     WorkflowUpdate,
@@ -23,6 +23,8 @@ from app.api.schemas import (
     InstanceContextOut,
     ExecutionLogOut,
     SnapshotOut,
+    CheckpointOut,
+    CheckpointDetailOut,
 )
 
 router = APIRouter(prefix="/api/v1/workflows", tags=["workflows"])
@@ -378,6 +380,81 @@ def get_instance_context(
         current_node_id=instance.current_node_id,
         approval_message=approval_message,
         context_json=context_json,
+    )
+
+
+@router.get(
+    "/{workflow_id}/instances/{instance_id}/checkpoints",
+    response_model=list[CheckpointOut],
+)
+def list_checkpoints(
+    workflow_id: uuid.UUID,
+    instance_id: uuid.UUID,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """List all per-node checkpoints for an execution instance.
+
+    Returns one entry per successfully completed node, in chronological
+    order.  Context payloads are omitted for brevity — use the detail
+    endpoint to retrieve the full snapshot for a specific checkpoint.
+    """
+    instance = (
+        db.query(WorkflowInstance)
+        .filter_by(id=instance_id, workflow_def_id=workflow_id, tenant_id=tenant_id)
+        .first()
+    )
+    if not instance:
+        raise HTTPException(404, "Instance not found")
+
+    checkpoints = (
+        db.query(InstanceCheckpoint)
+        .filter_by(instance_id=instance_id)
+        .order_by(InstanceCheckpoint.saved_at)
+        .all()
+    )
+    return [CheckpointOut.model_validate(cp) for cp in checkpoints]
+
+
+@router.get(
+    "/{workflow_id}/instances/{instance_id}/checkpoints/{checkpoint_id}",
+    response_model=CheckpointDetailOut,
+)
+def get_checkpoint_detail(
+    workflow_id: uuid.UUID,
+    instance_id: uuid.UUID,
+    checkpoint_id: uuid.UUID,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Return a specific checkpoint with its full context snapshot.
+
+    The context_json represents the execution context immediately after
+    the node identified by node_id completed.  Internal runtime keys
+    (prefixed with '_') are stripped before returning.
+    """
+    instance = (
+        db.query(WorkflowInstance)
+        .filter_by(id=instance_id, workflow_def_id=workflow_id, tenant_id=tenant_id)
+        .first()
+    )
+    if not instance:
+        raise HTTPException(404, "Instance not found")
+
+    checkpoint = (
+        db.query(InstanceCheckpoint)
+        .filter_by(id=checkpoint_id, instance_id=instance_id)
+        .first()
+    )
+    if not checkpoint:
+        raise HTTPException(404, "Checkpoint not found")
+
+    return CheckpointDetailOut(
+        id=checkpoint.id,
+        instance_id=checkpoint.instance_id,
+        node_id=checkpoint.node_id,
+        saved_at=checkpoint.saved_at,
+        context_json=checkpoint.context_json,
     )
 
 

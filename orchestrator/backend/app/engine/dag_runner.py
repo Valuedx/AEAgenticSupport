@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models.workflow import WorkflowInstance, ExecutionLog
+from app.models.workflow import WorkflowInstance, ExecutionLog, InstanceCheckpoint
 from app.engine.node_handlers import dispatch_node
 
 logger = logging.getLogger(__name__)
@@ -489,6 +489,7 @@ def _execute_single_node(
             log_entry.output_json = output
             log_entry.completed_at = _utcnow()
             db.commit()
+            _save_checkpoint(db, instance.id, node_id, context)
             span.update(output={"status": "completed", "has_output": output is not None})
             return "completed"
 
@@ -593,6 +594,7 @@ def _execute_parallel(
             log_entry.status = "completed"
             log_entry.output_json = output
             log_entry.completed_at = _utcnow()
+            _save_checkpoint(db, instance.id, node_id, context)
         elif status == "suspended":
             log_entry.status = "suspended"
             instance.status = "suspended"
@@ -728,4 +730,32 @@ def _build_node_input(node_data: dict, context: dict[str, Any]) -> dict:
         node_input["loop_variable"] = context.get("_loop_item_var", "item")
 
     return node_input
+
+
+def _save_checkpoint(
+    db: Session, instance_id: Any, node_id: str, context: dict[str, Any]
+) -> None:
+    """Persist a context snapshot immediately after a node succeeds.
+
+    Strips internal runtime keys (prefixed with '_') before storage so
+    the snapshot contains only user-visible data.  Failures here are
+    non-fatal — a warning is logged and execution continues.
+    """
+    try:
+        clean_context = {k: v for k, v in context.items() if not k.startswith("_")}
+        checkpoint = InstanceCheckpoint(
+            instance_id=instance_id,
+            node_id=node_id,
+            context_json=clean_context,
+            saved_at=_utcnow(),
+        )
+        db.add(checkpoint)
+        db.commit()
+        logger.debug("Checkpoint saved: instance=%s node=%s", instance_id, node_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed to save checkpoint for instance=%s node=%s: %s",
+            instance_id, node_id, exc,
+        )
+        db.rollback()
 

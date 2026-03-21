@@ -135,6 +135,25 @@ class SnapshotDetailOut(SnapshotOut):
 
 
 # ---------------------------------------------------------------------------
+# Instance Checkpoints (per-node context snapshots)
+# ---------------------------------------------------------------------------
+
+class CheckpointOut(BaseModel):
+    """Summary of a single per-node checkpoint (no context payload)."""
+    id: uuid.UUID
+    instance_id: uuid.UUID
+    node_id: str
+    saved_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class CheckpointDetailOut(CheckpointOut):
+    """Full checkpoint including the context snapshot at that point."""
+    context_json: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 

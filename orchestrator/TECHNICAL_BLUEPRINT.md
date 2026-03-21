@@ -1,3 +1,5 @@
+> - **V0.9.6 Checkpointing Threads (2026-03-22)**: New `instance_checkpoints` table (Alembic migration `0004_instance_checkpoints.py`). One row is written per successfully completed node: `instance_id` (FK cascade-delete), `node_id`, `context_json` (full context with `_`-prefixed internal keys stripped), `saved_at`. `_save_checkpoint()` helper in `dag_runner.py` is called in both `_execute_single_node` (after `db.commit()`) and `_apply_result` inside `_execute_parallel` (after output is written to context). Failures in `_save_checkpoint` are non-fatal — a warning is logged and execution continues. New API endpoints: `GET /{workflow_id}/instances/{instance_id}/checkpoints` (list, `CheckpointOut` — no context payload) and `GET /{workflow_id}/instances/{instance_id}/checkpoints/{checkpoint_id}` (`CheckpointDetailOut` — includes `context_json`). `InstanceCheckpoint` SQLAlchemy model added to `workflow.py`. Schemas `CheckpointOut` / `CheckpointDetailOut` added to `schemas.py`. No frontend changes — checkpoints are a backend/API feature used by Item 5 (Langfuse tagging) and external tooling. Indexes: `(instance_id)` and `(instance_id, node_id)`.
+>
 > - **V0.9.5 Reflection Node (2026-03-22)**: New `Reflection` agent node that calls an LLM with an auto-built summary of the workflow's execution history and expects a structured JSON response. Handler in `app/engine/reflection_handler.py` — `_build_execution_summary()` collects the most recent N `node_*` keys from context (hard cap 25, configurable via `maxHistoryNodes`), truncates each to 800 chars to prevent token explosion, and injects the trigger payload. `reflectionPrompt` is a Jinja2 template with `{{ execution_summary }}` available alongside all normal context variables. `_parse_json_response()` strips markdown fences, falls back to regex `{...}` extraction, and returns `{"reflection": raw, "parse_error": True}` as a last resort. `outputKeys` warns (non-blocking) if any expected top-level keys are absent from the response. Node registered in `shared/node_registry.json` under category `agent`. Dispatch added in `node_handlers.py` via label match `"Reflection"`. Frontend: `reflectionPrompt` added to `REQUIRED_FIELDS` in `validateWorkflow.ts`; `_raw_response` added to `NODE_OUTPUT_FIELDS` in `expressionVariables.ts`. Node is intentionally read-only — it never mutates the shared context; downstream Condition nodes route on its returned JSON fields (e.g., `node_X.next_action == "escalate"`). Full Langfuse observability via `record_generation`. No DB migration required.
 >
 > - **V0.9.4 HITL UX (2026-03-22)**: Full Human-in-the-Loop review UI. New `GET /api/v1/workflows/{wf_id}/instances/{inst_id}/context` endpoint returns `InstanceContextOut` — the live `context_json` (internal `_`-prefixed keys stripped) plus the `approvalMessage` extracted from the suspended node's config. `CallbackRequest` gains an optional `context_patch: dict` field — a shallow-merge applied to the instance context before resuming, enabling operators to override specific node outputs without rerunning earlier nodes. `resume_graph` and `resume_workflow_task` both thread `context_patch` through. Frontend: new `HITLResumeDialog` component shows the approval message, a read-only scrollable context JSON viewer, and an editable JSON textarea for the patch; "Approve & Resume" and "Reject" buttons. `ExecutionPanel` shows a yellow "Review & Resume" button in the header when `status === "suspended"`. `workflowStore` gains `instanceContext` state plus `fetchInstanceContext` and `resumeInstance` actions. No DB migration required.
@@ -12,9 +14,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9.5
+**Version:** 0.9.6
 **Last updated:** 2026-03-22
-**Status:** V0.9.5 Reflection Node, V0.9.4 HITL UX, V0.9.3 Deterministic batch semantics, V0.9.2 UX improvements, V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Status:** V0.9.6 Checkpointing, V0.9.5 Reflection Node, V0.9.4 HITL UX, V0.9.3 Deterministic batch semantics, V0.9.2 UX improvements, V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -423,6 +425,8 @@ prompts to be reusable across different workflow topologies.
 | `POST` | `/{workflow_id}/callback` | 200 | Resume most recent suspended instance |
 | `GET` | `/{workflow_id}/status` | 200 | List execution instances (limit 50) |
 | `GET` | `/{workflow_id}/instances/{instance_id}` | 200 | Instance detail with execution logs |
+| `GET` | `/{workflow_id}/instances/{instance_id}/checkpoints` | 200 | List per-node checkpoints (no context payload) |
+| `GET` | `/{workflow_id}/instances/{instance_id}/checkpoints/{checkpoint_id}` | 200 | Checkpoint detail with full context snapshot |
 
 **Tools** (prefix: `/api/v1/tools`)
 
@@ -512,7 +516,23 @@ Persistent multi-turn conversation history for the Stateful Re-Trigger Pattern.
 
 Index: `(tenant_id, session_id)` (Unique).
 
-### 5.5 TenantToolOverride
+### 5.5 InstanceCheckpoint
+
+Point-in-time snapshot of the execution context after each successful node completion. Used for post-mortem debugging and as the foundation for checkpoint-aware Langfuse tracing (V0.9.7).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `UUID` (PK) | Auto-generated |
+| `instance_id` | `UUID` (FK) | References `workflow_instances.id` — cascade delete |
+| `node_id` | `VARCHAR(128)` | The node that just completed |
+| `context_json` | `JSONB` | Full execution context at that moment (internal `_`-prefixed keys stripped) |
+| `saved_at` | `TIMESTAMPTZ` | Auto |
+
+Indexes: `(instance_id)`, `(instance_id, node_id)`.
+
+Migration: `alembic/versions/0004_instance_checkpoints.py`
+
+### 5.6 TenantToolOverride
 
 Per-tenant MCP tool visibility and configuration overrides.
 
@@ -678,6 +698,28 @@ The Reflection node lets the workflow reason about its own execution so far and 
 **Return value:** `{**parsed, "_usage": usage, "_raw_response": raw_response}`
 
 The handler is strictly read-only — it never mutates the shared `context` dict. The dag_runner stores the returned dict under the node's own key (e.g., `context["node_5"]`), from which downstream nodes read `node_5.next_action`, `node_5.confidence`, etc.
+
+### 6.10 Checkpointing
+
+File: `app/engine/dag_runner.py` (`_save_checkpoint`), `app/models/workflow.py` (`InstanceCheckpoint`)
+
+After every successful node completion the engine calls `_save_checkpoint(db, instance_id, node_id, context)`, which:
+1. Strips all keys whose names begin with `_` (internal runtime keys such as `_trace`, `_loop_item`)
+2. Creates an `InstanceCheckpoint` row with the cleaned context snapshot
+3. Calls `db.commit()` — the checkpoint is immediately durable
+4. If the write fails (e.g., DB connectivity blip), logs a warning and calls `db.rollback()` — the checkpoint failure never propagates back to the execution path
+
+**Where it is called:**
+- `_execute_single_node` — after `log_entry.completed_at` is written and the first `db.commit()` succeeds
+- `_apply_result` (inside `_execute_parallel`) — after `context[node_id] = output` in the `"completed"` branch
+
+**Why not in ForEach iterations?** ForEach re-executes downstream nodes once per item; `_execute_single_node` is reused for each iteration, so checkpoints are naturally saved per iteration at the same call site.
+
+**API surface:**
+- `GET /instances/{id}/checkpoints` → `list[CheckpointOut]` — id, instance_id, node_id, saved_at (no context payload for brevity)
+- `GET /instances/{id}/checkpoints/{checkpoint_id}` → `CheckpointDetailOut` — adds `context_json`
+
+Checkpoints are the foundation for Item 5 (Checkpoint-aware Langfuse) where each trace/span will be annotated with the checkpoint_id produced by that node.
 
 ---
 
