@@ -144,7 +144,7 @@ Each edge records:
 
 ---
 
-## 5. Step 4 — Configuring Node Properties (Dynamic Forms)
+## 5. Step 4 — Configuring Node Properties (Dynamic Forms + Expression Picker)
 
 **Code:** `components/sidebar/PropertyInspector.tsx` → `components/sidebar/DynamicConfigForm.tsx` → `lib/registry.ts`
 
@@ -160,7 +160,10 @@ When the user clicks a node on the canvas:
 | Schema field type | Rendered as | Notes |
 |-------------------|-------------|-------|
 | `string` + `enum` | `<Select>` dropdown | Options from enum array |
-| `string` (`systemPrompt`, `approvalMessage`, `body`) | `<Textarea>` | Multi-line |
+| `string` key in `EXPRESSION_KEYS` | `<ExpressionInput>` (expression mode) | Autocomplete: `node_2.intent`, `trigger.body` |
+| `string` key in `NODE_ID_KEYS` | `<ExpressionInput>` (nodeId mode) | Autocomplete: `node_3`, `node_5` |
+| `systemPrompt` | `<ExpressionInput>` (jinja2 mode) | Autocomplete: `{{ node_2.response }}` |
+| `string` (`approvalMessage`, `body`) | `<Textarea>` | Multi-line plain text |
 | `string` (other) | `<Input type="text">` | |
 | `number` / `integer` | `<Input type="number">` | `min`/`max`/`step` from schema |
 | `boolean` | `<input type="checkbox">` | |
@@ -169,6 +172,10 @@ When the user clicks a node on the canvas:
 | `array` (other) | `<Textarea>` (JSON array) | |
 
 Every field change calls `flowStore.updateNodeData(id, { config: { ...updated } })`, merging the update immutably.
+
+### ExpressionInput autocomplete
+
+`ExpressionInput` wraps an `<input>` or `<textarea>` and shows a **fixed-position dropdown** (rendered via `createPortal` to `document.body` — not clipped by sidebar `overflow: hidden`). On every keystroke, `getCurrentToken()` detects the word under the cursor and filters suggestions. Pressing **Enter** or **Tab** calls `insertAtCursor()` to splice the selected variable in-place, leaving the rest of the expression intact.
 
 ### ToolMultiSelect (ReAct Agent)
 

@@ -242,7 +242,47 @@ The canonical graph for any chat-enabled workflow is:
 
 ---
 
-## ↩️ 7. Undo / Redo — Canvas History
+## ⚡ 7. Expression Variable Picker — Autocomplete in Config Fields
+
+Whenever you click a Condition node, a ForEach, a Save Conversation State, or any node with a **systemPrompt**, the property panel automatically shows an autocomplete dropdown as you type in expression fields.
+
+### How to use it
+
+- **Condition → `condition` field**: Type `node` and a dropdown appears showing all upstream node outputs (e.g., `node_3.intent`, `node_2.response`). Arrow keys to navigate, Enter/Tab to insert.
+- **systemPrompt fields**: Type `{{` and you'll get Jinja2 suggestions like `{{ trigger.message }}` or `{{ node_2.response }}`.
+- **responseNodeId / historyNodeId**: Typing shows only node IDs (`node_1`, `node_2`) — no path, just the ID.
+
+The picker is **cursor-aware**: if your expression already has `node_2.intent == "` and you position the cursor back on `node_2`, the picker will replace only that token, not the whole line.
+
+### How to add output fields for your new node
+
+Open `frontend/src/lib/expressionVariables.ts` and find `NODE_OUTPUT_FIELDS`:
+
+```ts
+const NODE_OUTPUT_FIELDS: Record<string, string[]> = {
+  "LLM Agent":   ["response", "input_tokens", "output_tokens"],
+  "LLM Router":  ["intent"],
+  // 👉 Add your node label and what fields it outputs at runtime:
+  "Slack Notification": ["delivered_to", "final_text", "status"],
+};
+```
+
+That's it — the autocomplete will immediately suggest `node_X.delivered_to`, `node_X.final_text`, etc. for any Slack Notification node on the canvas.
+
+### How to add a new expression field
+
+If your new node type has a field that should get autocomplete (e.g., a `filterExpression`), open `DynamicConfigForm.tsx` and add the key to the appropriate set:
+
+```ts
+const EXPRESSION_KEYS = new Set([
+  "condition", "arrayExpression", "sessionIdExpression", "userMessageExpression",
+  "filterExpression",  // 👈 add here for dot-path expressions
+]);
+```
+
+---
+
+## ↩️ 8. Undo / Redo — Canvas History
 
 The workflow canvas supports full undo/redo with **Ctrl+Z** (undo) and **Ctrl+Y** or **Ctrl+Shift+Z** (redo). Toolbar buttons show the same actions with disabled state when history is empty.
 
@@ -271,7 +311,7 @@ Calling `replaceGraph()` (used by load, new workflow, and example loaders) alway
 
 ---
 
-## 🛡️ 8. Pre-Run Validation — Catching Mistakes Before They Run
+## 🛡️ 9. Pre-Run Validation — Catching Mistakes Before They Run
 
 The orchestrator validates your workflow **in the browser** the moment you hit **Run**. This prevents common mistakes without wasting an API call.
 

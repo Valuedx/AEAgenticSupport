@@ -26,6 +26,9 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import type { ToolOut } from "@/lib/api";
+import { ExpressionInput } from "@/components/sidebar/ExpressionInput";
+import { getExpressionVariables } from "@/lib/expressionVariables";
+import { useFlowStore } from "@/store/flowStore";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,6 +63,15 @@ function humanize(key: string): string {
 }
 
 const TEXTAREA_KEYS = new Set(["systemPrompt", "approvalMessage", "body"]);
+
+// Fields that accept safe_eval dot-path expressions (e.g. node_2.intent == "x")
+const EXPRESSION_KEYS = new Set(["condition", "arrayExpression", "sessionIdExpression", "userMessageExpression"]);
+
+// Fields that accept a bare node ID (e.g. node_3)
+const NODE_ID_KEYS = new Set(["responseNodeId", "historyNodeId"]);
+
+// Fields that accept Jinja2 templates (e.g. {{ trigger.message }})
+const JINJA2_KEYS = new Set(["systemPrompt"]);
 
 // ---------------------------------------------------------------------------
 // Tool multi-select sub-component (for react_agent tools field)
@@ -165,6 +177,13 @@ export function DynamicConfigForm({
   onUpdate,
 }: DynamicConfigFormProps) {
   const [jsonErrors, setJsonErrors] = useState<Record<string, boolean>>({});
+
+  // Expression autocomplete — build variable suggestions from canvas state
+  const nodes = useFlowStore((s) => s.nodes);
+  const selectedNodeId = useFlowStore((s) => s.selectedNodeId);
+  const exprSuggestions = getExpressionVariables(nodes, selectedNodeId, "expression");
+  const nodeIdSuggestions = getExpressionVariables(nodes, selectedNodeId, "nodeId");
+  const jinja2Suggestions = getExpressionVariables(nodes, selectedNodeId, "jinja2");
 
   const update = (key: string, value: unknown) => {
     onUpdate({ config: { ...config, [key]: value } });
@@ -300,7 +319,24 @@ export function DynamicConfigForm({
           );
         }
 
-        // ---- string (textarea keys) ----
+        // ---- string (Jinja2 textarea: systemPrompt) ----
+        if (field.type === "string" && JINJA2_KEYS.has(key)) {
+          return (
+            <div key={key} className="space-y-2">
+              <Label htmlFor={key}>{humanize(key)}</Label>
+              <ExpressionInput
+                value={String(value ?? field.default ?? "")}
+                onChange={(v) => update(key, v)}
+                suggestions={jinja2Suggestions}
+                multiline
+                rows={4}
+                placeholder="Use {{ trigger.field }} or {{ node_2.response }}"
+              />
+            </div>
+          );
+        }
+
+        // ---- string (plain textarea: approvalMessage, body) ----
         if (field.type === "string" && TEXTAREA_KEYS.has(key)) {
           return (
             <div key={key} className="space-y-2">
@@ -310,6 +346,36 @@ export function DynamicConfigForm({
                 rows={4}
                 value={String(value ?? field.default ?? "")}
                 onChange={(e) => update(key, e.target.value)}
+              />
+            </div>
+          );
+        }
+
+        // ---- string (expression field: condition, arrayExpression, *Expression) ----
+        if (field.type === "string" && EXPRESSION_KEYS.has(key)) {
+          return (
+            <div key={key} className="space-y-2">
+              <Label htmlFor={key}>{humanize(key)}</Label>
+              <ExpressionInput
+                value={String(value ?? field.default ?? "")}
+                onChange={(v) => update(key, v)}
+                suggestions={exprSuggestions}
+                placeholder="e.g. node_2.intent == &quot;diagnose&quot;"
+              />
+            </div>
+          );
+        }
+
+        // ---- string (node ID reference: responseNodeId, historyNodeId) ----
+        if (field.type === "string" && NODE_ID_KEYS.has(key)) {
+          return (
+            <div key={key} className="space-y-2">
+              <Label htmlFor={key}>{humanize(key)}</Label>
+              <ExpressionInput
+                value={String(value ?? field.default ?? "")}
+                onChange={(v) => update(key, v)}
+                suggestions={nodeIdSuggestions}
+                placeholder="e.g. node_4"
               />
             </div>
           );

@@ -1,4 +1,4 @@
-> - **V0.9.2 UX Improvements (2026-03-21)**: Pre-run workflow validation (`src/lib/validateWorkflow.ts`) — checks for missing trigger, disconnected nodes, required empty fields (condition, url, toolName, arrayExpression, responseNodeId), and broken node-ID cross-references (responseNodeId, historyNodeId). `ValidationDialog` surfaces errors and warnings before execution; hard errors block run, warnings allow "Run Anyway". `Toolbar.tsx` now calls `validateWorkflow()` on every Run click. Undo/Redo — `flowStore.ts` gains `past[]`/`future[]` snapshot arrays (max 50) with `_pushHistory()` called before every destructive canvas action; `FlowCanvas.tsx` registers Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z global keyboard handlers; Toolbar shows Undo/Redo buttons with disabled state when history is empty.
+> - **V0.9.2 UX Improvements (2026-03-21)**: Expression variable picker (`src/lib/expressionVariables.ts`, `ExpressionInput.tsx`) — autocomplete dropdown on condition, *Expression, *NodeId, and systemPrompt fields; three modes (expression / nodeId / jinja2); cursor-aware token detection; keyboard navigation; fixed-position portal dropdown. Pre-run workflow validation (`src/lib/validateWorkflow.ts`) — checks for missing trigger, disconnected nodes, required empty fields (condition, url, toolName, arrayExpression, responseNodeId), and broken node-ID cross-references (responseNodeId, historyNodeId). `ValidationDialog` surfaces errors and warnings before execution; hard errors block run, warnings allow "Run Anyway". `Toolbar.tsx` now calls `validateWorkflow()` on every Run click. Undo/Redo — `flowStore.ts` gains `past[]`/`future[]` snapshot arrays (max 50) with `_pushHistory()` called before every destructive canvas action; `FlowCanvas.tsx` registers Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z global keyboard handlers; Toolbar shows Undo/Redo buttons with disabled state when history is empty.
 >
 > - **V0.9.1 Stateful DAGs (2026-03-21)**: Added robust Stateful Re-Trigger DAG Pattern. Added `ConversationSession` PostgreSQL table with Alembic migration `0003_conversation_sessions.py` + unique index `(tenant_id, session_id)`. Added REST APIs in `conversations.py` (`GET /api/v1/conversations`, `GET /{id}`, `DELETE /{id}`). Exposes 3 new conversational memory nodes in `node_registry.json`: `Load Conversation State`, `Save Conversation State`, and `LLM Router`.
 > - **V0.9 Execution Enhancements (2026-03-21)**: ForEach loop node (`_handle_forEach`, `_run_forEach_iterations`) — iterates downstream subgraph per array element. Retry from failed node (`retry_graph()`, `POST /{id}/instances/{iid}/retry`). MCP connection pooling (`_MCPSessionPool`). Enhanced safe expression evaluator with whitelisted function/method calls (`len`, `lower`, `matches`, etc.). Snapshot pruning via Celery Beat (`prune_old_snapshots`, `ORCHESTRATOR_MAX_SNAPSHOTS`). Environment variable mapping (`{{ env.SECRET_NAME }}` resolved from vault). Langfuse parallel context fix — explicit trace propagation into threads. Frontend `retryInstance` action.
@@ -221,7 +221,39 @@ Before any execution begins, `validateWorkflow(nodes, edges)` is called by the T
 
 `ValidationDialog` presents errors in red and warnings in yellow. If only warnings exist, a **Run Anyway** button is offered. Hard errors disable execution entirely until fixed.
 
-### 3.6 Property Inspector
+### 3.6 Expression Variable Picker
+
+Files: `src/lib/expressionVariables.ts`, `src/components/sidebar/ExpressionInput.tsx`
+
+Fields that accept runtime expressions get an autocomplete dropdown instead of a plain text input. The dropdown is positioned with `position: fixed` (portal to `document.body`) so it is never clipped by the sidebar's `ScrollArea`.
+
+**Three rendering modes** selected by `DynamicConfigForm` per field key:
+
+| Mode | Format | Fields |
+|------|--------|--------|
+| `expression` | `node_2.intent` | `condition`, `arrayExpression`, `sessionIdExpression`, `userMessageExpression` |
+| `nodeId` | `node_3` | `responseNodeId`, `historyNodeId` |
+| `jinja2` | `{{ node_2.response }}` | `systemPrompt` |
+
+**Known output fields per node type** (defined in `expressionVariables.ts`):
+
+| Node | Suggested outputs |
+|------|-------------------|
+| Webhook Trigger | `trigger.body`, `trigger.message`, `trigger.session_id`, `trigger.headers`, `trigger.method`, `trigger.path` |
+| Schedule Trigger | `trigger.scheduled_at`, `trigger.cron` |
+| LLM Agent | `response`, `input_tokens`, `output_tokens` |
+| ReAct Agent | `response`, `tool_calls`, `iterations` |
+| LLM Router | `intent` |
+| MCP Tool | `result` |
+| HTTP Request | `status_code`, `body`, `headers` |
+| Human Approval | `approved`, `approver` |
+| Load Conversation State | `history`, `session_id` |
+
+**Token detection:** `getCurrentToken()` walks backward from the cursor to the last word boundary (`space`, `(`, `=`, `!`, `<`, `>`, `,`, `"`) and uses that substring as the filter. `insertAtCursor()` replaces only the current token, preserving the rest of the expression.
+
+**Keyboard shortcuts:** ArrowUp/Down to navigate, Enter or Tab to insert, Escape to close.
+
+### 3.7 Property Inspector
 
 File: `components/sidebar/PropertyInspector.tsx`
 
