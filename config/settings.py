@@ -179,6 +179,16 @@ CONFIG = {
         "read_only": 0
     },
 
+    # Visual Orchestrator (separate service)
+    "ORCHESTRATOR_BASE_URL": os.environ.get("ORCHESTRATOR_BASE_URL", "http://localhost:8001"),
+    "ORCHESTRATOR_TENANT_ID": os.environ.get("ORCHESTRATOR_TENANT_ID", "default"),
+    # When the orchestrator API uses ORCHESTRATOR_AUTH_MODE=jwt, set a service token:
+    "ORCHESTRATOR_API_TOKEN": os.environ.get("ORCHESTRATOR_API_TOKEN", ""),
+    # Bridge: False = enqueue only and return instance id (recommended for Studio). True = block until done.
+    "ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT": os.environ.get(
+        "ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT", ""
+    ).strip().lower() in ("1", "true", "yes", "y", "on"),
+
     # Proactive Monitoring & Scheduling (Feature 2.2)
     "ENABLE_PROACTIVE_MONITORING": os.environ.get("ENABLE_PROACTIVE_MONITORING", "true").lower() == "true",
     "HEALTH_CHECK_INTERVAL_SECONDS": int(os.environ.get("HEALTH_CHECK_INTERVAL_SECONDS", "300")),

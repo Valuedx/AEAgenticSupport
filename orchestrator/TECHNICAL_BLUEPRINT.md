@@ -1,3 +1,5 @@
+> - **Studio Proxy Bridge (2026-03-22)**: AI Studio proxy via `orchestrator_workflow_id` in `user_metadata`. **Default async** (enqueue + instance id / poll URLs); `orchestrator_wait_for_result` or `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` selects blocking `run_and_wait`. Merges chat fields into trigger; Bearer via `ORCHESTRATOR_API_TOKEN`; sync suspended path uses `return_on_suspended=True`. Tests: `tests/test_orchestrator_bridge.py`. Config adds `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT`. Section 10 updated.
+>
 > - **V0.9.9 Loop Node (2026-03-22)**: New `Loop` logic node for controlled agentic cycles — repeats its downstream body nodes while a `continueExpression` evaluates to True, up to `maxIterations` times (backend hard cap: 25). Uses pre-check semantics (while-loop): condition is evaluated before each iteration; if False on the first check the body never executes. An empty expression runs unconditionally for `maxIterations` iterations. `_handle_loop` in `node_handlers.py` returns `{"continueExpression": ..., "maxIterations": ...}` — analogous to `_handle_forEach`. New `_run_loop_iterations` in `dag_runner.py` drives the iteration: clears body node context keys before each pass, sets `_loop_index` / `_loop_iteration` in context, calls `_execute_single_node` for each body node, accumulates per-node results into `{"loop_results": [...], "iterations": N}` stored back into each body node's context key after completion. Suspension and failure are handled safely: partial aggregated results are stored before returning. `_execute_ready_queue` detects `label == "Loop"` after single-node execution and routes to `_run_loop_iterations` (same pattern as ForEach). `shared/node_registry.json` — new `loop` type in `logic` category with `continueExpression` (required) and `maxIterations` (default 10) config fields. Frontend: `AgenticNode.tsx` adds `RefreshCw` lucide icon under key `"refresh-cw"`; Loop nodes display a `≤N×` badge and a `⟳ {continueExpression}` expression line. `validateWorkflow.ts` adds `"Loop": ["continueExpression"]` to `REQUIRED_FIELDS` and emits a warning if `maxIterations > 25`. No DB migration required.
 >
 > - **V0.9.8 Rich Token Streaming (2026-03-22)**: LLM Agent nodes now stream tokens to the browser in real time via a Redis pub/sub bridge. New `app/engine/streaming_llm.py` — `stream_google`, `stream_openai`, `stream_anthropic` each call the provider's streaming API, publish every token to `orch:stream:{instance_id}` (Redis channel), and return the same standardised result dict as the non-streaming path. `publish_token(instance_id, node_id, token)` and `publish_stream_end(instance_id, node_id)` are the publish helpers; failures are non-fatal (warning + skip). `llm_providers.py` gains `call_llm_streaming(...)` that routes to streaming variants when `instance_id` and `node_id` are non-empty; falls back to `call_llm` otherwise. `dag_runner.execute_graph` injects `_instance_id` into the shared context; `_execute_single_node` injects `_current_node_id` before each dispatch. `node_handlers._handle_agent` now calls `call_llm_streaming` (with graceful fallback). `sse.py` updated — `_subscribe_tokens` coroutine runs as a background `asyncio.Task` using `redis.asyncio`, subscribes to the instance channel, drains into an `asyncio.Queue`; the polling loop emits `event: token` SSE events from the queue before each DB poll; clean teardown of the Redis task on disconnect or done. Frontend: `api.ts` `streamInstance` gains optional `onToken` callback listening for `event: token`; `workflowStore` gains `streamingTokens: Record<string, string>` state (accumulated per node_id, cleared on execution start/done); `ExecutionPanel` passes `streamingTokens[log.node_id]` to each `LogEntry`; running nodes show a pulsing blue dot + live text preview under the expanded section. Uses `redis>=5.0.0` (already in requirements) — no new dependency. No DB migration required.
@@ -897,27 +899,66 @@ The module follows the same patterns as the parent project:
 
 ---
 
-## 10. Integration with AI Studio (Sidecar Pattern)
+## 10. Integration with AI Studio (Proxy Pattern)
 
-The orchestrator is **not** embedded into AI Studio. It runs as an external sidecar:
+AI Studio and the orchestrator are **separate services** that communicate over HTTP. AI Studio acts as a **dumb proxy** — it receives a workflow UUID and trigger payload through its `handle_chat_message` entrypoint and forwards them directly to the orchestrator, without involving the LLM.
+
+### Architecture
 
 ```
-AI Studio (existing)                    Orchestrator (new)
-┌──────────────────┐                   ┌─────────────────────┐
-│ Dialog Designer   │  POST /execute   │ FastAPI Gateway      │
-│ detects complex   │ ───────────────▶ │ (tenant_id,          │
-│ agentic query     │                  │  session_id,          │
-│                   │                  │  user_query)          │
-│                   │  POST /callback  │                       │
-│ Delivery endpoint │ ◀─────────────── │ Final node output     │
-│ (WhatsApp/Teams)  │                  │                       │
-└──────────────────┘                   └─────────────────────┘
+External caller              AI Studio                        Orchestrator
+┌─────────────┐             ┌────────────────────────────┐   ┌──────────────────┐
+│ Scheduler / │             │ handle_chat_message()       │   │ FastAPI backend   │
+│ Webhook /   │ call with   │ (main.py)                   │   │                  │
+│ Another DAG │ user_meta   │                             │   │                  │
+│             │ ──────────▶ │ MessageGateway.             │   │                  │
+│             │             │   process_message()         │   │                  │
+│             │             │     detects                 │   │                  │
+│             │             │     orchestrator_workflow_id│   │                  │
+│             │             │            │                │   │                  │
+│             │             │            ▼                │   │                  │
+│             │             │  _invoke_workflow_bridge()  │   │                  │
+│             │             │            │ POST /execute  │   │                  │
+│             │             │            │ ─────────────────▶ │ Celery executes  │
+│             │             │            │ polls /context │   │ DAG async        │
+│             │             │            │ ◀───────────────── │                  │
+│ result str  │ ◀────────── │ returns formatted output    │   │                  │
+└─────────────┘             └────────────────────────────┘   └──────────────────┘
 ```
 
-1. AI Studio's Dialog Designer triggers a webhook to `POST /api/v1/workflows/{id}/execute`.
-2. The DAG executes asynchronously (Celery worker).
-3. The final Action node in the graph makes an HTTP POST back to AI Studio's delivery endpoint.
-4. AI Studio formats the response for the appropriate channel (WhatsApp, Teams, Webchat).
+### Invocation contract
+
+The caller sets these keys in `user_metadata` when calling `handle_chat_message()`:
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `orchestrator_workflow_id` | `str` (UUID) | Yes | UUID of the saved workflow to execute |
+| `orchestrator_payload` | `dict` | No | Trigger input passed to the DAG as `trigger_payload` (shallow-merged with chat fields for any missing keys) |
+| `orchestrator_timeout` | `int` | No | Max seconds to wait (**sync** mode only; default: 120) |
+| `orchestrator_wait_for_result` | `bool` | No | If true, block until terminal state (poll). If false/absent, use `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` env (default **false** = async enqueue-only). |
+
+**Default merge:** If `orchestrator_payload` does not set `message`, `session_id`, `user_id`, `user_role`, `user_name`, or `user_email`, those keys are filled from the `handle_chat_message()` arguments so `trigger.message` and `trigger.session_id` work without custom hooks.
+
+**Default behavior:** **Async** — `POST /execute` only; Studio gets instance id + URLs; no blocking poll in `handle_chat_message`.
+
+### Key files
+
+| File | Role |
+|------|------|
+| `gateway/message_gateway.py` | Detects `orchestrator_workflow_id`, merges payload, async vs sync `_invoke_workflow_bridge()` |
+| `tools/orchestrator_client.py` | HTTP client: `execute()`, `get_context()`, `run_and_wait()` (optional `return_on_suspended`) |
+| `config/settings.py` | `ORCHESTRATOR_BASE_URL`, `ORCHESTRATOR_TENANT_ID`, `ORCHESTRATOR_API_TOKEN`, `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` |
+| `.env` | Base URL, tenant, optional token, optional `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` for global sync |
+
+### What the bridge does NOT do
+
+- **No LLM.** Zero tokens spent; the LLM agent is never started.
+- **No auto-resume for HITL.** It does not POST `/callback` itself — it only tells the operator how to.
+- **No chat streaming** of DAG progress; **sync** mode polls `/context` every 2 s inside Studio (avoid for long runs — use async + poller/webhook).
+
+### When to use this pattern
+
+Use the proxy pattern when the **workflow UUID and payload are already known** at call time — e.g. from a cron scheduler, an inbound webhook, or an HTTP Request node in a controlling DAG. For natural-language chat where the agent decides at runtime which workflow to run, that would require registering it as a typed tool instead (see `tools/orchestrator_tools.py`, which is available but not loaded by default).
 
 ---
 

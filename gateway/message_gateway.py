@@ -20,6 +20,20 @@ from state.conversation_state import ConversationState, ConversationPhase
 logger = logging.getLogger("ops_agent.gateway")
 
 
+def _parse_metadata_bool(value, *, default: bool) -> bool:
+    """Coerce Studio metadata bool-like values; fall back to *default* if unknown."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off", ""):
+        return False
+    return default
+
+
 class MessageIntent(Enum):
     ADDITIVE = "additive"
     INTERRUPT = "interrupt"
@@ -114,6 +128,19 @@ class MessageGateway:
                 self._locks[conversation_id] = threading.Lock()
             return self._sessions[conversation_id]
 
+    @staticmethod
+    def _orchestrator_bridge_wait_for_result(user_metadata: dict | None) -> bool:
+        """Whether the Studio bridge should block until the DAG finishes (sync path)."""
+        from config.settings import CONFIG
+
+        default = bool(CONFIG.get("ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT", False))
+        if not user_metadata or "orchestrator_wait_for_result" not in user_metadata:
+            return default
+        return _parse_metadata_bool(
+            user_metadata.get("orchestrator_wait_for_result"),
+            default=default,
+        )
+
     def process_message(
         self, conversation_id: str, user_message: str,
         user_id: str = "", user_role: str = "technical",
@@ -132,9 +159,6 @@ class MessageGateway:
             on_progress: optional callback ``fn(status_text)`` invoked
                 with user-friendly progress messages during long operations.
         """
-        if not user_message or not user_message.strip():
-            return "It looks like your message was empty. How can I help?"
-
         state = self.get_or_create_session(
             conversation_id, user_id, user_role, user_name, user_email, user_team, user_metadata
         )
@@ -144,6 +168,49 @@ class MessageGateway:
             send_fn=on_progress,
             user_role=state.user_role,
         )
+
+        # ── Direct orchestrator bridge ──────────────────────────────────────
+        # When a caller passes orchestrator_workflow_id in user_metadata we
+        # skip LLM routing entirely and invoke the visual orchestrator directly.
+        #
+        # Expected metadata keys:
+        #   orchestrator_workflow_id  (str, required) — UUID of the workflow
+        #   orchestrator_payload      (dict, optional) — trigger input (merged with chat fields)
+        #   orchestrator_timeout      (int, optional)  — max wait seconds (sync mode only)
+        #   orchestrator_wait_for_result (bool, optional) — if True, block until completed/failed/
+        #       suspended (legacy). If omitted, use ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT from config
+        #       (default: async — POST /execute only). If present (including False), that value wins.
+        #
+        # Default merge: ``message``, ``session_id``, ``user_id``, ``user_role``, ``user_name``,
+        # ``user_email`` are copied from the chat request into the trigger payload when absent,
+        # so DAGs that expect ``trigger.message`` work without duplicating Studio hook logic.
+        wf_id = (user_metadata or {}).get("orchestrator_workflow_id")
+        if wf_id:
+            wf_id = str(wf_id).strip()
+            if not wf_id:
+                return "Invalid orchestrator_workflow_id (empty)."
+            try:
+                timeout_raw = (user_metadata or {}).get("orchestrator_timeout", 120)
+                timeout = int(timeout_raw)
+            except (TypeError, ValueError):
+                timeout = 120
+            wait_for_result = self._orchestrator_bridge_wait_for_result(user_metadata)
+            return self._invoke_workflow_bridge(
+                workflow_id=wf_id,
+                payload=(user_metadata or {}).get("orchestrator_payload") or {},
+                timeout=timeout,
+                wait_for_result=wait_for_result,
+                progress=progress,
+                user_message=user_message or "",
+                conversation_id=conversation_id,
+                user_id=user_id,
+                user_role=user_role,
+                user_name=user_name,
+                user_email=user_email,
+            )
+
+        if not user_message or not user_message.strip():
+            return "It looks like your message was empty. How can I help?"
 
         # ── Fast path: agents NOT currently working ──
         if state.phase == ConversationPhase.AWAITING_APPROVAL:
@@ -187,6 +254,137 @@ class MessageGateway:
         else:
             state.queue_user_message(user_message, hint="additive")
             return "Noted - I'll include this in my current investigation."
+
+    @staticmethod
+    def _merge_orchestrator_trigger_payload(
+        base: dict,
+        *,
+        user_message: str,
+        conversation_id: str,
+        user_id: str = "",
+        user_role: str = "",
+        user_name: str = "",
+        user_email: str = "",
+    ) -> dict:
+        """Shallow-merge chat context into trigger_payload keys the DAG expects."""
+        out = dict(base)
+        msg = (user_message or "").strip()
+        if "message" not in out and msg:
+            out["message"] = msg
+        if "session_id" not in out and conversation_id:
+            out["session_id"] = conversation_id
+        if user_id and "user_id" not in out:
+            out["user_id"] = user_id
+        if user_role and "user_role" not in out:
+            out["user_role"] = user_role
+        if user_name and "user_name" not in out:
+            out["user_name"] = user_name
+        if user_email and "user_email" not in out:
+            out["user_email"] = user_email
+        return out
+
+    def _invoke_workflow_bridge(
+        self,
+        workflow_id: str,
+        payload: dict,
+        timeout: int,
+        wait_for_result: bool,
+        progress: ProgressCallback,
+        user_message: str,
+        conversation_id: str,
+        user_id: str = "",
+        user_role: str = "",
+        user_name: str = "",
+        user_email: str = "",
+    ) -> str:
+        """Direct bridge: execute an orchestrator workflow and return its output.
+
+        Bypasses LLM routing entirely — the caller supplies the exact workflow
+        UUID and trigger payload via user_metadata.  Intended for:
+          - external systems calling Studio as an orchestrator proxy
+          - programmatic Studio → orchestrator pipelines
+
+        When *wait_for_result* is False (default from config), only ``POST /execute``
+        is called and the reply includes *instance_id* and polling URLs — the chat
+        thread is not blocked on Celery. When True, behaves as before (poll until
+        terminal state, up to *timeout*).
+        """
+        import json
+        from tools.orchestrator_client import get_orchestrator_client
+
+        merged = self._merge_orchestrator_trigger_payload(
+            payload,
+            user_message=user_message,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            user_role=user_role,
+            user_name=user_name,
+            user_email=user_email,
+        )
+
+        progress._emit(f"Starting workflow {workflow_id}…", force=True)
+        client = get_orchestrator_client()
+
+        if not wait_for_result:
+            try:
+                instance = client.execute(workflow_id, merged)
+            except Exception as exc:
+                logger.exception("Orchestrator bridge execute failed for %s", workflow_id)
+                return f"Failed to start workflow: {exc}"
+            inst_raw = instance.get("id")
+            inst_id = str(inst_raw) if inst_raw is not None else "?"
+            base = getattr(client, "base_url", "").rstrip("/") or "(orchestrator base URL)"
+            ctx_path = f"{base}/api/v1/workflows/{workflow_id}/instances/{inst_id}/context"
+            progress._emit("Workflow queued (async).", force=True)
+            return (
+                f"Workflow **{workflow_id}** has been **queued** (non-blocking).\n\n"
+                f"- **Instance id:** `{inst_id}`\n"
+                f"- **Poll status / context:**\n  `{ctx_path}`\n"
+                f"- **Resume after human approval (when suspended):**\n"
+                f"  `POST {base}/api/v1/workflows/{workflow_id}/callback`\n\n"
+                "Execution continues in the orchestrator worker. Use the AE AI Hub UI, "
+                "your own poller, or a webhook integration to pick up the final result."
+            )
+
+        try:
+            ctx = client.run_and_wait(
+                workflow_id,
+                merged,
+                timeout=timeout,
+                return_on_suspended=True,
+            )
+        except (RuntimeError, TimeoutError) as exc:
+            logger.error("Orchestrator bridge error for %s: %s", workflow_id, exc)
+            return f"Workflow execution failed: {exc}"
+        except Exception as exc:
+            logger.exception("Unexpected orchestrator bridge error for %s", workflow_id)
+            return f"Unexpected error running workflow: {exc}"
+
+        status = ctx.get("status")
+        if status == "suspended":
+            inst = ctx.get("instance_id", "?")
+            node = ctx.get("current_node_id") or "?"
+            approval = (ctx.get("approval_message") or "").strip()
+            approval_txt = f"\n\n**Approval required:** {approval}" if approval else ""
+            snippet = json.dumps(ctx.get("context_json", {}), default=str, indent=2)
+            if len(snippet) > 2_500:
+                snippet = snippet[:2_500] + "\n… [truncated]"
+            progress._emit("Workflow suspended for review.", force=True)
+            return (
+                f"Workflow `{workflow_id}` is **suspended** awaiting human approval.\n"
+                f"- **Instance id:** `{inst}`\n"
+                f"- **Current node:** `{node}`{approval_txt}\n\n"
+                "Resume from the orchestrator UI (Review & Resume) or call "
+                f"`POST /api/v1/workflows/{workflow_id}/callback` with "
+                "`approval_payload` (and optional `context_patch`).\n\n"
+                f"```json\n{snippet}\n```"
+            )
+
+        output = json.dumps(ctx.get("context_json", {}), default=str, indent=2)
+        if len(output) > 4_000:
+            output = output[:4_000] + "\n… [truncated]"
+        progress._emit("Workflow complete.", force=True)
+        return f"Workflow `{workflow_id}` completed.\n```json\n{output}\n```"
 
     def _dispatch(
         self,

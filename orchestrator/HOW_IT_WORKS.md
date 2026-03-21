@@ -1,3 +1,5 @@
+> - **Studio Proxy Bridge (2026-03-22)**: Step 17 — AI Studio proxy via `orchestrator_workflow_id` in `user_metadata`. **Default async:** enqueue only; optional `orchestrator_wait_for_result` / `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` enables blocking poll. Merges chat fields into the trigger when absent; `ORCHESTRATOR_API_TOKEN` for JWT; sync mode returns HITL + callback hints. Tests: `tests/test_orchestrator_bridge.py`. See Step 17 and `orchestrator/TECHNICAL_BLUEPRINT.md` §10.
+>
 > - **V0.9.9 Loop Node (2026-03-22)**: New `Loop` logic node for controlled agentic cycles. Drop it between any two nodes; its directly-connected downstream nodes form the loop "body". Configure `continueExpression` (a `safe_eval` expression evaluated before each iteration — loop runs while True) and `maxIterations` (default 10, backend cap 25). An empty `continueExpression` runs the body unconditionally for `maxIterations`. At each iteration `_loop_index` (0-based) and `_loop_iteration` (1-based) are injected into context and accessible from body nodes' prompts/expressions. After the loop, each body node's context key is replaced with `{"loop_results": [...per-iteration outputs...], "iterations": N}` — downstream nodes can reference individual iteration results via expressions. `validateWorkflow` blocks missing `continueExpression` (error) and warns if `maxIterations > 25`. Canvas shows `≤N×` badge and `⟳ expr` preview. New Step 16 added below.
 >
 > - **V0.9.8 Rich Token Streaming (2026-03-22)**: LLM Agent nodes now stream tokens to the browser as they are generated. The Celery worker publishes each token to a Redis pub/sub channel (`orch:stream:{instance_id}`). The FastAPI SSE endpoint subscribes to this channel in a background asyncio task and forwards tokens as `event: token` SSE events. The frontend accumulates tokens per node_id in `streamingTokens` state; the ExecutionPanel shows a live preview under any running node's expanded log entry. Falls back silently to non-streaming if Redis is unavailable. No DB migration required.
@@ -57,7 +59,8 @@
 14. [Step 13 — OIDC Authentication Flow](#14-step-13--oidc-authentication-flow)
 15. [Step 14 — ForEach Loop Iteration](#15-step-14--foreach-loop-iteration)
 16. [Step 15 — Retry from Failed Node](#16-step-15--retry-from-failed-node)
-17. [End-to-End Example](#17-end-to-end-example)
+17. [Step 17 — AI Studio Integration Bridge](#18-step-17--ai-studio-integration-bridge)
+18. [End-to-End Example](#19-end-to-end-example)
 
 ---
 
@@ -895,7 +898,79 @@ On the canvas the Loop node shows:
 
 ---
 
-## 18. End-to-End Example
+## 18. Step 17 — AI Studio Integration Bridge
+
+**Code:** `gateway/message_gateway.py` → `tools/orchestrator_client.py`
+
+AI Studio acts as a **dumb proxy** to the orchestrator. When an external system (scheduler, webhook, controlling DAG) needs to run a saved workflow, it calls Studio's `handle_chat_message()` entrypoint with the workflow UUID in `user_metadata`. Studio forwards the call to the orchestrator without touching the LLM.
+
+### Trigger
+
+The bridge activates when `user_metadata` contains `orchestrator_workflow_id`:
+
+```python
+handle_chat_message(
+    message="Run incident response workflow",   # merged into trigger as ``message`` if not in payload
+    session_id="sys-scheduler-001",             # merged as ``session_id`` if not in payload
+    user_metadata={
+        "orchestrator_workflow_id": "a1b2c3d4-...",          # required
+        "orchestrator_payload": {"incident_id": "INC-456"},  # optional; shallow-merged with chat fields
+        "orchestrator_timeout": 90,                          # optional; sync mode only, default 120s
+        # "orchestrator_wait_for_result": True,               # optional; block until done (legacy)
+    },
+)
+```
+
+**Default merge:** If `orchestrator_payload` omits `message`, `session_id`, `user_id`, `user_role`, `user_name`, or `user_email`, those keys are filled from the chat arguments so DAGs can use `trigger.message` / `trigger.session_id` without custom Studio hooks.
+
+**Async vs sync (default: async):** Unless `orchestrator_wait_for_result` is true or `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` in `.env`, the bridge only **`POST /execute`** and returns **instance id + polling URLs** — it does **not** block the Studio thread. Set `orchestrator_wait_for_result: true` (or the env flag) to restore blocking behavior with `run_and_wait` / `orchestrator_timeout`.
+
+### Code path
+
+| Step | Location | What happens |
+|------|----------|-------------|
+| 1 | `main.py` `handle_chat_message()` | Logs message, calls `MessageGateway.process_message()` |
+| 2 | `message_gateway.py` `process_message()` | If `orchestrator_workflow_id` is set: runs bridge **before** the empty-message guard; skips LLM routing and agent dispatch |
+| 3 | `message_gateway.py` `_merge_orchestrator_trigger_payload()` | Shallow-merges `orchestrator_payload` with chat fields (only missing keys) |
+| 4 | `message_gateway.py` `_orchestrator_bridge_wait_for_result()` | Resolves sync vs async from `user_metadata.orchestrator_wait_for_result` then `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT` |
+| 5a | **Async (default)** `_invoke_workflow_bridge()` | `OrchestratorClient.execute()` only → reply with instance id, `GET …/context`, `POST …/callback` hints |
+| 5b | **Sync** `_invoke_workflow_bridge()` | `OrchestratorClient.run_and_wait(..., return_on_suspended=True)` — polls `get_context()` every 2 s until terminal or timeout |
+| 6 | `orchestrator_client.py` `execute()` | `POST /api/v1/workflows/{id}/execute` → `{id: instance_id, …}` |
+| 7 | Sync only: `get_context()` | Polled until `completed` / `failed` / `suspended` (if `return_on_suspended`) / timeout |
+
+### Properties
+
+| Property | Value |
+|----------|-------|
+| LLM tokens spent | 0 |
+| Tool calls made | 0 |
+| Agent iterations | 0 |
+| Default mode | **Async** (enqueue only; no blocking poll in Studio) |
+| Poll interval | 2 seconds (**sync** path only) |
+| Default timeout | 120 seconds (**sync** path only) |
+
+### Constraints
+
+- **HITL (sync mode)**: If the DAG suspends, the bridge returns a **structured message** (instance id, optional `approval_message`, truncated `context_json`) and points to `POST /api/v1/workflows/{id}/callback` or the orchestrator UI — it does not auto-resume.
+- **HITL (async mode)**: First reply only confirms queue; poll `GET …/context` or use the Hub UI to see `suspended` and resume.
+- **JWT orchestrator**: Set parent `.env` `ORCHESTRATOR_API_TOKEN`; the client sends `Authorization: Bearer …` in addition to `X-Tenant-Id`.
+- **Timeout**: Sync mode only — if exceeded, returns an error; the DAG keeps running on the worker.
+- **No streaming** from the bridge into chat; the orchestrator UI SSE stream is separate.
+
+### Config
+
+Set these in `.env` (and they are read by `config/settings.py`):
+
+```
+ORCHESTRATOR_BASE_URL=http://localhost:8001   # orchestrator FastAPI server
+ORCHESTRATOR_TENANT_ID=default               # tenant header sent with every request
+# Optional: set to true to block handle_chat_message until the DAG finishes (legacy behavior)
+ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=false
+```
+
+---
+
+## 19. End-to-End Example
 
 **Scenario:** An IT support agent that diagnoses a failed AE request using a ReAct loop with auto-discovered tools.
 
