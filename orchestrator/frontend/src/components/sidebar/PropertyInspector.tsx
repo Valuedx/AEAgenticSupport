@@ -1,3 +1,4 @@
+import { useState, useCallback } from "react";
 import { useFlowStore } from "@/store/flowStore";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -5,7 +6,7 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
-import { X } from "lucide-react";
+import { X, Copy, Check } from "lucide-react";
 import type { AgenticNodeData } from "@/types/nodes";
 import { getRegistryNodeType, getConfigSchema } from "@/lib/registry";
 import { DynamicConfigForm } from "@/components/sidebar/DynamicConfigForm";
@@ -18,6 +19,15 @@ export function PropertyInspector() {
   const deleteNode = useFlowStore((s) => s.deleteNode);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+
+  const [idCopied, setIdCopied] = useState(false);
+  const handleCopyId = useCallback(() => {
+    if (!selectedNode) return;
+    navigator.clipboard.writeText(selectedNode.id).then(() => {
+      setIdCopied(true);
+      setTimeout(() => setIdCopied(false), 2000);
+    });
+  }, [selectedNode]);
 
   if (!selectedNode) {
     return (
@@ -50,6 +60,27 @@ export function PropertyInspector() {
       <Separator />
       <ScrollArea className="flex-1 px-4 py-3">
         <div className="space-y-4">
+          {/* Node ID chip */}
+          <div className="flex items-center gap-1.5 rounded-md bg-muted px-2.5 py-1.5">
+            <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide shrink-0">
+              ID
+            </span>
+            <code className="flex-1 text-xs font-mono text-foreground truncate">
+              {selectedNode.id}
+            </code>
+            <button
+              onClick={handleCopyId}
+              title={idCopied ? "Copied!" : "Copy node ID"}
+              className="p-0.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground shrink-0"
+            >
+              {idCopied ? (
+                <Check className="h-3 w-3 text-green-500" />
+              ) : (
+                <Copy className="h-3 w-3" />
+              )}
+            </button>
+          </div>
+
           <div className="space-y-2">
             <Label htmlFor="nodeLabel">Label</Label>
             <Input

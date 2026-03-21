@@ -1,4 +1,4 @@
-> - **V0.9.2 UX Improvements (2026-03-21)**: New Step 5b (pre-run validation) — `validateWorkflow()` runs client-side before every execution. Checks: trigger presence, node reachability (BFS from triggers), required empty fields, broken node-ID cross-references. `ValidationDialog` blocks hard errors and allows "Run Anyway" for warnings only. Undo/Redo — `flowStore.past[]`/`future[]` history stacks (max 50); `_pushHistory()` called before add/delete/connect/drag-start/edge-delete; Ctrl+Z/Ctrl+Y keyboard shortcuts in `FlowCanvas.tsx`; toolbar Undo/Redo buttons with disabled state.
+> - **V0.9.2 UX Improvements (2026-03-21)**: New Step 5b (pre-run validation) — `validateWorkflow()` runs client-side before every execution. Checks: trigger presence, node reachability (BFS from triggers), required empty fields, broken node-ID cross-references. `ValidationDialog` blocks hard errors and allows "Run Anyway" for warnings only. Undo/Redo — `flowStore.past[]`/`future[]` history stacks (max 50); `_pushHistory()` called before add/delete/connect/drag-start/edge-delete; Ctrl+Z/Ctrl+Y keyboard shortcuts in `FlowCanvas.tsx`; toolbar Undo/Redo buttons with disabled state. Node ID chip — `PropertyInspector` now shows the node's machine ID (e.g., `node_3`) in a monospace chip at the top of the panel with a one-click copy button so users can easily reference it in expression fields on other nodes.
 >
 > - **V0.9 Execution Enhancements (2026-03-21)**: New Step 14 — ForEach Loop iteration with downstream node re-execution per array element. New Step 15 — Retry from Failed Node (API + engine). Step 11 MCP section updated — connection pooling with configurable pool size. Step 8 updated — enhanced safe expression evaluator supports whitelisted functions (`len`, `lower`, `matches` etc.) and method calls. New config: `ORCHESTRATOR_MAX_SNAPSHOTS` (snapshot pruning) and `ORCHESTRATOR_MCP_POOL_SIZE`. Environment variable mapping via `{{ env.SECRET_NAME }}` for node config values. Langfuse context fix for parallel execution.
 > - **V0.8 Enterprise Features (2026-03-20)**: Step 4 updated — property forms now generated from registry schemas via DynamicConfigForm; no more hardcoded panels. Step 5 updated — each graph save creates a snapshot in workflow_snapshots. New Step 12 — Version History & Rollback. Step 13 MCP section updated — 5-minute TTL cache + invalidate-cache endpoint. New Step 14 — OIDC Authentication. ReAct section updated for auto-discovery.
@@ -171,8 +171,9 @@ When the user clicks a node on the canvas:
 
 1. `FlowCanvas.onNodeClick` calls `flowStore.selectNode(node.id)`.
 2. `PropertyInspector` reads `selectedNodeId` from the store and finds the matching node.
-3. It calls `getRegistryNodeType(data.label)` and `getConfigSchema(data.label)` from `lib/registry.ts` to load the node's schema from `shared/node_registry.json`.
-4. It renders `<DynamicConfigForm>` with the schema, current config, and an `onUpdate` callback.
+3. A **Node ID chip** at the top of the panel shows the node's machine ID (e.g., `node_3`) in a monospace badge with a one-click copy button. This is the value to use in expressions on other nodes (e.g., `node_3.intent`).
+4. It calls `getRegistryNodeType(data.label)` and `getConfigSchema(data.label)` from `lib/registry.ts` to load the node's schema from `shared/node_registry.json`.
+5. It renders `<DynamicConfigForm>` with the schema, current config, and an `onUpdate` callback.
 
 `DynamicConfigForm` renders one field per schema entry:
 

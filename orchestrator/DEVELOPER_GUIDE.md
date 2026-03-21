@@ -434,3 +434,43 @@ const NODE_ID_REF_FIELDS: Record<string, string[]> = {
 ```
 
 The validator will cross-check that the referenced node ID actually exists on the canvas.
+
+## 🪪 14. Node ID Visibility — Copy a Node's ID from the Properties Panel
+
+Every node on the canvas has a **machine ID** (`node_1`, `node_2`, …) that is separate from its human-readable label. When you write expressions like `node_3.intent` or set `responseNodeId` to `node_5`, you need this ID — but it was previously invisible unless you opened DevTools.
+
+**File:** `frontend/src/components/sidebar/PropertyInspector.tsx`
+
+### What was added
+
+A grey `bg-muted` chip is now rendered at the very top of the Properties panel (above the Label field). It shows:
+
+```
+ID  node_3  [copy icon]
+```
+
+Clicking the copy icon writes the ID to the clipboard. The icon swaps to a green checkmark for 2 seconds as confirmation, then reverts.
+
+### How it works
+
+```tsx
+const [idCopied, setIdCopied] = useState(false);
+const handleCopyId = useCallback(() => {
+  navigator.clipboard.writeText(selectedNode.id).then(() => {
+    setIdCopied(true);
+    setTimeout(() => setIdCopied(false), 2000);
+  });
+}, [selectedNode.id]);
+```
+
+The chip renders `selectedNode.id` (e.g., `node_3`) in a `font-mono` `<code>` span. The `Copy` / `Check` icons from `lucide-react` toggle based on `idCopied`.
+
+### Typical workflow
+
+1. Drop a **Save Conversation State** node onto the canvas.
+2. Drop a **Webhook Trigger** node and connect it.
+3. Click the **Webhook Trigger** node → Properties panel opens → ID chip shows `node_1`.
+4. Click the copy icon next to `node_1`.
+5. Click the **Save Conversation State** node → find the `responseNodeId` field → paste `node_1`.
+
+The expression picker autocomplete on nodeId fields also surfaces this, but the chip is faster when you already know the node you want.
