@@ -139,6 +139,71 @@
         "arrayExpression": { "type": "string", "default": "" },
         "itemVariable": { "type": "string", "default": "item" }
       }
+    },
+    {
+      "type": "load_conversation_state",
+      "category": "action",
+      "label": "Load Conversation State",
+      "description": "Fetch multi-turn chat history from persistent storage. Place this as the first node after the trigger to enable conversational memory.",
+      "icon": "history",
+      "config_schema": {
+        "sessionIdExpression": {
+          "type": "string",
+          "default": "trigger.session_id",
+          "description": "Expression that resolves to the session identifier (e.g. trigger.session_id)"
+        }
+      }
+    },
+    {
+      "type": "save_conversation_state",
+      "category": "action",
+      "label": "Save Conversation State",
+      "description": "Append the current user message and assistant response to persistent chat history. Place this as the last node in the graph.",
+      "icon": "save",
+      "config_schema": {
+        "sessionIdExpression": {
+          "type": "string",
+          "default": "trigger.session_id",
+          "description": "Expression that resolves to the session identifier"
+        },
+        "responseNodeId": {
+          "type": "string",
+          "default": "",
+          "description": "Node ID whose 'response' field is saved as the assistant message (e.g. node_4)"
+        },
+        "userMessageExpression": {
+          "type": "string",
+          "default": "trigger.message",
+          "description": "Expression that resolves to the user's current message text"
+        }
+      }
+    },
+    {
+      "type": "llm_router",
+      "category": "agent",
+      "label": "LLM Router",
+      "description": "Classifies the user's intent into one of the configured intent labels. Outputs {intent: string} for downstream Condition nodes to route on.",
+      "icon": "route",
+      "config_schema": {
+        "provider": { "type": "string", "default": "google", "enum": ["google", "openai", "anthropic"] },
+        "model": { "type": "string", "default": "gemini-2.5-flash", "enum": ["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"] },
+        "intents": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Valid intent names the router can output (e.g. diagnose_server, casual_chat, escalate)"
+        },
+        "historyNodeId": {
+          "type": "string",
+          "default": "",
+          "description": "Node ID of the Load Conversation State node to read history from (e.g. node_1)"
+        },
+        "userMessageExpression": {
+          "type": "string",
+          "default": "trigger.message",
+          "description": "Expression that resolves to the current user message text"
+        }
+      }
     }
   ]
 }

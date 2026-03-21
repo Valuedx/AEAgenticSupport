@@ -1,11 +1,12 @@
+> - **V0.9.1 Stateful DAGs (2026-03-21)**: Added robust Stateful Re-Trigger DAG Pattern. Added `ConversationSession` PostgreSQL table with Alembic migration `0003_conversation_sessions.py` + unique index `(tenant_id, session_id)`. Added REST APIs in `conversations.py` (`GET /api/v1/conversations`, `GET /{id}`, `DELETE /{id}`). Exposes 3 new conversational memory nodes in `node_registry.json`: `Load Conversation State`, `Save Conversation State`, and `LLM Router`.
 > - **V0.9 Execution Enhancements (2026-03-21)**: ForEach loop node (`_handle_forEach`, `_run_forEach_iterations`) — iterates downstream subgraph per array element. Retry from failed node (`retry_graph()`, `POST /{id}/instances/{iid}/retry`). MCP connection pooling (`_MCPSessionPool`). Enhanced safe expression evaluator with whitelisted function/method calls (`len`, `lower`, `matches`, etc.). Snapshot pruning via Celery Beat (`prune_old_snapshots`, `ORCHESTRATOR_MAX_SNAPSHOTS`). Environment variable mapping (`{{ env.SECRET_NAME }}` resolved from vault). Langfuse parallel context fix — explicit trace propagation into threads. Frontend `retryInstance` action.
 > - **V0.8 Enterprise Features (2026-03-20)**: Dynamic property forms generated from `shared/node_registry.json` schemas (`DynamicConfigForm.tsx`) — PropertyInspector no longer hardcoded. ReAct agent auto-discovers all MCP tools when `tools` config is empty; MCP tool cache upgraded to 5-minute TTL with `POST /api/v1/tools/invalidate-cache`. Workflow versioning: `workflow_snapshots` table + Alembic migration 0002; snapshot saved before each overwrite; `GET /{id}/versions` and `POST /{id}/rollback/{v}` endpoints; `VersionHistoryDialog` with Restore button in Toolbar. OIDC federation: Authorization Code + PKCE flow (`app/api/auth.py`), `authlib` for ID token validation, Redis PKCE state, issues internal JWT; frontend `LoginPage` + `VITE_AUTH_MODE=oidc` gate in `App.tsx`.
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9
+**Version:** 0.9.1
 **Last updated:** 2026-03-21
-**Status:** V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
+**Status:** V0.9.1 Stateful DAGs, V0.9 execution enhancements, V0.8 enterprise features, V0.7 Langfuse + MCP streaming, V0.6 advanced agents, V0.5 hardening, V0.4 branching, V0.3 LLM, V0.2 wired, V0.1 scaffold
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -411,7 +412,22 @@ Per-node execution trace within a workflow instance.
 | `started_at` | `TIMESTAMPTZ` | |
 | `completed_at` | `TIMESTAMPTZ` | |
 
-### 5.4 TenantToolOverride
+### 5.4 ConversationSession
+
+Persistent multi-turn conversation history for the Stateful Re-Trigger Pattern.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `UUID` (PK) | Auto-generated |
+| `session_id` | `VARCHAR(256)` | Unique conversational thread ID |
+| `tenant_id` | `VARCHAR(64)` | Indexed |
+| `messages` | `JSONB` | Array of `{"role": "user"|"assistant", "content": "...", "timestamp": "..."}` |
+| `created_at` | `TIMESTAMPTZ` | Auto |
+| `updated_at` | `TIMESTAMPTZ` | Auto on update |
+
+Index: `(tenant_id, session_id)` (Unique).
+
+### 5.5 TenantToolOverride
 
 Per-tenant MCP tool visibility and configuration overrides.
 

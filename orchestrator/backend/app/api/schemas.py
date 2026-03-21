@@ -117,3 +117,33 @@ class ToolOut(BaseModel):
     category: str
     safety_tier: str
     tags: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Conversation Sessions (Stateful Re-Trigger Pattern)
+# ---------------------------------------------------------------------------
+
+class ConversationMessage(BaseModel):
+    role: str
+    content: str
+    timestamp: str | None = None
+
+
+class ConversationSessionOut(BaseModel):
+    session_id: str
+    tenant_id: str
+    messages: list[ConversationMessage]
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ConversationSessionSummary(BaseModel):
+    session_id: str
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

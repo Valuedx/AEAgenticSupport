@@ -7,7 +7,11 @@ in the context keyed by node_id.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -40,6 +44,14 @@ def dispatch_node(
     # ForEach is a logic node with special dispatch
     if category == "logic" and label == "ForEach":
         return _handle_forEach(node_data, context, tenant_id)
+
+    # Conversational memory nodes — special dispatch regardless of category
+    if label == "Load Conversation State":
+        return _handle_load_conversation_state(node_data, context, tenant_id)
+    if label == "Save Conversation State":
+        return _handle_save_conversation_state(node_data, context, tenant_id)
+    if label == "LLM Router":
+        return _handle_llm_router(node_data, context, tenant_id)
 
     handler = handlers.get(category, _handle_action)
     return handler(node_data, context, tenant_id)
@@ -240,4 +252,260 @@ def _handle_forEach(
 
     logger.info("ForEach node evaluated: %d items, variable='%s'", len(items), item_var)
     return {"items": list(items), "itemVariable": item_var}
+
+
+# ---------------------------------------------------------------------------
+# Stateful Re-Trigger Pattern — Conversational Memory Nodes
+# ---------------------------------------------------------------------------
+
+def _resolve_expr(expr: str, context: dict[str, Any]) -> Any:
+    """Safely evaluate a dot-notation expression against the DAG context."""
+    from app.engine.safe_eval import safe_eval, SafeEvalError
+
+    upstream = {k: v for k, v in context.items() if k.startswith("node_")}
+    eval_env = {
+        "trigger": context.get("trigger", {}),
+        "context": context,
+    }
+    eval_env.update(upstream)
+    try:
+        return safe_eval(expr, eval_env)
+    except SafeEvalError as exc:
+        logger.warning("Expression '%s' rejected by safe evaluator: %s", expr, exc)
+        return None
+    except Exception as exc:
+        logger.warning("Expression '%s' evaluation error: %s", expr, exc)
+        return None
+
+
+def _handle_load_conversation_state(
+    node_data: dict, context: dict[str, Any], tenant_id: str
+) -> dict[str, Any]:
+    """Fetch conversation history from persistent storage.
+
+    Reads `session_id` from the trigger payload (or via a configurable
+    expression), queries the conversation_sessions table, and returns the
+    full message array so downstream nodes can reference it as context.
+    If no session exists yet, an empty one is created automatically.
+    """
+    config = node_data.get("config", {})
+    session_id_expr = config.get("sessionIdExpression", "trigger.session_id")
+
+    raw = _resolve_expr(session_id_expr, context)
+    session_id = str(raw) if raw else str(context.get("trigger", {}).get("session_id", ""))
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        logger.warning(
+            "Load Conversation State: session_id could not be resolved; "
+            "generated ephemeral id=%s", session_id,
+        )
+
+    from app.database import SessionLocal
+    from app.models.workflow import ConversationSession
+
+    db = SessionLocal()
+    try:
+        session = (
+            db.query(ConversationSession)
+            .filter_by(session_id=session_id, tenant_id=tenant_id)
+            .first()
+        )
+        if not session:
+            session = ConversationSession(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                messages=[],
+            )
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+
+        messages = session.messages or []
+        logger.info(
+            "Load Conversation State: session=%s messages=%d", session_id, len(messages)
+        )
+        return {
+            "session_id": session_id,
+            "messages": messages,
+            "message_count": len(messages),
+        }
+    finally:
+        db.close()
+
+
+def _handle_save_conversation_state(
+    node_data: dict, context: dict[str, Any], tenant_id: str
+) -> dict[str, Any]:
+    """Append the current turn to persistent conversation history.
+
+    Reads the user message (via `userMessageExpression`) and the assistant
+    response (from `responseNodeId`'s output) then upserts both into the
+    conversation_sessions table under the resolved `session_id`.
+    """
+    config = node_data.get("config", {})
+    session_id_expr = config.get("sessionIdExpression", "trigger.session_id")
+    response_node_id = config.get("responseNodeId", "")
+    user_msg_expr = config.get("userMessageExpression", "trigger.message")
+
+    raw = _resolve_expr(session_id_expr, context)
+    session_id = str(raw) if raw else str(context.get("trigger", {}).get("session_id", ""))
+    if not session_id:
+        return {"error": "session_id could not be resolved", "saved": False}
+
+    raw_user = _resolve_expr(user_msg_expr, context)
+    user_message = str(raw_user) if raw_user is not None else ""
+
+    assistant_response = ""
+    if response_node_id and response_node_id in context:
+        node_out = context[response_node_id]
+        if isinstance(node_out, dict):
+            assistant_response = str(
+                node_out.get("response", node_out.get("output", ""))
+            )
+        else:
+            assistant_response = str(node_out)
+
+    now = datetime.now(timezone.utc).isoformat()
+    new_messages: list[dict] = []
+    if user_message:
+        new_messages.append({"role": "user", "content": user_message, "timestamp": now})
+    if assistant_response:
+        new_messages.append(
+            {"role": "assistant", "content": assistant_response, "timestamp": now}
+        )
+
+    from app.database import SessionLocal
+    from app.models.workflow import ConversationSession
+    from sqlalchemy.orm.attributes import flag_modified
+
+    db = SessionLocal()
+    try:
+        session = (
+            db.query(ConversationSession)
+            .filter_by(session_id=session_id, tenant_id=tenant_id)
+            .first()
+        )
+        if not session:
+            session = ConversationSession(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                messages=new_messages,
+            )
+            db.add(session)
+        else:
+            session.messages = (session.messages or []) + new_messages
+            flag_modified(session, "messages")
+
+        db.commit()
+        total = len(session.messages)
+        logger.info(
+            "Save Conversation State: session=%s total_messages=%d", session_id, total
+        )
+        return {"session_id": session_id, "message_count": total, "saved": True}
+    finally:
+        db.close()
+
+
+def _handle_llm_router(
+    node_data: dict, context: dict[str, Any], tenant_id: str
+) -> dict[str, Any]:
+    """Classify the user's intent using a lightweight LLM call.
+
+    Reads the conversation history from a Load Conversation State node
+    (configured via `historyNodeId`), builds a strict classification prompt,
+    and returns `{"intent": "<label>"}` for downstream Condition nodes to
+    branch on.  Temperature is forced to 0.1 for deterministic output.
+    """
+    config = node_data.get("config", {})
+    provider = config.get("provider", "google")
+    model = config.get("model", "gemini-2.5-flash")
+    intents: list[str] = config.get("intents", [])
+    history_node_id = config.get("historyNodeId", "")
+    user_msg_expr = config.get("userMessageExpression", "trigger.message")
+
+    # Pull conversation history from the Load Conversation State node output
+    messages: list[dict] = []
+    if history_node_id and history_node_id in context:
+        messages = context[history_node_id].get("messages", [])
+
+    raw_user = _resolve_expr(user_msg_expr, context)
+    user_message = str(raw_user) if raw_user is not None else str(
+        context.get("trigger", {}).get("message", "")
+    )
+
+    # Build the classification system prompt
+    intents_str = ", ".join(f'"{i}"' for i in intents) if intents else '"general"'
+    system_prompt = (
+        "You are an intent classification engine. "
+        "Analyze the conversation and classify the user's latest message.\n\n"
+        f"Available intents: [{intents_str}]\n\n"
+        "Respond ONLY with a valid JSON object in this exact format:\n"
+        '{"intent": "<one of the available intents>"}\n\n'
+        "Do not include any other text, explanation, or markdown formatting."
+    )
+
+    # Include the last 10 messages as context (avoid unbounded token growth)
+    history_lines = [
+        f"{m.get('role', 'user').upper()}: {m.get('content', '')}"
+        for m in messages[-10:]
+    ]
+    history_block = "\n".join(history_lines) if history_lines else "(no prior messages)"
+    user_prompt = (
+        f"Conversation history:\n{history_block}\n\n"
+        f"Latest user message: {user_message}\n\n"
+        "Classify the intent:"
+    )
+
+    from app.engine.llm_providers import call_llm
+
+    result = call_llm(
+        provider=provider,
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_prompt,
+        temperature=0.1,
+        max_tokens=64,
+    )
+
+    raw_response = result.get("response", "").strip()
+
+    # Parse JSON — handle accidental markdown code fences
+    intent = "unknown"
+    try:
+        parsed = json.loads(raw_response)
+        intent = parsed.get("intent", "unknown")
+    except json.JSONDecodeError:
+        match = re.search(r'\{[^}]+\}', raw_response)
+        if match:
+            try:
+                intent = json.loads(match.group()).get("intent", "unknown")
+            except Exception:
+                pass
+
+    # Clamp to the configured intent list; fall back to the first entry
+    if intents and intent not in intents:
+        logger.warning(
+            "LLM Router returned unknown intent '%s'; falling back to '%s'",
+            intent, intents[0],
+        )
+        intent = intents[0]
+
+    from app.observability import record_generation
+    record_generation(
+        context.get("_trace"),
+        name=f"llm_router:{provider}/{model}",
+        provider=provider,
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_prompt,
+        response=raw_response,
+        usage=result.get("usage"),
+    )
+
+    logger.info("LLM Router classified intent='%s' (model=%s/%s)", intent, provider, model)
+    return {
+        "intent": intent,
+        "raw_response": raw_response,
+        "usage": result.get("usage"),
+    }
 

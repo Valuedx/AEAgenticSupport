@@ -112,3 +112,26 @@ class ExecutionLog(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     instance = relationship("WorkflowInstance", back_populates="execution_logs")
+
+
+class ConversationSession(Base):
+    """Persistent multi-turn conversation history for the Stateful Re-Trigger Pattern.
+
+    Each session stores the full message history across DAG instances, enabling
+    conversational fluidity without cyclic graphs.  A session_id ties together
+    all DAG runs that belong to the same chat thread.
+    """
+
+    __tablename__ = "conversation_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(String(256), nullable=False)
+    tenant_id = Column(String(64), nullable=False, index=True)
+    # Array of {"role": "user"|"assistant", "content": str, "timestamp": str}
+    messages = Column(JSONB, nullable=False, default=list)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("ix_conv_session_tenant_session", "tenant_id", "session_id", unique=True),
+    )

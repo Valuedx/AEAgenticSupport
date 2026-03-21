@@ -1,6 +1,6 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
-**Version:** 0.9
+**Version:** 0.9.1
 **Last updated:** 2026-03-21
 
 Welcome to the Developer Guide! 🚀 
@@ -205,3 +205,37 @@ When a developer configures a node (like an HTTP request), they just type:
 `{{ env.AWS_PROD_KEY }}`
 
 When the workflow runs, exactly 1 millisecond before the node executes, `resolve_config_env_vars()` (in `prompt_template.py`) intercepts that string, safely fetches the encrypted key from the database, decrypts it in RAM, and hands it to the node. Safe and sound!
+
+---
+
+## 💬 6. Stateful Conversational Memory
+
+By default, an Orchestrator DAG is acyclic and stateless. But what if you want to build a chatbot that remembers context over 10 messages? You use the **Stateful Re-Trigger Pattern** (introduced in V0.9.1).
+
+Instead of making the DAG loop infinitely, we let each user message trigger a **fresh DAG instance**. We use two "bookend" nodes to fetch and save memory to a PostgreSQL database (`conversation_sessions`).
+
+### How to build a conversational DAG
+
+The canonical graph for any chat-enabled workflow is:
+
+```text
+[Webhook Trigger]
+       ↓
+[Load Conversation State]   ← config: sessionIdExpression = "trigger.session_id"
+       ↓
+[LLM Router]                ← config: intents = ["diagnose_server", "casual_chat", "escalate"]
+                                       historyNodeId = "node_2"
+       ↓
+[Condition]                 ← condition: node_3.intent == "diagnose_server"
+    ↙         ↘
+[Branch A]  [Branch B]  ...  (any action/agent nodes)
+    ↘         ↙
+[Save Conversation State]   ← config: responseNodeId = "node_X"
+                                       userMessageExpression = "trigger.message"
+```
+
+### Key design points:
+1. **The DAG stays acyclic** — each user message simply fires a fresh execution instance.
+2. **Load at the start / Save at the end** bookend every instance with memory fetch/store.
+3. **LLM Router** reads the full history passed from the Load State node, handling pivots and follow-ups contextually.
+4. **The intent value** flows dynamically into standard Condition nodes — keeping routine routing out of arbitrary Python code.
