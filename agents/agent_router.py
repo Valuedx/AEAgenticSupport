@@ -31,29 +31,39 @@ audit = logging.getLogger("ops_agent.audit")
 MAX_DELEGATION_DEPTH = 5
 
 
-def _score_agent(agent: BaseAgent, user_message: str, context: dict | None, **kwargs) -> float:
+def _score_agent(agent: BaseAgent, user_message: str, context: dict | None, **kwargs) -> tuple[float, dict]:
     """
     Compute a routing score for an agent given a user message.
-
-    Uses the agent's own ``can_handle()`` method plus keyword matching
-    against the agent's declared domains and capabilities.
+    Returns (score, breakdown_dict).
     """
     base_score = agent.can_handle(user_message, context, **kwargs)
     msg_lower = user_message.lower()
 
     # Bonus for domain keyword matches
+    domain_hits = []
     domain_bonus = 0.0
     for domain in agent.info.domains:
         if domain.lower() in msg_lower:
+            domain_hits.append(domain)
             domain_bonus = max(domain_bonus, 0.2)
 
     # Bonus for capability keyword matches
+    cap_hits = []
     cap_bonus = 0.0
     for cap in agent.info.capabilities:
         if cap.lower() in msg_lower:
+            cap_hits.append(cap)
             cap_bonus = max(cap_bonus, 0.1)
 
-    return min(1.0, base_score + domain_bonus + cap_bonus)
+    final_score = min(1.0, base_score + domain_bonus + cap_bonus)
+    breakdown = {
+        "base": round(base_score, 3),
+        "domain_bonus": domain_bonus,
+        "domain_hits": domain_hits,
+        "cap_bonus": cap_bonus,
+        "cap_hits": cap_hits,
+    }
+    return final_score, breakdown
 
 
 class AgentRouter:
@@ -115,29 +125,41 @@ class AgentRouter:
                 success=False,
             )
 
-        scored = [
-            (agent, _score_agent(agent, user_message, context_overrides, **kwargs))
-            for agent in agents
-        ]
+        scored = []
+        for agent in agents:
+            score, breakdown = _score_agent(agent, user_message, context_overrides, **kwargs)
+            scored.append((agent, score, breakdown))
+        
+        # Sort by score (desc), then priority (asc)
         scored.sort(key=lambda pair: (-pair[1], pair[0].info.priority))
 
-        best_agent, best_score = scored[0]
+        best_agent, best_score, best_breakdown = scored[0]
 
         shared.set_routing({
             "scored_agents": [
                 {
                     "agent_id": a.info.agent_id,
                     "score": round(s, 3),
+                    "breakdown": b,
                 }
-                for a, s in scored
+                for a, s, b in scored
             ],
             "selected_agent_id": best_agent.agent_id,
             "selected_score": round(best_score, 3),
         })
 
+        # Detailed logging of the routing decision
+        score_logs = []
+        for a, s, b in scored:
+            hits = []
+            if b["domain_hits"]: hits.extend(b["domain_hits"])
+            if b["cap_hits"]: hits.extend(b["cap_hits"])
+            hit_str = f" [hits: {', '.join(hits)}]" if hits else ""
+            score_logs.append(f"{a.info.agent_id}: {s:.2f} (base {b['base']}){hit_str}")
+
         logger.info(
-            "Router selected agent=%s score=%.3f for message='%s'",
-            best_agent.agent_id, best_score, user_message[:80],
+            "Router decision: [%s] | Winner=%s | Msg='%s'",
+            " | ".join(score_logs), best_agent.agent_id, user_message[:60],
         )
 
         return self._execute_with_delegation(
@@ -263,9 +285,21 @@ class AgentRouter:
                     delegation.reason[:100],
                 )
 
+                # BUGFIX: Build a focused task message from delegation reason/context
+                # instead of passing the original user message, which can cause 
+                # redundant actions in the delegate agent.
+                delegation_context = delegation.context or {}
+                context_str = ""
+                if delegation_context:
+                    # Filter out empty or internal values to keep the prompt clean
+                    context_str = " Context: " + ", ".join(
+                        f"{k}={v}" for k, v in delegation_context.items() if v
+                    )
+                delegate_message = f"{delegation.reason}.{context_str}"
+
                 delegate_result = self._execute_with_delegation(
                     agent=target,
-                    user_message=user_message,
+                    user_message=delegate_message,
                     shared=shared,
                     depth=depth + 1,
                     **kwargs,

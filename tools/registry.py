@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict
+import json
 import logging
 from typing import Callable, Optional
 
@@ -20,6 +21,7 @@ from tools.catalog import ToolCatalog, ToolCatalogEntry
 from tools.executor import ToolExecutor
 from tools.hydrator import ToolHydrator, TurnToolSet
 from tools.ranker import ToolRanker
+from tools.orchestrator_client import get_orchestrator_client
 
 logger = logging.getLogger("ops_agent.tools.registry")
 audit = logging.getLogger("ops_agent.audit")
@@ -798,27 +800,96 @@ class ToolRegistry:
             skipped,
             len(collisions),
         )
-
-        # Best-effort sync/index: keep dynamic tool reload compatible with
-        # test doubles and older clients that may not expose this helper.
-        sync_result: dict = {}
-        sync_fn = getattr(client, "sync_and_index_workflows", None)
-        if callable(sync_fn):
-            try:
-                sync_result = sync_fn(workflows) or {}
-            except Exception as exc:
-                logger.warning("AE workflow sync/index failed (non-fatal): %s", exc)
-
         return {
             "enabled": True,
             "removed": removed,
             "registered": registered,
             "skipped": skipped,
             "collisions": collisions,
-            "total_workflows": len(workflows),
-            "db_synced": sync_result.get("db_synced", 0),
-            "rag_indexed": sync_result.get("rag_indexed", 0),
         }
+
+    def reload_local_orchestrator_tools(self) -> dict:
+        """Fetch DAGs from the local orchestrator and register them as dynamic tools."""
+        client = get_orchestrator_client()
+        try:
+            workflows = client.list_workflows()
+        except Exception as exc:
+            logger.warning("Local orchestrator tool discovery failed: %s", exc)
+            return {"error": str(exc)}
+
+        registered = 0
+        skipped = 0
+        collisions = []
+
+        for wf in workflows:
+            # Look for 'agenticToolConfiguration' in graph_json metadata or nodes
+            graph = wf.get("graph_json", {})
+            # We use the same extraction logic as AE, but feed it the local JSON
+            mapping = extract_dynamic_tool_mappings_from_payload(
+                [wf], 
+                details_by_workflow={wf["name"]: wf}
+            )
+            
+            if mapping:
+                m = mapping[0]
+                tool_name = m.tool_name
+                definition = m.to_tool_definition()
+                description = m.description
+                params = m.parameters
+                required = m.required_params
+                # Use mapping's handler if available, but for orchestrator we usually route to run_workflow
+                handler = lambda _wf_id=str(wf["id"]): lambda **kwargs: self.execute("run_workflow", workflow_id=_wf_id, trigger_payload=json.dumps(kwargs))
+            else:
+                # Fallback: Register as a generic tool by name
+                tool_name = wf["name"].lower().replace(" ", "_")
+                tool_name = "".join(c for c in tool_name if c.isalnum() or c == "_")
+                if not tool_name:
+                    skipped += 1
+                    continue
+                
+                definition = ToolDefinition(
+                    name=tool_name,
+                    description=wf.get("description") or f"Execute local orchestrator workflow '{wf['name']}'",
+                    category="orchestrator",
+                    tier="medium_risk",
+                    parameters={
+                        "trigger_payload": {
+                            "type": "string",
+                            "description": "JSON string of input parameters for the workflow. Use '{}' if unsure.",
+                            "default": "{}"
+                        }
+                    },
+                    required_params=[],
+                )
+                handler = lambda _wf_id=str(wf["id"]): lambda **kwargs: self.execute("run_workflow", workflow_id=_wf_id, trigger_payload=kwargs.get("trigger_payload", "{}"))
+
+            if tool_name in self._catalog and tool_name not in self._dynamic_tool_names:
+                collisions.append(tool_name)
+                continue
+
+            # Set source to 'orchestrator'
+            definition.metadata["source"] = "orchestrator"
+            definition.metadata["dynamic"] = True
+            definition.metadata["workflow_id"] = str(wf["id"])
+            
+            self.register_catalog_entry(
+                ToolCatalogEntry.from_definition(
+                    definition,
+                    source_ref=wf["name"],
+                    hydration_mode="execute_via_generic_runner",
+                ),
+                handler_factory=handler,
+                hydrate=False,
+            )
+            self._dynamic_tool_names.add(tool_name)
+            registered += 1
+
+        logger.info(
+            "Local orchestrator reload complete: registered=%s skipped=%s",
+            registered,
+            skipped,
+        )
+        return {"registered": registered, "skipped": skipped, "collisions": collisions}
 
 
     def _make_dynamic_tool_handler(

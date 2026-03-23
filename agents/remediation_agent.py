@@ -46,19 +46,36 @@ class RemediationAgent(BaseAgent):
                 "corrective actions, and root cause analysis (RCA)."
             ),
             capabilities=[AgentCapability.REMEDIATION.value],
-            domains=["restart", "fix", "resolve", "execute", "trigger", "notify"],
+            domains=["restart", "fix", "resolve", "execute", "trigger", "notify", "workflow", "request", "execution", "automationedge", "ae"],
             status=AgentStatus.ACTIVE,
             priority=50,
-            version="1.0.0",
+            version="1.1.0",
         )
 
     def can_handle(self, user_message: str, context: dict | None = None, **kwargs) -> float:
-        """Score high for remediation-related keywords."""
+        """Score high for remediation-related keywords or if continuing a remediation flow."""
         msg = user_message.lower()
-        cues = ["restart", "fix", "resolve", "correct", "run", "do it", "execute", "trigger"]
+        cues = [
+            "restart", "fix", "resolve", "correct", "run", "do it", "execute", "trigger",
+            "poll", "wait", "retry", "resume", "abort", "kill", "stop"
+        ]
+        
+        # Base scoring on keyword matching
         if any(cue in msg for cue in cues):
             return 0.8
-        return 0.2
+
+        # Contextual scoring: Claim the turn if the previous assistant message mentioned remediation
+        state = kwargs.get("state")
+        if state and state.messages:
+            last_msgs = [m for m in reversed(state.messages) if m.get("role") == "assistant"]
+            if last_msgs:
+                last_bot_msg = last_msgs[0].get("content", "").lower()
+                # If we asked for confirmation or parameters for a fix
+                if any(term in last_bot_msg for term in ("restart", "trigger", "workflow", "parameters", "approval")):
+                    logger.info("RemediationAgent claiming turn based on history context")
+                    return 0.95
+        
+        return 0.3
 
     def handle(
         self,
@@ -86,9 +103,13 @@ class RemediationAgent(BaseAgent):
         # 2. If remediation was successful, delegate to diagnostic_agent for verification.
         # AE-55: Only delegate if a tool from the 'remediation' category was successful.
         # Do NOT delegate if the tool requested user input (needs_user_input=True).
+        # Do NOT delegate for tools that already handle their own verification/completion.
+        _SKIP_VERIFICATION_TOOLS = {"trigger_workflow", "t4_execute_and_poll"}
+        
         remedial_success = any(
             t.get("success") is True and 
             not t.get("needs_user_input") and
+            t.get("tool", "") not in _SKIP_VERIFICATION_TOOLS and
             tool_registry.get_tool(t.get("tool", "") or "").category == "remediation"
             for t in state.tool_call_log[-2:]
         )

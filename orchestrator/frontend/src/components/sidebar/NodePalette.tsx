@@ -155,7 +155,7 @@ export function NodePalette({ collapsed, onToggle }: NodePaletteProps) {
   }
 
   return (
-    <div className="flex flex-col w-64 border-r bg-sidebar">
+    <div className="flex flex-col h-full min-h-0 bg-sidebar">
       <div className="flex items-center justify-between px-4 py-3">
         <h2 className="text-sm font-semibold">Node Palette</h2>
         <button
@@ -192,7 +192,7 @@ export function NodePalette({ collapsed, onToggle }: NodePaletteProps) {
       </div>
       <Separator />
 
-      <ScrollArea className="flex-1 px-3 py-2">
+      <div className="flex-1 px-3 py-2 overflow-y-auto min-h-0">
         <div className="space-y-1">
           {CATEGORIES.map((cat) => {
             const meta = CATEGORY_META[cat];
@@ -237,7 +237,7 @@ export function NodePalette({ collapsed, onToggle }: NodePaletteProps) {
             </p>
           )}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }

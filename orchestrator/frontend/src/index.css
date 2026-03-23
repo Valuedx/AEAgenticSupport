@@ -175,3 +175,17 @@ body {
     @apply font-sans;
   }
 }
+/* Force ScrollArea Scrollbars to be visible */
+[data-slot='scroll-area-scrollbar'] {
+  opacity: 1 !important;
+  visibility: visible !important;
+  background-color: oklch(0.922 0 0 / 5%) !important;
+}
+
+[data-slot='scroll-area-thumb'] {
+  background-color: oklch(0.556 0 0 / 40%) !important;
+}
+
+[data-slot='scroll-area-thumb']:hover {
+  background-color: oklch(0.556 0 0 / 60%) !important;
+}

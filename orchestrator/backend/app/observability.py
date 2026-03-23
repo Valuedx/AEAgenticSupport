@@ -46,11 +46,16 @@ def get_langfuse():
 
     try:
         from langfuse import Langfuse
-        _langfuse_client = Langfuse()
+        from app.config import settings
+        _langfuse_client = Langfuse(
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+            host=settings.langfuse_host,
+        )
         _langfuse_available = True
         logger.info(
             "Langfuse observability initialized (host=%s)",
-            os.environ.get("LANGFUSE_HOST", "default"),
+            settings.langfuse_host,
         )
         return _langfuse_client
     except Exception as exc:

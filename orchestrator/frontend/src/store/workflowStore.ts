@@ -39,6 +39,7 @@ interface WorkflowState {
   fetchWorkflows: () => Promise<void>;
   fetchInstances: (workflowId: string) => Promise<void>;
   loadWorkflow: (id: string) => Promise<void>;
+  loadInstance: (workflowId: string, instanceId: string) => Promise<void>;
   saveWorkflow: (name?: string) => Promise<void>;
   deleteWorkflow: (id: string) => Promise<void>;
   newWorkflow: () => void;
@@ -118,6 +119,34 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       useFlowStore.getState().replaceGraph(newNodes, newEdges);
 
       set({ currentWorkflow: wf, isDirty: false, loading: false, activeInstance: null });
+    } catch (e) {
+      set({ error: String(e), loading: false });
+    }
+  },
+
+  loadInstance: async (workflowId, instanceId) => {
+    set({ loading: true, error: null });
+    try {
+      // 1. Ensure the workflow is loaded locally
+      const current = get().currentWorkflow;
+      if (!current || current.id !== workflowId) {
+        await get().loadWorkflow(workflowId);
+      }
+
+      // 2. Fetch detail
+      const detail = await api.getInstanceDetail(workflowId, instanceId);
+
+      // 3. Set as active
+      set({
+        activeInstance: detail,
+        loading: false,
+        isExecuting: ["running", "queued", "pending"].includes(detail.status),
+      });
+
+      // 4. Start streaming if it's active
+      if (get().isExecuting) {
+        get().streamInstance(workflowId, instanceId);
+      }
     } catch (e) {
       set({ error: String(e), loading: false });
     }

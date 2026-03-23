@@ -199,7 +199,7 @@ def chat():
     if not message:
         return jsonify({"response": "Empty message received."}), 400
 
-    response = handle_chat_message(
+    result = handle_chat_message(
         message=message,
         session_id=data.get("session_id", "webchat-default"),
         user_id=data.get("user_id", "webchat_user"),
@@ -209,7 +209,10 @@ def chat():
         user_team=data.get("user_team", ""),
         user_metadata=data.get("user_metadata", {}),
     )
-    return jsonify({"response": response})
+    # Re-wrap if it's the new dict format
+    if isinstance(result, dict):
+        return jsonify(result)
+    return jsonify({"response": result})
 
 
 @app.route("/chat/stream", methods=["POST"])
@@ -494,6 +497,10 @@ def api_tools():
         sync_summary = tool_registry.reload_automationedge_tools(
             include_inactive=include_inactive
         )
+        # Also sync local orchestrator
+        local_sync = tool_registry.reload_local_orchestrator_tools()
+        if isinstance(sync_summary, dict):
+            sync_summary["local_orchestrator"] = local_sync
 
     catalog = get_agent_catalog()
     
@@ -578,6 +585,10 @@ def api_tools_sync():
     summary = tool_registry.reload_automationedge_tools(
         include_inactive=include_inactive
     )
+    # Also sync local orchestrator
+    local_summary = tool_registry.reload_local_orchestrator_tools()
+    if isinstance(summary, dict):
+        summary["local_orchestrator"] = local_summary
     get_agent_catalog().ensure_default_agent_links(tool_registry.list_tools())
     return jsonify(summary)
 
@@ -1498,6 +1509,14 @@ def init_backend() -> None:
     try:
         from agents.scheduler import get_scheduler, setup_default_tasks
         setup_default_tasks()
+
+        # Initial tool sync
+        try:
+            log.info("Performing initial tool sync (AE + Local Orchestrator)...")
+            tool_registry.reload_automationedge_tools()
+            tool_registry.reload_local_orchestrator_tools()
+        except Exception as e:
+            log.warning("Initial tool sync failed: %s", e)
 
         from state.session_manager import register_cleanup_task
         register_cleanup_task()

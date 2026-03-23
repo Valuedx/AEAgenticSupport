@@ -26,7 +26,7 @@ def handle_chat_message(message: str, session_id: str = "default",
                         user_email: str = "",
                         user_team: str = "",
                         user_metadata: dict | None = None,
-                        on_progress=None) -> str:
+                        on_progress=None) -> dict | str:
     """
     Called by AE AI Studio for each incoming chat message.
 
@@ -60,20 +60,45 @@ def handle_chat_message(message: str, session_id: str = "default",
             user_metadata=user_metadata,
             on_progress=on_progress,
         )
+        
+        # Extract execution metadata from the session state if available
+        metadata = {}
+        try:
+            state = gateway.get_or_create_session(session_id)
+            if state.tool_call_log:
+                # Look for the last successful execution trigger
+                for call in reversed(state.tool_call_log):
+                    if call.get("success") and call.get("tool") in ("trigger_workflow", "t4_execute_and_poll", "call_ae_api", "run_workflow"):
+                        res_data = call.get("result", {})
+                        if isinstance(res_data, dict):
+                            wid = res_data.get("workflow_id") or call.get("params", {}).get("workflow_id")
+                            # run_workflow returns 'instance_id'; AE tools return 'execution_id'/'request_id'
+                            eid = (res_data.get("instance_id") or
+                                   res_data.get("execution_id") or
+                                   res_data.get("request_id"))
+                            if wid: metadata["workflow_id"] = str(wid)
+                            if eid: metadata["instance_id"] = str(eid)
+                        break
+        except Exception as me:
+            app_logger.warning(f"Failed to extract metadata: {me}")
+
         log_resp = response[:100] + ("..." if len(response) > 100 else "")
-        app_logger.info(f"Response: {log_resp}")
-        return response
+        app_logger.info(f"Response: {log_resp} (metadata={metadata})")
+        return {"response": response, "metadata": metadata}
 
     except Exception as e:
         app_logger.error(f"Unhandled error: {type(e).__name__}: {e}", exc_info=True)
         # In dev, show a short hint so you can fix the root cause
         show_hint = os.environ.get("SHOW_ERROR_HINT", "").lower() in ("1", "true", "yes")
         hint = f" ({type(e).__name__}: {str(e)[:100]})" if show_hint else ""
-        return (
-            "I encountered an unexpected error. The operations team has "
-            "been notified. Please try again or contact support directly."
-            + hint
-        )
+        return {
+            "response": (
+                "I encountered an unexpected error. The operations team has "
+                "been notified. Please try again or contact support directly."
+                + hint
+            ),
+            "metadata": {}
+        }
 
 
 # AE AI Studio Integration

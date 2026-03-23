@@ -146,6 +146,23 @@ def delete_workflow(
     )
     if not wf:
         raise HTTPException(404, "Workflow not found")
+
+    # Explicitly delete child instances (and their logs/checkpoints) before
+    # deleting the parent definition. This avoids the NOT NULL violation that
+    # SQLAlchemy causes when it tries to null-out workflow_def_id on orphaned rows.
+    instances = (
+        db.query(WorkflowInstance)
+        .filter_by(workflow_def_id=workflow_id, tenant_id=tenant_id)
+        .all()
+    )
+    for inst in instances:
+        db.query(ExecutionLog).filter_by(instance_id=inst.id).delete(synchronize_session=False)
+        db.query(InstanceCheckpoint).filter_by(instance_id=inst.id).delete(synchronize_session=False)
+        db.delete(inst)
+
+    # Also delete any saved snapshots for this workflow
+    db.query(WorkflowSnapshot).filter_by(workflow_def_id=workflow_id, tenant_id=tenant_id).delete(synchronize_session=False)
+
     db.delete(wf)
     db.commit()
 

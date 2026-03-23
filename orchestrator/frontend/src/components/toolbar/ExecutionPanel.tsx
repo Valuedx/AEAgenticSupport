@@ -229,7 +229,7 @@ function LogEntry({
   );
 }
 
-export function ExecutionPanel() {
+export function ExecutionPanel({ onClear }: { onClear?: () => void }) {
   const activeInstance = useWorkflowStore((s) => s.activeInstance);
   const isExecuting = useWorkflowStore((s) => s.isExecuting);
   const clearExecution = useWorkflowStore((s) => s.clearExecution);
@@ -265,7 +265,7 @@ export function ExecutionPanel() {
   };
 
   return (
-    <div className="absolute bottom-0 left-0 right-0 bg-card border-t shadow-lg z-10 max-h-[45%] flex flex-col">
+    <div className="flex flex-col h-full bg-card">
       <div className="flex items-center gap-2 px-4 py-2 shrink-0">
         <Icon
           className={`h-4 w-4 ${color} ${activeInstance.status === "running" ? "animate-spin" : ""}`}
@@ -335,7 +335,22 @@ export function ExecutionPanel() {
           variant="ghost"
           size="sm"
           className="h-6 w-6 p-0"
-          onClick={clearExecution}
+          onClick={() => {
+            if (onClear) onClear(); // Use onClear as a toggle/reset to default in App.tsx
+          }}
+          title="Maximize/Minimize"
+        >
+          <ChevronUp className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+          onClick={() => {
+            clearExecution();
+            if (onClear) onClear();
+          }}
+          title="Close Panel"
         >
           <X className="h-3.5 w-3.5" />
         </Button>
@@ -350,7 +365,7 @@ export function ExecutionPanel() {
         />
       )}
       <Separator />
-      <ScrollArea className="flex-1 px-4 py-2">
+      <div className="flex-1 px-4 py-2 overflow-y-auto min-h-0">
         <div className="space-y-1.5">
           {activeInstance.logs.length === 0 ? (
             <p className="text-sm text-muted-foreground py-4 text-center">
@@ -366,7 +381,7 @@ export function ExecutionPanel() {
             ))
           )}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }

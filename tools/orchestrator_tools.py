@@ -50,9 +50,13 @@ def _list_workflows(**_: Any) -> str:
 def _run_workflow(
     workflow_id: str,
     trigger_payload: str = "{}",
-    timeout_seconds: int = 120,
     **_: Any,
-) -> str:
+) -> dict | str:
+    """Trigger a workflow and return the instance ID immediately (non-blocking).
+    
+    The execution will run asynchronously in the background.
+    The UI will stream logs live via the execution panel.
+    """
     try:
         payload: dict[str, Any] = json.loads(trigger_payload) if trigger_payload else {}
     except json.JSONDecodeError as exc:
@@ -60,17 +64,27 @@ def _run_workflow(
 
     client = get_orchestrator_client()
     try:
-        ctx = client.run_and_wait(workflow_id, payload, timeout=timeout_seconds)
+        # Fire the workflow asynchronously — don't block waiting for it to finish
+        instance = client.execute(workflow_id, payload)
     except (RuntimeError, TimeoutError) as exc:
-        return f"Workflow execution error: {exc}"
+        return f"Workflow trigger error: {exc}"
     except Exception as exc:
-        logger.exception("Unexpected error running workflow %s", workflow_id)
+        logger.exception("Unexpected error triggering workflow %s", workflow_id)
         return f"Unexpected error: {exc}"
 
-    output = json.dumps(ctx.get("context_json", {}), default=str)
-    if len(output) > _MAX_OUTPUT_CHARS:
-        output = output[:_MAX_OUTPUT_CHARS] + "... [truncated]"
-    return f"Workflow completed.\n{output}"
+    instance_id = str(instance.get("id", ""))
+    status = instance.get("status", "queued")
+    
+    return {
+        "workflow_id": workflow_id,
+        "instance_id": instance_id,
+        "status": status,
+        "summary": (
+            f"Workflow triggered successfully. "
+            f"[WF_ID: {workflow_id}] [INSTANCE_ID: {instance_id}]\n"
+            f"Status: {status}. The execution panel will show live logs."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { X, Copy, Check } from "lucide-react";
 import type { AgenticNodeData } from "@/types/nodes";
@@ -31,7 +30,7 @@ export function PropertyInspector() {
 
   if (!selectedNode) {
     return (
-      <div className="flex flex-col items-center justify-center w-72 border-l bg-sidebar text-muted-foreground p-6">
+      <div className="flex flex-col items-center justify-center h-full bg-sidebar text-muted-foreground p-6">
         <p className="text-sm text-center">
           Select a node on the canvas to inspect its properties.
         </p>
@@ -47,7 +46,7 @@ export function PropertyInspector() {
   const schema = getConfigSchema(data.label);
 
   return (
-    <div className="flex flex-col w-72 border-l bg-sidebar">
+    <div className="flex flex-col h-full bg-sidebar">
       <div className="flex items-center justify-between px-4 py-3">
         <h2 className="text-sm font-semibold">Properties</h2>
         <button
@@ -58,7 +57,7 @@ export function PropertyInspector() {
         </button>
       </div>
       <Separator />
-      <ScrollArea className="flex-1 px-4 py-3">
+      <div className="flex-1 px-4 py-3 overflow-y-auto min-h-0">
         <div className="space-y-4">
           {/* Node ID chip */}
           <div className="flex items-center gap-1.5 rounded-md bg-muted px-2.5 py-1.5">
@@ -141,7 +140,7 @@ export function PropertyInspector() {
             Delete Node
           </Button>
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }

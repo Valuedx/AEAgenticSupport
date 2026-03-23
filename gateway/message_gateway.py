@@ -147,8 +147,9 @@ class MessageGateway:
 
                 self._agent_router = get_agent_router()
                 logger.info(
-                    "Multi-agent router initialized with %d agent(s)",
+                    "Multi-agent router initialized with %d agent(s): [%s]",
                     len(registry.list_agents()),
+                    ", ".join([a.info.agent_id for a in registry.list_agents()])
                 )
             except Exception as exc:
                 logger.warning(
@@ -504,13 +505,8 @@ class MessageGateway:
         """
         router = self.agent_router
 
-        # ── Fix: Skip router during approval phase ──
-        # Specialist agents currently lack the approval handling logic.
-        # If we are AWAITING_APPROVAL, we MUST go to the Orchestrator which
-        # owns the approval gate logic.
-        if state.phase == ConversationPhase.AWAITING_APPROVAL:
-            router = None
-
+        router = self.agent_router
+        
         if router:
             try:
                 result = router.route(
