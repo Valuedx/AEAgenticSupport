@@ -26,7 +26,8 @@ _langfuse_available: Optional[bool] = None
 
 
 def _is_enabled() -> bool:
-    return os.environ.get("LANGFUSE_ENABLED", "false").lower() in ("1", "true", "yes")
+    from app.config import settings
+    return settings.langfuse_enabled
 
 
 def get_langfuse():

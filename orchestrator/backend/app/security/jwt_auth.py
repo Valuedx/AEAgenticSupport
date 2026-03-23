@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone, timedelta
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Query, Request
 from jose import JWTError, jwt
 
 from app.config import settings
@@ -48,9 +48,10 @@ def _extract_bearer_token(request: Request) -> str | None:
 
 async def get_tenant_id(
     request: Request,
-    x_tenant_id: str | None = Header(default=None),
+    x_tenant_id_header: str | None = Header(default=None, alias="X-Tenant-Id"),
+    x_tenant_id_query: str | None = Query(default=None, alias="x_tenant_id"),
 ) -> str:
-    """Extract tenant_id from JWT bearer token or fall back to header in dev mode."""
+    """Extract tenant_id from JWT bearer token or fall back to header/query in dev mode."""
     if settings.auth_mode == "jwt":
         token = _extract_bearer_token(request)
         if not token:
@@ -73,6 +74,8 @@ async def get_tenant_id(
             raise HTTPException(status_code=401, detail="Token missing tenant_id claim")
         return tenant_id
 
-    if not x_tenant_id:
-        raise HTTPException(status_code=401, detail="Missing X-Tenant-Id header")
-    return x_tenant_id
+    # In dev mode, check header then query parameter
+    tid = x_tenant_id_header or x_tenant_id_query
+    if not tid:
+        raise HTTPException(status_code=401, detail="Missing X-Tenant-Id header or query parameter")
+    return tid

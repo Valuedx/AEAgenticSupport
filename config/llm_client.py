@@ -68,32 +68,26 @@ class VertexAIClient:
                 role="system", 
                 parts=[genai_types.Part(text=system)]
             )
-
         config = genai_types.GenerateContentConfig(
             system_instruction=system_instruction,
             temperature=temperature or self.default_temp,
             max_output_tokens=max_tokens or self.default_max_tokens,
             top_p=0.95,
         )
-
         resp = self.client.models.generate_content(
             model=self.model_name,
             contents=contents,
             config=config
         )
-        
         # Track tokens
         self._record_usage(resp)
-
         text = self._extract_text(resp)
-
         self._record_generation(
             name="chat",
             input={"prompt": prompt[:500], "system": system[:300]},
             output=text[:1000],
             resp=resp,
         )
-
         return text
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))

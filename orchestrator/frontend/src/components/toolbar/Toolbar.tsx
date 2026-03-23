@@ -16,6 +16,7 @@ import {
   Cpu,
   Undo2,
   Redo2,
+  Activity,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +26,7 @@ import { useWorkflowStore } from "@/store/workflowStore";
 import { useFlowStore } from "@/store/flowStore";
 import { WorkflowListDialog } from "@/components/toolbar/WorkflowListDialog";
 import { VersionHistoryDialog } from "@/components/toolbar/VersionHistoryDialog";
+import { InstanceHistoryDialog } from "@/components/toolbar/InstanceHistoryDialog";
 import { ValidationDialog } from "@/components/toolbar/ValidationDialog";
 import { validateWorkflow, type ValidationError } from "@/lib/validateWorkflow";
 
@@ -41,6 +43,7 @@ const STATUS_CONFIG: Record<string, { icon: typeof CircleDot; label: string; cla
 export function Toolbar() {
   const [listOpen, setListOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [instancesOpen, setInstancesOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
@@ -226,9 +229,24 @@ export function Toolbar() {
         </Button>
 
         {currentWorkflow && (
-          <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)} title="Version history">
-            <History className="h-4 w-4" />
-          </Button>
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setInstancesOpen(true)}
+              title="Execution history (Runs)"
+            >
+              <Activity className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setHistoryOpen(true)}
+              title="Version history (Drafts)"
+            >
+              <History className="h-4 w-4" />
+            </Button>
+          </>
         )}
 
         <Button
@@ -262,6 +280,7 @@ export function Toolbar() {
 
       <WorkflowListDialog open={listOpen} onOpenChange={setListOpen} />
       <VersionHistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} />
+      <InstanceHistoryDialog open={instancesOpen} onOpenChange={setInstancesOpen} />
       <ValidationDialog
         open={validationOpen}
         errors={validationErrors}

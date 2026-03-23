@@ -3,6 +3,7 @@ import type { Edge, Node } from "@xyflow/react";
 import {
   api,
   type WorkflowOut,
+  type InstanceOut,
   type InstanceDetailOut,
   type InstanceContextOut,
 } from "@/lib/api";
@@ -13,6 +14,7 @@ import { EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW } from "@/lib/exampleMainAppWorkfl
 interface WorkflowState {
   currentWorkflow: WorkflowOut | null;
   workflows: WorkflowOut[];
+  instances: InstanceOut[];
   isDirty: boolean;
 
   activeInstance: InstanceDetailOut | null;
@@ -35,6 +37,7 @@ interface WorkflowState {
   _sseCleanup: (() => void) | null;
 
   fetchWorkflows: () => Promise<void>;
+  fetchInstances: (workflowId: string) => Promise<void>;
   loadWorkflow: (id: string) => Promise<void>;
   saveWorkflow: (name?: string) => Promise<void>;
   deleteWorkflow: (id: string) => Promise<void>;
@@ -72,6 +75,7 @@ interface WorkflowState {
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   currentWorkflow: null,
   workflows: [],
+  instances: [],
   isDirty: false,
   activeInstance: null,
   isExecuting: false,
@@ -86,6 +90,18 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     try {
       const workflows = await api.listWorkflows();
       set({ workflows, loading: false });
+    } catch (e) {
+      set({ error: String(e), loading: false });
+    }
+  },
+
+  fetchInstances: async (workflowId) => {
+    set({ loading: true, error: null });
+    try {
+      const instances = await api.listInstances(workflowId);
+      // Sort by newest first
+      instances.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      set({ instances, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }

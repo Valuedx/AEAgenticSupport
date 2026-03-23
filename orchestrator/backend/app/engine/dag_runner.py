@@ -28,6 +28,11 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _get_clean_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Strip internal runtime keys (prefixed with '_') before DB storage."""
+    return {k: v for k, v in context.items() if not k.startswith("_")}
+
+
 def _finalize_cancelled(
     db: Session,
     instance: WorkflowInstance,
@@ -43,7 +48,7 @@ def _finalize_cancelled(
     instance.status = "cancelled"
     instance.cancel_requested = False
     instance.pause_requested = False
-    instance.context_json = context
+    instance.context_json = _get_clean_context(context)
     instance.completed_at = _utcnow()
     db.commit()
     logger.info("Workflow %s cancelled (cooperative, between nodes)", instance.id)
@@ -64,7 +69,7 @@ def _finalize_paused(
     instance.status = "paused"
     instance.pause_requested = False
     instance.cancel_requested = False
-    instance.context_json = context
+    instance.context_json = _get_clean_context(context)
     db.commit()
     logger.info("Workflow %s paused (cooperative, between nodes)", instance.id)
 
@@ -187,13 +192,13 @@ def execute_graph(db: Session, instance_id: str, deterministic_mode: bool = Fals
         ctx_early: dict[str, Any] = dict(instance.context_json or {})
         if instance.trigger_payload:
             ctx_early["trigger"] = instance.trigger_payload
-        _finalize_cancelled(db, instance, ctx_early)
+        _finalize_cancelled(db, instance, _get_clean_context(ctx_early))
         return
     if instance.pause_requested:
         ctx_pause: dict[str, Any] = dict(instance.context_json or {})
         if instance.trigger_payload:
             ctx_pause["trigger"] = instance.trigger_payload
-        _finalize_paused(db, instance, ctx_pause)
+        _finalize_paused(db, instance, _get_clean_context(ctx_pause))
         return
 
     graph = instance.definition.graph_json
@@ -489,7 +494,7 @@ def _execute_ready_queue(
             )
             for node_id, result in results.items():
                 if result == "suspended":
-                    instance.context_json = context
+                    instance.context_json = _get_clean_context(context)
                     db.commit()
                     return
                 if result == "failed":
@@ -515,7 +520,7 @@ def _execute_ready_queue(
         for _ in [1]
     ):
         instance.status = "completed"
-    instance.context_json = context
+    instance.context_json = _get_clean_context(context)
     instance.completed_at = _utcnow()
     db.commit()
     logger.info("Workflow %s completed (pruned %d nodes)", instance.id, len(pruned))
@@ -775,13 +780,13 @@ def _execute_parallel(
         elif status == "suspended":
             log_entry.status = "suspended"
             instance.status = "suspended"
-            instance.context_json = context
+            instance.context_json = _get_clean_context(context)
         elif status == "failed":
             log_entry.status = "failed"
             log_entry.error = error
             log_entry.completed_at = _utcnow()
             instance.status = "failed"
-            instance.context_json = context
+            instance.context_json = _get_clean_context(context)
             instance.completed_at = _utcnow()
 
     with ThreadPoolExecutor(max_workers=min(len(ready_nodes), _MAX_PARALLEL)) as pool:

@@ -45,7 +45,17 @@ class Settings(BaseSettings):
     # MCP connection pool size
     mcp_pool_size: int = 4
 
-    model_config = {"env_prefix": "ORCHESTRATOR_", "env_file": ".env"}
+    # Langfuse Observability
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
+    model_config = {
+        "env_prefix": "ORCHESTRATOR_",
+        "env_file": ".env",
+        "extra": "ignore"
+    }
 
 
 settings = Settings()

@@ -245,10 +245,16 @@ export function ExecutionPanel() {
   if (!activeInstance) return null;
 
   const isSuspended = activeInstance.status === "suspended";
+  const canPause =
+    isExecuting &&
+    (activeInstance.status === "running" || activeInstance.status === "queued");
+  const canResumePaused = activeInstance.status === "paused";
   const canStop =
     !!currentWorkflow &&
     isExecuting &&
-    (activeInstance.status === "running" || activeInstance.status === "queued");
+    (activeInstance.status === "running" ||
+      activeInstance.status === "queued" ||
+      activeInstance.status === "paused");
   const Icon = STATUS_ICON[activeInstance.status] ?? CircleDot;
   const color = STATUS_COLOR[activeInstance.status] ?? "text-muted-foreground";
 
