@@ -79,6 +79,28 @@ class Approval(models.Model):
         indexes = [models.Index(fields=["case_id", "status"])]
 
 
+class TeamsConversationRef(models.Model):
+    """Stores the Bot Framework ConversationReference for each Teams thread.
+
+    Captured on every inbound message so the bot can later send proactive
+    messages (progress updates, scheduler alerts) without waiting for the
+    user to send another message first.
+
+    Run ``python manage.py makemigrations custom && python manage.py migrate``
+    after adding this model.
+    """
+    thread_id = models.CharField(max_length=512, unique=True)
+    service_url = models.TextField()
+    conversation_id = models.CharField(max_length=512)
+    bot_id = models.CharField(max_length=256, default="")
+    channel_id = models.CharField(max_length=64, default="msteams")
+    tenant_id = models.CharField(max_length=256, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["thread_id"])]
+
+
 class IssueLink(models.Model):
     """Bidirectional link between related cases (cascade, recurrence)."""
     case_id_1 = models.CharField(max_length=64)

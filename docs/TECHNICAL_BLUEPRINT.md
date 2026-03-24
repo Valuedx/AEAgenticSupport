@@ -44,7 +44,7 @@
 ## AutomationEdge Agentic Support — Technical Blueprint
 
 **Version:** 1.5  
-**Last updated:** 2026-03-20
+**Last updated:** 2026-03-24
 
 ---
 
@@ -118,12 +118,12 @@ Request path examples:
 - **`static/`**
   - `admin_app.js` + `admin_app.css`: React control-center application.
 - **`custom/` (AI Studio Extension layer)**
-  - `custom_hooks.py`: Async Cognibot hooks (`api_messages_hook`) with locks, dedupe, and routing.
+  - `custom_hooks.py`: Async Cognibot hooks (`api_messages_hook`) with locks, dedupe, routing, proactive Teams conversation-ref capture, and approval/card handling.
   - `models.py` + `migrations/`: Django models for cases, approvals, processed messages, links.
-  - `helpers/`: Locks, DB helpers, RAG stubs, REST tool client, roster, Teams helpers, issue classifier.
-  - `functions/python/support_agent.py`: Planner + executor for Extension, using REST tools.
+  - `helpers/`: Locks, DB helpers, RAG stubs, REST tool client, roster, Teams helpers, Teams proactive sender, shared activity helpers, issue classifier.
+  - `functions/python/support_agent.py`: Planner + executor for Extension, using REST tools and syncing approval state between Django and the gateway.
 - **`custom_cognibot/`**
-  - Thin-proxy hooks used for local Cognibot → standalone agent server integration.
+  - Thin-proxy hooks used for local Cognibot → standalone agent server integration, including `/chat/stream` SSE forwarding for Teams progress updates.
 - **`agent_server.py`**
   - Standalone Flask/SSE server that exposes the agent as HTTP (`/chat`, `/chat/stream`, webchat UI, admin UI, docs UI).
   - Hosts admin configuration, tool override, scheduler, document catalog, and conversation-history APIs.
@@ -237,11 +237,12 @@ For each routed message:
 
 - `custom/custom_hooks.py`:
   - Async `api_messages_hook(request, activity)`:
-    - Converts Bot Framework activity → dict, extracts `thread_id`, message ID, text, user ID.
+    - Converts Bot Framework activity → dict, extracts `thread_id`, message ID, text, user ID, and the Bot Framework fields required for proactive sends.
     - Acquires per-thread PostgreSQL advisory lock.
     - Drops duplicate messages via `ProcessedMessage`.
     - Handles smalltalk fast-path.
-    - Integrates issue classification and approval flows (see Implementation Guide).
+    - Persists Teams conversation references so progress updates can be sent proactively later in the turn.
+    - Integrates issue classification and approval flows, including adaptive-card button handling and card-body prefix insertion for recurrence/related-case context.
     - Delegates to `handle_support_turn` in `support_agent.py`.
 - `custom/functions/python/support_agent.py`:
   - Planner:
@@ -249,7 +250,9 @@ For each routed message:
     - Builds a strict JSON plan with steps and risk tags.
   - Executor:
     - Auto-runs safe steps using REST tools.
-    - Creates `Approval` rows for risky steps (with roster targeting).
+    - Creates `Approval` rows for risky steps only when an on-shift reviewer roster exists.
+    - Executes an already approved risky plan without re-opening a second approval gate.
+    - Syncs agentic gateway approval decisions back into the Django `Approval` row for Extension-side authorization consistency.
     - Updates/creates tickets and escalations through typed tools.
 
 ### 5.3 Standalone Agent Server + Webchat
@@ -261,7 +264,7 @@ For each routed message:
   - `/admin` and `/tools`: Serve the React control center.
   - `/docs`: Serves the public documentation library.
 - Thin-proxy Cognibot mode:
-  - `custom_cognibot/` hooks forward Cognibot traffic to `/chat`.
+  - `custom_cognibot/` hooks forward Cognibot traffic to `/chat/stream` for Teams progress updates and use proactive sends for intermediate status.
   - Used for local testing of full Cognibot → agent pipeline.
 
 ### 5.4 Operations Control Center
@@ -406,7 +409,8 @@ The evidence-pack pipeline enforces a configurable wall-clock budget to prevent 
 - **Approvals:**
   - On-shift roster in `custom/helpers/roster.py`.
   - `Approval` table persists pending decisions.
-  - Typed approvals in Teams (text today; upgrade path to Adaptive Cards).
+  - Teams approvals use Adaptive Cards with button payloads mapped back to semantic approve/reject intents.
+  - Empty reviewer lists fail closed instead of allowing any user to approve.
 - **Observability (built-in):**
   - Structured app + audit logs via `logging_setup.py`.
   - In-memory metrics collector (`config/metrics.py`) tracks turn latencies, token usage, and tool success rates. Exposed via `GET /api/metrics`.

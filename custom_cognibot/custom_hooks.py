@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -42,41 +43,51 @@ def _call_agent_simple(text, conv_id, user_id, user_role="technical"):
         return "Sorry, the agent is temporarily unavailable. Please try again."
 
 
-def _extract_user_role(activity) -> str:
-    role = ""
-    try:
-        role = str(getattr(activity, "user_type", "") or "").strip().lower()
-    except Exception:
-        role = ""
+try:
+    from custom.helpers.teams_proactive import (
+        save_conversation_ref as _save_conversation_ref,
+        send_proactive_sync as _send_proactive_sync,
+    )
+except ImportError:
+    def _save_conversation_ref(activity) -> None:  # noqa: E306
+        pass
 
-    if not role:
-        try:
-            role = str(
-                getattr(activity, "user_role", "") or ""
-            ).strip().lower()
-        except Exception:
-            role = ""
+    def _send_proactive_sync(thread_id, text) -> bool:  # noqa: E306
+        return False
 
-    if not role:
-        try:
-            channel_data = (
-                getattr(activity, "channel_data", None)
-                or getattr(activity, "channelData", None)
-                or {}
-            )
-            if isinstance(channel_data, dict):
-                role = str(channel_data.get("user_role", "")).strip().lower()
-        except Exception:
-            role = ""
-
-    return "business" if role == "business" else "technical"
+try:
+    from custom.helpers.activity import extract_user_role as _extract_user_role
+except ImportError:
+    # Fallback when custom/ is not on the path (standalone cognibot deploy)
+    def _extract_user_role(activity) -> str:
+        def _s(v) -> str:
+            return str(v or "").strip().lower()
+        role = _s(getattr(activity, "user_type", None)) or _s(getattr(activity, "user_role", None))
+        if not role:
+            cd = getattr(activity, "channel_data", None) or getattr(activity, "channelData", None) or {}
+            if isinstance(cd, dict):
+                role = _s(cd.get("user_role"))
+        return "business" if role == "business" else "technical"
 
 
 def _extract_activity_text(activity) -> str:
+    """Return message text, falling back to Adaptive Card Action.Submit value."""
     try:
-        return (getattr(activity, "text", "") or "").strip()
+        text = (getattr(activity, "text", "") or "").strip()
+        if text:
+            return text
+        value = getattr(activity, "value", None)
+        if value is None and isinstance(activity, dict):
+            value = activity.get("value")
+        if isinstance(value, dict):
+            action = str(value.get("action") or "").strip().lower()
+            if action == "approve":
+                return "approve"
+            if action in ("reject", "cancel"):
+                return action
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 class AgentProxyDialog(ComponentDialog):
@@ -121,17 +132,74 @@ class AgentProxyDialog(ComponentDialog):
         except Exception:
             pass
 
-        logger.info("AgentProxyDialog: calling agent for '%s'", text[:80])
-        loop = asyncio.get_event_loop()
-        try:
-            reply_text = await loop.run_in_executor(
-                _executor, _call_agent_simple, text, conv_id, user_id, user_role
-            )
-        except Exception as e:
-            logger.error("AgentProxyDialog agent call failed: %s", e)
-            reply_text = "Sorry, the agent is temporarily unavailable."
+        logger.info("AgentProxyDialog: streaming agent for '%s'", text[:80])
 
-        logger.info("AgentProxyDialog: sending reply (%d chars)", len(reply_text))
+        loop = asyncio.get_event_loop()
+        event_queue: asyncio.Queue = asyncio.Queue()
+
+        def _stream_to_queue():
+            evt_name = "message"
+            done_emitted = False
+            try:
+                resp = requests.post(
+                    f"{AGENT_SERVER_URL}/chat/stream",
+                    json={
+                        "message": text,
+                        "session_id": conv_id,
+                        "user_id": user_id,
+                        "user_role": user_role,
+                    },
+                    stream=True,
+                    timeout=AGENT_TIMEOUT,
+                )
+                resp.raise_for_status()
+                for raw_line in resp.iter_lines():
+                    if not raw_line:
+                        continue
+                    line = (
+                        raw_line.decode("utf-8")
+                        if isinstance(raw_line, bytes)
+                        else raw_line
+                    )
+                    if line.startswith("event:"):
+                        evt_name = line[6:].strip()
+                    elif line.startswith("data:"):
+                        try:
+                            payload = json.loads(line[5:].strip())
+                        except Exception:
+                            payload = line[5:].strip()
+                        loop.call_soon_threadsafe(
+                            event_queue.put_nowait, (evt_name, payload)
+                        )
+                        if evt_name == "done":
+                            done_emitted = True
+                        evt_name = "message"
+            except Exception as e:
+                logger.error("AgentProxyDialog stream error: %s", e)
+            if not done_emitted:
+                loop.call_soon_threadsafe(
+                    event_queue.put_nowait,
+                    ("done", "Sorry, the agent is temporarily unavailable. Please try again."),
+                )
+
+        threading.Thread(target=_stream_to_queue, daemon=True).start()
+
+        reply_text = "Sorry, the agent is temporarily unavailable."
+        while True:
+            try:
+                evt_name, payload = await asyncio.wait_for(
+                    event_queue.get(), timeout=float(AGENT_TIMEOUT)
+                )
+            except asyncio.TimeoutError:
+                reply_text = "Sorry, the agent timed out. Please try again."
+                break
+            if evt_name == "progress":
+                await turn_context.send_activity(str(payload))
+            elif evt_name == "done":
+                reply_text = str(payload)
+                break
+
+        logger.info("AgentProxyDialog: sending final reply (%d chars)", len(reply_text))
         await turn_context.send_activity(reply_text)
         return await step_context.cancel_all_dialogs()
 
@@ -139,6 +207,7 @@ class AgentProxyDialog(ComponentDialog):
 class CustomChatbotHooks(ChatbotHooks):
     export_dialogs = [AgentProxyDialog]
 
+    @staticmethod
     async def root_dialog_hook(conv_state, user_state, turn_context):
         """Return AgentProxyDialog for all text messages.
 
@@ -158,20 +227,27 @@ class CustomChatbotHooks(ChatbotHooks):
         logger.info("root_dialog_hook: routing '%s' to AgentProxyDialog", text[:80])
         return AgentProxyDialog
 
+    @staticmethod
     async def storecon_hook(turn_context):
         return None
 
+    @staticmethod
     async def custom_view_hook(request):
         from django.http import HttpResponse
         return HttpResponse(status=400)
 
+    @staticmethod
     async def webchat_join_event_hook(conv_state, user_state, turn_context):
         return None
 
+    @staticmethod
     async def aistudio_dialog_element_hook(conv_state, user_state, turn_context):
         return None
 
+    @staticmethod
     async def api_messages_hook(request, activity):
+        _save_conversation_ref(activity)
+
         text = _extract_activity_text(activity)
         if not text:
             return None
@@ -197,34 +273,104 @@ class CustomChatbotHooks(ChatbotHooks):
             pass
 
         loop = asyncio.get_event_loop()
-        reply_text = await loop.run_in_executor(
-            _executor, _call_agent_simple, text, conv_id, user_id, user_role
-        )
+        event_queue: asyncio.Queue = asyncio.Queue()
+
+        def _stream_to_queue():
+            evt_name = "message"
+            done_emitted = False
+            try:
+                resp = requests.post(
+                    f"{AGENT_SERVER_URL}/chat/stream",
+                    json={
+                        "message": text,
+                        "session_id": conv_id,
+                        "user_id": user_id,
+                        "user_role": user_role,
+                    },
+                    stream=True,
+                    timeout=AGENT_TIMEOUT,
+                )
+                resp.raise_for_status()
+                for raw_line in resp.iter_lines():
+                    if not raw_line:
+                        continue
+                    line = (
+                        raw_line.decode("utf-8")
+                        if isinstance(raw_line, bytes)
+                        else raw_line
+                    )
+                    if line.startswith("event:"):
+                        evt_name = line[6:].strip()
+                    elif line.startswith("data:"):
+                        try:
+                            payload = json.loads(line[5:].strip())
+                        except Exception:
+                            payload = line[5:].strip()
+                        loop.call_soon_threadsafe(
+                            event_queue.put_nowait, (evt_name, payload)
+                        )
+                        if evt_name == "done":
+                            done_emitted = True
+                        evt_name = "message"
+            except Exception as e:
+                logger.error("api_messages_hook stream error: %s", e)
+            if not done_emitted:
+                loop.call_soon_threadsafe(
+                    event_queue.put_nowait,
+                    ("done", "Sorry, the agent is temporarily unavailable. Please try again."),
+                )
+
+        threading.Thread(target=_stream_to_queue, daemon=True).start()
+
+        reply_text = "Sorry, the agent is temporarily unavailable."
+        while True:
+            try:
+                evt_name, payload = await asyncio.wait_for(
+                    event_queue.get(), timeout=float(AGENT_TIMEOUT)
+                )
+            except asyncio.TimeoutError:
+                reply_text = "Sorry, the agent timed out. Please try again."
+                break
+            if evt_name == "progress":
+                progress_payload = payload if isinstance(payload, (str, dict)) else str(payload)
+                _send_proactive_sync(conv_id, progress_payload)
+            elif evt_name == "done":
+                reply_text = str(payload)
+                break
         return {"type": "message", "text": reply_text}
 
+    @staticmethod
     async def api_reply_hook(request, body):
         return body
 
+    @staticmethod
     async def cancel_conv_hook(conv_state, user_state, turn_context):
         return None
 
+    @staticmethod
     async def voice_bot_start_conv_hook(request, file_data):
         return file_data
 
+    @staticmethod
     async def voice_init_conv_hook(conversation_id, body):
         return body or {}
 
+    @staticmethod
     async def voice_end_conv_hook(conversation_id, request=None, activity=None):
         return None
 
+    @staticmethod
     async def sms_bot_start_conv_hook(body):
         return body or {}
 
+    @staticmethod
     async def sms_bot_reply_hook(request, conversation_id, activity_id, end_conversation, response_list):
         return response_list or []
 
+    @staticmethod
     async def whatsapp_data_channel(flow_data):
         return flow_data or {}
 
+    @staticmethod
     async def custom_schedules():
         return None

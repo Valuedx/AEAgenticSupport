@@ -126,20 +126,21 @@ Regardless of channel, messages are normalized and sent to the **Message Gateway
 
 - **File:** `custom/custom_hooks.py`
 - Key responsibilities:
-  1. Normalize Bot Framework `activity` → dict (thread ID, message ID, text, user ID).
+  1. Normalize Bot Framework `activity` → dict (thread ID, message ID, text, user ID, Teams conversation-reference fields).
   2. Acquire per‑thread PostgreSQL advisory lock:
      - **File:** `custom/helpers/locks.py`
   3. Drop duplicate messages:
      - **File:** `custom/helpers/db.py`
      - **Model:** `ProcessedMessage` in `custom/models.py`
   4. Handle smalltalk fast‑path (`hi`, `hello`, etc.).
-  5. Classify multi‑issue context and approvals:
+  5. Persist the Teams conversation reference so progress updates can be pushed proactively later in the same turn.
+  6. Classify multi‑issue context and approvals:
      - **File:** `custom/helpers/issue_classifier.py`
-  6. Route to the **support agent**:
+  7. Route to the **support agent**:
      - **File:** `custom/functions/python/support_agent.py`
      - **Entry:** `handle_support_turn(...)`
 
-In **agentic mode**, `support_agent.py` acts mainly as a planner/executor front for the orchestrator; the full LLM+tool loop is handled in `agents/orchestrator.py`. In deterministic mode, `support_agent.py` can execute a fixed plan using REST tools only.
+In **agentic mode**, `support_agent.py` acts mainly as a planner/executor front for the orchestrator; the full LLM+tool loop is handled in `agents/orchestrator.py`, but Django `Approval` rows are still synchronized after gateway decisions so the Extension hook stays authoritative. In deterministic mode, `support_agent.py` can execute a fixed plan using REST tools only; risky plans only open an approval gate when a non-empty on-shift roster exists, and an approved plan executes without re-opening approval.
 
 ### 2.2 Webchat / AI Studio adapters
 

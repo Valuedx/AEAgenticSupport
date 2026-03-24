@@ -1038,7 +1038,7 @@ The agent sends real-time progress messages to users during long investigations 
 
 - **Agent Server** — `POST /chat/stream` sends SSE `event: progress` with status text during investigation, then `event: done` with the final response. The original `POST /chat` remains for backwards compatibility.
 
-- **Cognibot proxy** — When `AGENT_PROGRESS_ENABLED=true` (default), uses the SSE endpoint and sends proactive messages via Bot Framework's `turn_context.send_activity()`. Falls back to `/chat` if proactive messaging isn't available.
+- **Cognibot proxy** — The Teams `api_messages_hook()` path now also uses the SSE endpoint and forwards `event: progress` updates through stored Teams conversation references via proactive Bot Framework sends. `event: done` is returned as the final reply. The legacy `/chat` path remains for backward compatibility, but Teams progress now depends on `/chat/stream`.
 
 ### 11.5 Adding New Tools
 

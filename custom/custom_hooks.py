@@ -11,7 +11,6 @@ Implements the AI Studio Cognibot hook contract:
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 
 from asgiref.sync import sync_to_async
@@ -26,10 +25,12 @@ except ImportError:
 
 logger = logging.getLogger("support_agent.hooks")
 
+from custom.helpers.activity import classify_approval_intent, extract_user_role
 from custom.helpers.locks import pg_advisory_lock
+from custom.helpers.teams_proactive import save_conversation_ref, send_proactive_sync
 from custom.helpers.db import is_duplicate_message, mark_message_processed
 from custom.helpers.teams import make_text_reply
-from custom.models import ConversationState, Case, Approval
+from custom.models import ConversationState as CogniState, Case, Approval
 from custom.functions.python.support_agent import handle_support_turn
 from custom.helpers.issue_classifier import (
     classify_message,
@@ -45,26 +46,39 @@ def _activity_to_dict(activity) -> dict:
     """Normalize a Bot Framework Activity (object or dict) to a plain dict."""
     if isinstance(activity, dict):
         result = dict(activity)
-        if not result.get("user_type"):
-            channel_data = (
-                result.get("channelData")
-                or result.get("channel_data")
-                or {}
-            )
-            if isinstance(channel_data, dict):
-                role = str(channel_data.get("user_role", "")).strip().lower()
-                if role in {"business", "technical"}:
-                    result["user_type"] = role
-        return result
-    result = {}
-    for attr in ("text", "id"):
-        result[attr] = getattr(activity, attr, None) or ""
-    conv = getattr(activity, "conversation", None)
-    result["conversation"] = {"id": getattr(conv, "id", "") or ""} if conv else {}
-    frm = getattr(activity, "from_property", None) or getattr(activity, "from", None)
-    result["from"] = {"id": getattr(frm, "id", "") or ""} if frm else {}
-    if hasattr(activity, "user_type"):
-        result["user_type"] = activity.user_type
+    else:
+        result = {}
+        for attr in ("text", "id"):
+            result[attr] = getattr(activity, attr, None) or ""
+        conv = getattr(activity, "conversation", None)
+        result["conversation"] = {"id": getattr(conv, "id", "") or ""} if conv else {}
+        frm = getattr(activity, "from_property", None) or getattr(activity, "from", None)
+        result["from"] = {"id": getattr(frm, "id", "") or ""} if frm else {}
+        value = getattr(activity, "value", None)
+        if value is not None:
+            result["value"] = value
+        result["serviceUrl"] = (
+            getattr(activity, "service_url", None)
+            or getattr(activity, "serviceUrl", None)
+            or ""
+        )
+        result["channelId"] = (
+            getattr(activity, "channel_id", None)
+            or getattr(activity, "channelId", None)
+            or ""
+        )
+        channel_data = (
+            getattr(activity, "channel_data", None)
+            or getattr(activity, "channelData", None)
+            or {}
+        )
+        if channel_data:
+            result["channelData"] = channel_data
+        rcpt = getattr(activity, "recipient", None)
+        result["recipient"] = {"id": getattr(rcpt, "id", "") or ""} if rcpt else {}
+    # Normalise user_type using the shared helper so all paths agree
+    if not result.get("user_type"):
+        result["user_type"] = extract_user_role(result)
     return result
 
 
@@ -78,7 +92,24 @@ def _extract_message_id(activity: dict) -> str:
 
 
 def _extract_text(activity: dict) -> str:
-    return (activity.get("text") or "").strip()
+    """Return message text, falling back to Adaptive Card Action.Submit value.
+
+    When a user clicks an Adaptive Card button Teams sends an activity where
+    ``text`` is empty and the button payload is in ``value``.  Map recognised
+    ``value.action`` keys back to the approval words the rest of the pipeline
+    expects so that card button clicks are handled identically to typed replies.
+    """
+    text = (activity.get("text") or "").strip()
+    if text:
+        return text
+    value = activity.get("value")
+    if isinstance(value, dict):
+        action = str(value.get("action") or "").strip().lower()
+        if action == "approve":
+            return "approve"
+        if action in ("reject", "cancel"):
+            return action
+    return ""
 
 
 def _extract_user_id(activity: dict) -> str:
@@ -93,35 +124,32 @@ def _is_smalltalk(text: str) -> bool:
     )
 
 
-def _classify_approval_intent(text: str) -> str:
-    msg = (text or "").strip().lower()
-    if not msg:
-        return "other"
+_classify_approval_intent = classify_approval_intent  # shared implementation
 
-    if re.search(r"\b(cancel|never mind|abort|forget it)\b", msg):
-        return "cancel"
 
-    if re.search(
-        r"\b(reject|deny|decline|nope|don'?t do|do not|not now)\b", msg
-    ):
-        return "reject"
-
-    if re.search(
-        r"\b(approve|approved|go ahead|proceed|yes|sure|do it|run it)\b",
-        msg,
-    ):
-        return "approve"
-
-    return "other"
+def _prepend_result_prefix(result: dict, prefix: str) -> dict:
+    if result.get("attachments"):
+        card_body = result["attachments"][0].get("content", {}).get("body")
+        if isinstance(card_body, list):
+            card_body.insert(0, {"type": "TextBlock", "text": prefix.strip(), "wrap": True})
+            return result
+    result["text"] = prefix + result.get("text", "")
+    return result
 
 
 # ── Synchronous processing core (runs inside sync_to_async) ──
 
-def _process_message_sync(activity_dict: dict):
+def _process_message_sync(activity_dict: dict, on_progress=None):
     """
     All Django ORM + business logic runs here synchronously.
     Wrapped by sync_to_async in the async hook.
+
+    *on_progress* is an optional ``fn(status_text: str)`` that sends interim
+    progress messages back to the Teams channel via proactive send.
     """
+    # Persist the conversation reference so proactive sends work later
+    save_conversation_ref(activity_dict)
+
     thread_id = _extract_thread_id(activity_dict)
     msg_id = _extract_message_id(activity_dict)
     text = _extract_text(activity_dict)
@@ -138,7 +166,7 @@ def _process_message_sync(activity_dict: dict):
         mark_message_processed(thread_id, msg_id)
 
         if _is_smalltalk(text):
-            cs, _ = ConversationState.objects.get_or_create(
+            cs, _ = CogniState.objects.get_or_create(
                 thread_id=thread_id
             )
             cs.last_user_message_id = msg_id
@@ -149,7 +177,7 @@ def _process_message_sync(activity_dict: dict):
             )
 
         # ── Load conversation state and active case ──
-        cs, _ = ConversationState.objects.get_or_create(thread_id=thread_id)
+        cs, _ = CogniState.objects.get_or_create(thread_id=thread_id)
         active_case = None
         if cs.active_case_id:
             active_case = Case.objects.filter(
@@ -166,20 +194,21 @@ def _process_message_sync(activity_dict: dict):
                 approval_intent = _classify_approval_intent(text)
 
                 if approval_intent == "approve":
-                    if (user_id and appr.requested_to
-                            and user_id not in appr.requested_to):
+                    if not appr.requested_to:
+                        return make_text_reply(
+                            "This approval has no authorized reviewers configured. "
+                            "Please contact an administrator."
+                        )
+                    if user_id and user_id not in appr.requested_to:
                         return make_text_reply(
                             "You are not authorized to approve/reject "
                             "this action. Authorized reviewers: "
                             f"{', '.join(appr.requested_to)}"
                         )
-                    appr.status = "APPROVED"
-                    appr.decided_by = user_id
-                    appr.decided_at = timezone.now()
-                    appr.save()
                     return handle_support_turn(
                         thread_id=thread_id,
                         teams_message_id=msg_id,
+                        on_progress=on_progress,
                         user_text=text,
                         raw_activity=activity_dict,
                     )
@@ -219,6 +248,7 @@ def _process_message_sync(activity_dict: dict):
                     teams_message_id=msg_id,
                     user_text=text,
                     raw_activity=activity_dict,
+                    on_progress=on_progress,
                 )
 
             old_case.recurrence_count += 1
@@ -262,9 +292,9 @@ def _process_message_sync(activity_dict: dict):
                 teams_message_id=msg_id,
                 user_text=text,
                 raw_activity=activity_dict,
+                on_progress=on_progress,
             )
-            result["text"] = prefix + result.get("text", "")
-            return result
+            return _prepend_result_prefix(result, prefix)
 
         elif classification == IssueClassification.NEW_ISSUE:
             cs.active_case_id = None
@@ -283,8 +313,9 @@ def _process_message_sync(activity_dict: dict):
                 teams_message_id=msg_id,
                 user_text=text,
                 raw_activity=activity_dict,
+                on_progress=on_progress,
             )
-            new_cs = ConversationState.objects.get(thread_id=thread_id)
+            new_cs = CogniState.objects.get(thread_id=thread_id)
             if parent_id and new_cs.active_case_id:
                 link_cases(parent_id, new_cs.active_case_id, "CASCADE")
             prefix = (
@@ -292,8 +323,7 @@ def _process_message_sync(activity_dict: dict):
                 "appears to be a separate problem. "
                 "Tracking as a linked case.\n\n"
             )
-            result["text"] = prefix + result.get("text", "")
-            return result
+            return _prepend_result_prefix(result, prefix)
 
         elif classification == IssueClassification.FOLLOWUP:
             target_case = (
@@ -334,6 +364,7 @@ def _process_message_sync(activity_dict: dict):
             teams_message_id=msg_id,
             user_text=text,
             raw_activity=activity_dict,
+            on_progress=on_progress,
         )
 
 
@@ -342,13 +373,21 @@ def _process_message_sync(activity_dict: dict):
 class CustomChatbotHooks(ChatbotHooks):
     export_dialogs = []
 
+    @staticmethod
     async def api_messages_hook(request, activity):
         """
         Invoked for every api/messages REST API call.
-        Normalises the Activity, then delegates to synchronous processing.
+        Normalises the Activity, delegates to synchronous processing, and
+        wires ``send_proactive_sync`` as the progress callback so the agent
+        can push interim status messages to Teams during long investigations.
         Returns a dict ``{"type": "message", "text": "..."}`` or None.
         """
         activity_dict = _activity_to_dict(activity)
+        thread_id = _extract_thread_id(activity_dict)
+
+        def _on_progress(status_text: str) -> None:
+            send_proactive_sync(thread_id, status_text)
+
         return await sync_to_async(
             _process_message_sync, thread_sensitive=False
-        )(activity_dict)
+        )(activity_dict, on_progress=_on_progress)

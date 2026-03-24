@@ -13,13 +13,12 @@ from __future__ import annotations
 import uuid
 import logging
 import os
-import re
 import sys
-from datetime import datetime
 
 from django.utils import timezone
 
-from custom.models import ConversationState, Case, Approval
+from custom.helpers.activity import classify_approval_intent, extract_user_role
+from custom.models import ConversationState as CogniState, Case, Approval
 from custom.helpers.teams import make_text_reply, make_approval_card
 from custom.helpers.tools_rest import RestToolClient, ToolError
 from custom.helpers.rag import rag_search_sop, rag_search_tools
@@ -28,8 +27,8 @@ from custom.helpers.roster import pick_onshift_techs
 
 logger = logging.getLogger("support_agent")
 
-TOOL_BASE_URL = os.environ.get("TOOL_BASE_URL", "http://localhost:9999")
-TOOL_AUTH_TOKEN = os.environ.get("TOOL_AUTH_TOKEN", "")
+# Read from the canonical Extension settings rather than duplicating os.environ calls
+from custom.settings import TOOL_BASE_URL, TOOL_AUTH_TOKEN  # noqa: E402
 
 # Ensure standalone modules are importable
 _project_root = os.path.dirname(
@@ -55,40 +54,23 @@ _gateway = None
 
 
 def _get_gateway():
+    """Return the shared MessageGateway instance, retrying on each call if a
+    previous attempt failed.  None is never cached so transient import errors
+    (e.g. missing env var on first boot) are retried on the next message.
+    """
     global _gateway
     if _gateway is None:
-        _gateway = _get_orchestrator()
+        candidate = _get_orchestrator()
+        if candidate is not None:
+            _gateway = candidate
+        return candidate
     return _gateway
 
 
-def _extract_user_role(raw_activity: dict) -> str:
-    role = str(
-        raw_activity.get("user_type")
-        or raw_activity.get("user_role")
-        or ""
-    ).strip().lower()
-
-    if not role:
-        channel_data = (
-            raw_activity.get("channelData")
-            or raw_activity.get("channel_data")
-            or {}
-        )
-        if isinstance(channel_data, dict):
-            role = str(channel_data.get("user_role", "")).strip().lower()
-
-    return "business" if role == "business" else "technical"
+_extract_user_role = extract_user_role  # backwards-compat alias
 
 
-def _classify_plan_approval_intent(user_text: str) -> str:
-    text = (user_text or "").strip().lower()
-    if not text:
-        return "other"
-    if re.search(r"\b(approve|approved|go ahead|proceed|yes|sure|do it)\b", text):
-        return "approve"
-    if re.search(r"\b(reject|deny|decline|nope|cancel|abort|do not|don't)\b", text):
-        return "reject"
-    return "other"
+_classify_plan_approval_intent = classify_approval_intent  # shared implementation
 
 
 def _sync_state_from_gateway(gw, thread_id: str, case: Case) -> None:
@@ -132,7 +114,7 @@ def _sync_state_from_gateway(gw, thread_id: str, case: Case) -> None:
 
 
 def _get_or_create_case(thread_id: str) -> Case:
-    cs, _ = ConversationState.objects.get_or_create(thread_id=thread_id)
+    cs, _ = CogniState.objects.get_or_create(thread_id=thread_id)
     if cs.active_case_id:
         c = Case.objects.filter(case_id=cs.active_case_id).first()
         if c and c.state not in {"CLOSED", "CANCELLED"}:
@@ -270,7 +252,8 @@ def _build_plan_with_rag(client: RestToolClient, case: Case,
     }
 
 
-def _execute_plan(client: RestToolClient, case: Case, plan: dict) -> str:
+def _execute_plan(client: RestToolClient, case: Case, plan: dict,
+                  approval_granted: bool = False) -> str | dict:
     if case.owner_type == "HUMAN_TEAM" or case.state == "WAITING_ON_TEAM":
         client.call("/tools/ticket/update", {
             "ticket_id": case.ticket_id,
@@ -287,9 +270,17 @@ def _execute_plan(client: RestToolClient, case: Case, plan: dict) -> str:
         if ask:
             needs_approval.append(step)
 
-    if needs_approval:
-        now_local = datetime.now()
-        onshift = pick_onshift_techs(now_local=now_local)
+    if needs_approval and not approval_granted:
+        onshift = pick_onshift_techs(now_local=timezone.now())
+        if not onshift:
+            case.state = "PLANNING"
+            case.updated_at = timezone.now()
+            case.save()
+            return make_text_reply(
+                "No support technicians are currently on shift. "
+                "Cannot send for approval. Please try again during business hours "
+                "or contact your team lead."
+            )
 
         Approval.objects.create(
             case_id=case.case_id,
@@ -309,12 +300,11 @@ def _execute_plan(client: RestToolClient, case: Case, plan: dict) -> str:
             f"Step {s['index']}: {s.get('capability_id', s.get('type'))}"
             for s in needs_approval
         ]
-        card = make_approval_card(
+        return make_approval_card(
             case_id=case.case_id,
             action_summary="; ".join(step_labels),
             reviewers=onshift,
         )
-        return card.get("text", str(card))
 
     for step in plan["steps"]:
         try:
@@ -360,7 +350,8 @@ def _execute_plan(client: RestToolClient, case: Case, plan: dict) -> str:
 
 
 def handle_support_turn(thread_id: str, teams_message_id: str,
-                        user_text: str, raw_activity: dict) -> dict:
+                        user_text: str, raw_activity: dict,
+                        on_progress=None) -> dict:
     """
     Main entry point called from custom_hooks.py.
     Routes to agentic orchestrator or plan-execute mode.
@@ -369,7 +360,7 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
     _user_type = _extract_user_role(raw_activity)
 
     # Populate user_type on the active case if not yet set
-    cs = ConversationState.objects.filter(thread_id=thread_id).first()
+    cs = CogniState.objects.filter(thread_id=thread_id).first()
     if cs and cs.active_case_id:
         Case.objects.filter(
             case_id=cs.active_case_id, user_type__isnull=True,
@@ -384,17 +375,19 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
                 thread_id, _user_id, _user_type
             )
 
+            _pre_approval = None
+            _pre_state = case.state
             if case.state == "WAITING_APPROVAL":
-                pending = Approval.objects.filter(
+                _pre_approval = Approval.objects.filter(
                     case_id=case.case_id, status="PENDING",
                 ).order_by("-created_at").first()
                 if (
-                    pending
-                    and pending.requested_to
+                    _pre_approval
+                    and _pre_approval.requested_to
                     and session.pending_action
                 ):
                     action = dict(session.pending_action)
-                    action["authorized_users"] = list(pending.requested_to)
+                    action["authorized_users"] = list(_pre_approval.requested_to)
                     session.pending_action = action
 
             response = gw.process_message(
@@ -402,9 +395,24 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
                 user_message=user_text,
                 user_id=_user_id,
                 user_role=_user_type,
+                on_progress=on_progress,
             )
 
             _sync_state_from_gateway(gw, thread_id, case)
+            if (
+                _pre_approval
+                and _pre_state == "WAITING_APPROVAL"
+                and case.state != "WAITING_APPROVAL"
+            ):
+                approval_intent = _classify_plan_approval_intent(user_text)
+                _pre_approval.status = (
+                    "APPROVED" if approval_intent == "approve" else "REJECTED"
+                )
+                _pre_approval.decided_by = _user_id
+                _pre_approval.decided_at = timezone.now()
+                _pre_approval.save()
+            if isinstance(response, dict):
+                return response  # Adaptive Card or structured reply — pass through
             return make_text_reply(response)
 
     # ── Plan-execute mode: deterministic plan via RAG ──
@@ -429,14 +437,17 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
         if appr:
             if (
                 decision == "APPROVE"
-                and _user_id
-                and appr.requested_to
-                and _user_id not in appr.requested_to
             ):
-                return make_text_reply(
-                    "You are not authorized to approve this action. "
-                    f"Authorized reviewers: {', '.join(appr.requested_to)}"
-                )
+                if not appr.requested_to:
+                    return make_text_reply(
+                        "This approval has no authorized reviewers configured. "
+                        "Please contact an administrator."
+                    )
+                if _user_id and _user_id not in appr.requested_to:
+                    return make_text_reply(
+                        "You are not authorized to approve this action. "
+                        f"Authorized reviewers: {', '.join(appr.requested_to)}"
+                    )
 
             appr.status = "APPROVED" if decision == "APPROVE" else "REJECTED"
             appr.decided_by = (
@@ -457,8 +468,12 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
             case.state = "EXECUTING"
             case.updated_at = timezone.now()
             case.save()
-            msg = _execute_plan(client, case, case.latest_plan_json)
-            return make_text_reply(msg)
+            result = _execute_plan(
+                client, case, case.latest_plan_json, approval_granted=True
+            )
+            if isinstance(result, dict):
+                return result
+            return make_text_reply(result)
 
     case.state = "PLANNING"
     case.updated_at = timezone.now()
@@ -470,5 +485,7 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
     case.updated_at = timezone.now()
     case.save()
 
-    msg = _execute_plan(client, case, plan)
-    return make_text_reply(msg)
+    result = _execute_plan(client, case, plan)
+    if isinstance(result, dict):
+        return result
+    return make_text_reply(result)
