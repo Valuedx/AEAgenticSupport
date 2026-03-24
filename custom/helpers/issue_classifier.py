@@ -87,7 +87,18 @@ def classify_message(thread_id: str, user_text: str,
     return IssueClassification.NEW_ISSUE, None
 
 
-def _find_recurrence_match(thread_id: str, msg_lower: str) -> Optional[str]:
+_FAILURE_WORDS = frozenset([
+    "fail", "error", "broken", "down", "stuck", "issue", "problem",
+])
+
+
+def _match_resolved_workflow(thread_id: str, msg_lower: str) -> Optional[str]:
+    """Return the case_id of the most recently resolved case whose workflow name
+    matches a token in *msg_lower*, or ``None`` if no match is found.
+
+    Single implementation shared by recurrence, follow-up, and failure-gate
+    resolution checks.
+    """
     resolved = Case.objects.filter(
         thread_id=thread_id,
         state__in=["CLOSED", "RESOLVED_PENDING_CONFIRMATION"],
@@ -101,25 +112,18 @@ def _find_recurrence_match(thread_id: str, msg_lower: str) -> Optional[str]:
     return None
 
 
+def _find_recurrence_match(thread_id: str, msg_lower: str) -> Optional[str]:
+    return _match_resolved_workflow(thread_id, msg_lower)
+
+
 def _find_followup_target(thread_id: str, msg_lower: str,
                           active_case: Case) -> str:
-    resolved = Case.objects.filter(
-        thread_id=thread_id,
-        state__in=["CLOSED", "RESOLVED_PENDING_CONFIRMATION"],
-    ).order_by("-updated_at")[:5]
-
-    for case in resolved:
-        for wf in (case.workflows_involved or []):
-            wf_parts = wf.lower().replace("_", " ").split()
-            if any(part in msg_lower for part in wf_parts if len(part) > 3):
-                return case.case_id
-    return active_case.case_id
+    return _match_resolved_workflow(thread_id, msg_lower) or active_case.case_id
 
 
 def _check_cascade(thread_id: str, msg_lower: str,
                    active_case: Case) -> Optional[str]:
-    failure_words = ["fail", "error", "broken", "down", "stuck", "issue"]
-    if not any(fw in msg_lower for fw in failure_words):
+    if not any(fw in msg_lower for fw in _FAILURE_WORDS):
         return None
 
     active_wfs = {wf.lower() for wf in (active_case.workflows_involved or [])}
@@ -135,23 +139,9 @@ def _check_cascade(thread_id: str, msg_lower: str,
 
 def _check_resolved_workflow_match(thread_id: str,
                                    msg_lower: str) -> Optional[str]:
-    failure_words = [
-        "fail", "error", "broken", "down", "stuck", "issue", "problem",
-    ]
-    if not any(fw in msg_lower for fw in failure_words):
+    if not any(fw in msg_lower for fw in _FAILURE_WORDS):
         return None
-
-    resolved = Case.objects.filter(
-        thread_id=thread_id,
-        state__in=["CLOSED", "RESOLVED_PENDING_CONFIRMATION"],
-    ).order_by("-updated_at")[:5]
-
-    for case in resolved:
-        for wf in (case.workflows_involved or []):
-            wf_parts = wf.lower().replace("_", " ").split()
-            if any(part in msg_lower for part in wf_parts if len(part) > 3):
-                return case.case_id
-    return None
+    return _match_resolved_workflow(thread_id, msg_lower)
 
 
 def _llm_classify(thread_id: str, msg_lower: str,

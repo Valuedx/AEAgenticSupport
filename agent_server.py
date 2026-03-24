@@ -33,7 +33,7 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
 
 from config.settings import CONFIG
-from main import handle_chat_message
+from main import gateway as _main_gateway, handle_chat_message
 from state.agent_catalog import get_agent_catalog
 from state.app_config import (
     get_app_config_store,
@@ -1424,8 +1424,7 @@ def api_approvals_decision():
             return jsonify({"error": f"Conversation is in phase '{state.phase}', not 'awaiting_approval'"}), 400
 
         # Delegate to the gateway to process the decision as a virtual user message
-        from gateway.message_gateway import gateway
-        response = gateway.process_message(cid, decision, user_id=approver_id)
+        response = _main_gateway.process_message(cid, decision, user_id=approver_id)
         
         return jsonify({
             "success": True,
