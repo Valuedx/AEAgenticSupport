@@ -10,6 +10,11 @@ from tools.catalog import ToolCatalog, ToolCatalogEntry
 from tools.executor import ToolExecutor
 
 
+def _strip_tool_prefix(name: str) -> str:
+    text = str(name or "")
+    return text[5:] if text.startswith("tool-") else text
+
+
 class TurnToolSet:
     """Turn-local hydrated tool set for the orchestrator loop."""
 
@@ -28,7 +33,7 @@ class TurnToolSet:
 
         seen: set[str] = set()
         for name in tool_names:
-            clean = str(name or "").removeprefix("tool-")
+            clean = _strip_tool_prefix(name)
             if clean and clean not in seen and clean in hydrator.catalog:
                 self._tool_names.append(clean)
                 seen.add(clean)
@@ -37,7 +42,7 @@ class TurnToolSet:
         return list(self._tool_names)
 
     def get_tool(self, name: str) -> Optional[ToolDefinition]:
-        clean = str(name or "").removeprefix("tool-")
+        clean = _strip_tool_prefix(name)
         if clean not in self._tool_names:
             return None
         if clean not in self._definitions:
@@ -48,7 +53,7 @@ class TurnToolSet:
         return self._definitions.get(clean)
 
     def _get_handler(self, name: str) -> Optional[Callable]:
-        clean = str(name or "").removeprefix("tool-")
+        clean = _strip_tool_prefix(name)
         if clean not in self._tool_names:
             return None
         if clean in self._handlers:
@@ -67,7 +72,7 @@ class TurnToolSet:
                 tool_name=tool_name,
             )
         if (
-            str(tool_name or "").removeprefix("tool-") == "discover_tools"
+            _strip_tool_prefix(tool_name) == "discover_tools"
             and self._feedback_agent_id
             and "_agent_id" not in kwargs
         ):
@@ -105,7 +110,7 @@ class ToolHydrator:
         self._is_llm_callable = is_llm_callable
 
     def hydrate_tool(self, name: str) -> Optional[ToolDefinition]:
-        clean = str(name or "").removeprefix("tool-")
+        clean = _strip_tool_prefix(name)
         if clean in self._tools_cache:
             return self._tools_cache[clean]
         entry = self.catalog.get(clean)
@@ -119,14 +124,14 @@ class ToolHydrator:
         return definition
 
     def get_tool_definition(self, name: str) -> Optional[ToolDefinition]:
-        clean = str(name or "").removeprefix("tool-")
+        clean = _strip_tool_prefix(name)
         if clean in self._tools_cache:
             return self._tools_cache.get(clean)
         entry = self.catalog.get(clean)
         return entry.to_tool_definition() if entry else None
 
     def get_handler(self, name: str, *, persist: bool = True) -> Optional[Callable]:
-        clean = str(name or "").removeprefix("tool-")
+        clean = _strip_tool_prefix(name)
         if clean in self._handlers_cache:
             return self._handlers_cache.get(clean)
         if clean not in self.catalog:
@@ -154,7 +159,7 @@ class ToolHydrator:
         seen: set[str] = set()
 
         def _maybe_add(name: str):
-            clean = str(name or "").removeprefix("tool-")
+            clean = _strip_tool_prefix(name)
             if not clean or clean in seen:
                 return
             entry = self.catalog.get(clean)

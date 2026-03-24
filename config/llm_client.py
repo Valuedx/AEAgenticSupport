@@ -1,6 +1,7 @@
 import logging
 import threading
 import typing
+from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 try:
@@ -151,7 +152,7 @@ class VertexAIClient:
 
     def _record_generation(self, name: str, input: typing.Any,
                            output: typing.Any, resp: typing.Any,
-                           metadata: dict | None = None) -> None:
+                           metadata: Optional[dict] = None) -> None:
         """Send an LLM generation event to LangFuse (non-blocking)."""
         trace = get_current_trace()
         if trace is None:
@@ -209,7 +210,7 @@ class _LazyLLMClient:
     (e.g. run_rag_index.py) that import tool modules but never actually
     invoke the LLM.
     """
-    _instance: "VertexAIClient | None" = None
+    _instance: Optional["VertexAIClient"] = None
 
     def _get(self) -> "VertexAIClient":
         if self._instance is None:

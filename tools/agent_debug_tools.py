@@ -10,7 +10,7 @@ import time
 import re
 import json
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional, Union
 
 from config.llm_client import llm_client
 from tools.base import get_ae_client
@@ -70,7 +70,7 @@ def _is_trigger_line(line: str) -> bool:
     return bool(TIMESTAMP_RE.match(line)) and bool(ERROR_KEYWORDS.search(line))
 
 
-def _parse_log_timestamp(ts_str: str) -> datetime | None:
+def _parse_log_timestamp(ts_str: str) -> Optional[datetime]:
     """Parse a log timestamp string to a datetime (naive, for window comparison)."""
     if not ts_str:
         return None
@@ -304,8 +304,8 @@ def _build_ai_prompt(all_error_blocks: list[dict]) -> str:
 
 def analyze_agent_logs(
     agent_id: str,
-    from_date: str | int = "",
-    to_date: str | int = "",
+    from_date: Union[str, int] = "",
+    to_date: Union[str, int] = "",
     tail_lines: int = 100,
     **kwargs: Any,
 ) -> dict:

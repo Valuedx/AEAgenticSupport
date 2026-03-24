@@ -13,9 +13,9 @@ logger = logging.getLogger("support_agent.rag")
 try:
     from rag.engine import get_rag_engine
     _USE_DIRECT = True
-except ImportError:
+except Exception as exc:
     _USE_DIRECT = False
-    logger.info("Direct RAG engine unavailable, using REST stubs")
+    logger.info("Direct RAG engine unavailable, using REST stubs: %s", exc)
 
 
 def rag_search_sop(client, query: str, top_k: int = 6) -> List[Dict]:

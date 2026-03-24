@@ -14,6 +14,7 @@ import uuid
 import logging
 import os
 import sys
+from typing import Union
 
 from django.utils import timezone
 
@@ -37,7 +38,8 @@ _project_root = os.path.dirname(
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-_USE_AGENTIC = os.environ.get("USE_AGENTIC_MODE", "true").lower() == "true"
+_REQUESTED_AGENTIC = os.environ.get("USE_AGENTIC_MODE", "true").lower() == "true"
+_USE_AGENTIC = _REQUESTED_AGENTIC
 
 
 def _get_orchestrator():
@@ -253,7 +255,7 @@ def _build_plan_with_rag(client: RestToolClient, case: Case,
 
 
 def _execute_plan(client: RestToolClient, case: Case, plan: dict,
-                  approval_granted: bool = False) -> str | dict:
+                  approval_granted: bool = False) -> Union[str, dict]:
     if case.owner_type == "HUMAN_TEAM" or case.state == "WAITING_ON_TEAM":
         client.call("/tools/ticket/update", {
             "ticket_id": case.ticket_id,

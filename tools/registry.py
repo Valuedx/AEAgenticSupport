@@ -27,6 +27,11 @@ audit = logging.getLogger("ops_agent.audit")
 MAX_TOOLS_FOR_FULL_CATALOG = 30
 
 
+def _strip_tool_prefix(name: str) -> str:
+    text = str(name or "")
+    return text[5:] if text.startswith("tool-") else text
+
+
 class ToolRegistry:
     """Central registry for all ops agent tools."""
 
@@ -278,7 +283,7 @@ class ToolRegistry:
     def _entry_from_rag_hit(self, hit: dict) -> tuple[ToolCatalogEntry | None, bool]:
         metadata = hit.get("metadata", {}) or {}
         tool_name = str(
-            metadata.get("tool_name") or hit.get("id", "").removeprefix("tool-")
+            metadata.get("tool_name") or _strip_tool_prefix(hit.get("id", ""))
         ).strip()
         if not tool_name:
             return None, False
@@ -521,7 +526,7 @@ class ToolRegistry:
                     selected_names.append(tool_def.name)
 
             for name in rag_tool_names[:max_rag_tools]:
-                selected_names.append(str(name or "").removeprefix("tool-"))
+                selected_names.append(_strip_tool_prefix(name))
 
         toolset = self.build_turn_toolset(
             selected_names,

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Optional
 
 from config.settings import CONFIG
 
@@ -424,7 +424,7 @@ def _normalize_section(section_name: str, payload: dict[str, Any]) -> dict[str, 
 class AppConfigStore:
     """File-backed store for admin-editable application settings."""
 
-    def __init__(self, path: str | None = None):
+    def __init__(self, path: Optional[str] = None):
         raw_path = path or CONFIG.get(
             "APP_CONTROL_CENTER_PATH", "state/app_control_center.json"
         )
@@ -493,7 +493,7 @@ class AppConfigStore:
         return deepcopy(DEFAULT_SECTIONS[section_name])
 
 
-_app_config_store: AppConfigStore | None = None
+_app_config_store: Optional[AppConfigStore] = None
 
 
 def get_app_config_store() -> AppConfigStore:
