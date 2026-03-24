@@ -354,6 +354,72 @@ def test_agentic_handle_support_turn_marks_pending_approval_after_gateway_accept
 
 
 @pytest.mark.asyncio
+async def test_custom_api_messages_hook_backgrounds_teams_support_turn(monkeypatch):
+    saved_threads = []
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+            return SimpleNamespace()
+
+    monkeypatch.setattr(custom_hooks, "_BACKGROUND_TURN_POOL", FakeExecutor())
+    monkeypatch.setattr(
+        custom_hooks,
+        "save_conversation_ref",
+        lambda activity: saved_threads.append(activity["conversation"]["id"]),
+    )
+
+    activity = {
+        "text": "Please investigate the failed workflow",
+        "id": "msg-1",
+        "conversation": {"id": "thread-1"},
+        "from": {"id": "user-1"},
+        "channelId": "msteams",
+    }
+
+    result = await custom_hooks.CustomChatbotHooks.api_messages_hook(None, activity)
+
+    assert result == {
+        "type": "message",
+        "text": "I'm working on that now. I'll send updates here shortly.",
+    }
+    assert saved_threads == ["thread-1"]
+    assert len(submitted) == 1
+    assert submitted[0][0] is custom_hooks._run_background_turn
+    assert submitted[0][1][0]["conversation"]["id"] == "thread-1"
+
+
+def test_run_background_turn_sends_progress_and_final_reply(monkeypatch):
+    proactive_calls = []
+
+    def _fake_process(activity_dict, on_progress=None):
+        if on_progress is not None:
+            on_progress("Investigating...")
+        return {"type": "message", "text": "Done"}
+
+    monkeypatch.setattr(custom_hooks, "_process_message_sync", _fake_process)
+    monkeypatch.setattr(
+        custom_hooks,
+        "_send_proactive_async",
+        lambda thread_id, payload: proactive_calls.append((thread_id, payload)),
+    )
+
+    custom_hooks._run_background_turn(
+        {
+            "text": "Investigate this",
+            "conversation": {"id": "thread-1"},
+            "channelId": "msteams",
+        }
+    )
+
+    assert proactive_calls == [
+        ("thread-1", "Investigating..."),
+        ("thread-1", {"type": "message", "text": "Done"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cognibot_api_messages_hook_streams_progress_to_teams(monkeypatch):
     cognibot_hooks = _load_cognibot_hooks(monkeypatch)
     proactive_calls = []

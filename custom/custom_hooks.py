@@ -10,8 +10,10 @@ Implements the AI Studio Cognibot hook contract:
 """
 from __future__ import annotations
 
+import copy
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -27,7 +29,10 @@ logger = logging.getLogger("support_agent.hooks")
 
 from custom.helpers.activity import classify_approval_intent, extract_user_role
 from custom.helpers.locks import pg_advisory_lock
-from custom.helpers.teams_proactive import save_conversation_ref, send_proactive_sync
+from custom.helpers.teams_proactive import (
+    save_conversation_ref,
+    send_proactive_async,
+)
 from custom.helpers.db import is_duplicate_message, mark_message_processed
 from custom.helpers.teams import make_text_reply
 from custom.models import ConversationState as CogniState, Case, Approval
@@ -38,6 +43,12 @@ from custom.helpers.issue_classifier import (
     link_cases,
     should_escalate_recurrence,
 )
+
+_BACKGROUND_TURN_POOL = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="teams_turn",
+)
+_send_proactive_async = send_proactive_async
 
 
 # ── Activity normalisation ──
@@ -116,6 +127,10 @@ def _extract_user_id(activity: dict) -> str:
     return (activity.get("from", {}) or {}).get("id", "")
 
 
+def _is_teams_activity(activity: dict) -> bool:
+    return str(activity.get("channelId") or "").strip().lower() == "msteams"
+
+
 def _is_smalltalk(text: str) -> bool:
     t = text.lower().strip()
     return (
@@ -135,6 +150,37 @@ def _prepend_result_prefix(result: dict, prefix: str) -> dict:
             return result
     result["text"] = prefix + result.get("text", "")
     return result
+
+
+def _should_process_in_background(activity_dict: dict) -> bool:
+    text = _extract_text(activity_dict)
+    if not _is_teams_activity(activity_dict):
+        return False
+    if not text:
+        return False
+    if _is_smalltalk(text):
+        return False
+    return True
+
+
+def _run_background_turn(activity_dict: dict) -> None:
+    thread_id = _extract_thread_id(activity_dict)
+
+    def _on_progress(status_text: str) -> None:
+        _send_proactive_async(thread_id, status_text)
+
+    try:
+        result = _process_message_sync(activity_dict, on_progress=_on_progress)
+        if result is not None:
+            _send_proactive_async(thread_id, result)
+    except Exception:
+        logger.exception(
+            "Background support turn failed for thread %s", thread_id
+        )
+        _send_proactive_async(
+            thread_id,
+            "I hit an internal error while processing your request. Please try again.",
+        )
 
 
 # ── Synchronous processing core (runs inside sync_to_async) ──
@@ -385,8 +431,17 @@ class CustomChatbotHooks(ChatbotHooks):
         activity_dict = _activity_to_dict(activity)
         thread_id = _extract_thread_id(activity_dict)
 
+        if _should_process_in_background(activity_dict):
+            save_conversation_ref(activity_dict)
+            _BACKGROUND_TURN_POOL.submit(
+                _run_background_turn, copy.deepcopy(activity_dict)
+            )
+            return make_text_reply(
+                "I'm working on that now. I'll send updates here shortly."
+            )
+
         def _on_progress(status_text: str) -> None:
-            send_proactive_sync(thread_id, status_text)
+            _send_proactive_async(thread_id, status_text)
 
         return await sync_to_async(
             _process_message_sync, thread_sensitive=False

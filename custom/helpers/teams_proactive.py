@@ -30,9 +30,11 @@ MS_APP_PASSWORD Bot's Microsoft App Password (required for proactive sends)
 """
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional
 
 import requests
@@ -49,6 +51,10 @@ _TOKEN_URL = (
     "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
 )
 _TOKEN_SCOPE = "https://api.botframework.com/.default"
+_SEND_POOL = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="teams_proactive",
+)
 
 
 # ── OAuth token ──────────────────────────────────────────────────────────────
@@ -238,3 +244,13 @@ def send_proactive_sync(thread_id: str, text_or_card) -> bool:
             "send_proactive_sync: POST to %s failed: %s", url, exc
         )
         return False
+
+
+def send_proactive_async(thread_id: str, text_or_card) -> Future:
+    """Submit a proactive send to a background worker and return the Future."""
+    payload = (
+        copy.deepcopy(text_or_card)
+        if isinstance(text_or_card, dict)
+        else text_or_card
+    )
+    return _SEND_POOL.submit(send_proactive_sync, thread_id, payload)
