@@ -1651,13 +1651,19 @@ def api_approvals_decision():
         if not cid or decision not in ("approve", "reject", "cancel"):
             return jsonify({"error": "Missing conversation_id or invalid decision"}), 400
             
-        from state.conversation_state import ConversationState
+        from state.conversation_state import ConversationPhase, ConversationState
         state = ConversationState.load(cid)
-        if not state:
+        if not getattr(state, "exists_in_store", False):
             return jsonify({"error": "Conversation state not found"}), 404
-            
-        if state.phase != "awaiting_approval":
-            return jsonify({"error": f"Conversation is in phase '{state.phase}', not 'awaiting_approval'"}), 400
+
+        phase_value = str(getattr(state.phase, "value", state.phase) or "").strip().lower()
+        if phase_value != ConversationPhase.AWAITING_APPROVAL.value:
+            return jsonify({
+                "error": (
+                    f"Conversation is in phase '{phase_value or state.phase}', "
+                    f"not '{ConversationPhase.AWAITING_APPROVAL.value}'"
+                )
+            }), 400
 
         # Delegate to the gateway to process the decision as a virtual user message
         response = _main_gateway.process_message(cid, decision, user_id=approver_id)

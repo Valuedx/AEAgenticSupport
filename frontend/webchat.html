@@ -199,6 +199,69 @@
       color: #704214;
     }
 
+    .msg.bot .bot-card {
+      margin-top: 10px;
+      padding: 14px;
+      border: 1px solid #dbe5f4;
+      border-radius: 12px;
+      background: #f8fbff;
+    }
+
+    .msg.bot .bot-card-title {
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: #0d47a1;
+    }
+
+    .msg.bot .bot-card-text {
+      white-space: pre-wrap;
+      margin-bottom: 8px;
+    }
+
+    .msg.bot .bot-card-facts {
+      display: grid;
+      grid-template-columns: minmax(110px, auto) 1fr;
+      gap: 8px 12px;
+      margin-top: 10px;
+    }
+
+    .msg.bot .bot-card-facts dt {
+      font-weight: 600;
+      color: #334155;
+    }
+
+    .msg.bot .bot-card-facts dd {
+      margin: 0;
+      color: #0f172a;
+      word-break: break-word;
+    }
+
+    .msg.bot .card-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .msg.bot .card-action-btn {
+      border: none;
+      border-radius: 999px;
+      padding: 10px 16px;
+      background: #1a73e8;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .msg.bot .card-action-btn.destructive {
+      background: #c62828;
+    }
+
+    .msg.bot .card-action-btn:disabled {
+      opacity: .65;
+      cursor: not-allowed;
+    }
+
     .typing {
       align-self: flex-start;
       padding: 14px 22px;
@@ -418,7 +481,153 @@
       });
     }
 
-    function addMsg(text, cls, label) {
+    function parseStructuredPayload(payload) {
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        return payload;
+      }
+      if (typeof payload !== 'string') return null;
+      const trimmed = payload.trim();
+      if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+        return null;
+      }
+      try {
+        const parsed = JSON.parse(trimmed);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+      } catch (_err) {
+        return null;
+      }
+    }
+
+    function payloadText(payload) {
+      if (typeof payload === 'string') return payload;
+      if (payload && typeof payload.text === 'string') return payload.text;
+      return '';
+    }
+
+    function payloadAttachments(payload) {
+      return payload && Array.isArray(payload.attachments) ? payload.attachments : [];
+    }
+
+    function renderFactSet(container, facts) {
+      if (!Array.isArray(facts) || !facts.length) return;
+      const factList = document.createElement('dl');
+      factList.className = 'bot-card-facts';
+      facts.forEach((fact) => {
+        if (!fact || typeof fact !== 'object') return;
+        const dt = document.createElement('dt');
+        dt.textContent = fact.title || '';
+        const dd = document.createElement('dd');
+        dd.textContent = fact.value || '';
+        factList.appendChild(dt);
+        factList.appendChild(dd);
+      });
+      container.appendChild(factList);
+    }
+
+    function sendCardAction(actionData, title, buttonEl) {
+      const data = actionData && typeof actionData === 'object' ? { ...actionData } : {};
+      const actionText = String(data.action || title || 'submit').trim();
+      if (!actionText) return;
+      if (buttonEl) buttonEl.disabled = true;
+      sendPrompt(actionText, title || actionText).finally(() => {
+        if (buttonEl) buttonEl.disabled = false;
+      });
+    }
+
+    function renderAdaptiveCardAttachment(container, attachment) {
+      const card = attachment && attachment.content && typeof attachment.content === 'object'
+        ? attachment.content
+        : {};
+      const cardEl = document.createElement('div');
+      cardEl.className = 'bot-card';
+
+      if (Array.isArray(card.body)) {
+        card.body.forEach((item) => {
+          if (!item || typeof item !== 'object') return;
+          if (item.type === 'TextBlock') {
+            const block = document.createElement('div');
+            block.className = item.weight === 'Bolder' || item.size === 'Medium'
+              ? 'bot-card-title'
+              : 'bot-card-text';
+            block.textContent = item.text || '';
+            cardEl.appendChild(block);
+            return;
+          }
+          if (item.type === 'FactSet') {
+            renderFactSet(cardEl, item.facts);
+            return;
+          }
+          if (typeof item.text === 'string' && item.text) {
+            const block = document.createElement('div');
+            block.className = 'bot-card-text';
+            block.textContent = item.text;
+            cardEl.appendChild(block);
+          }
+        });
+      }
+
+      if (Array.isArray(card.actions) && card.actions.length) {
+        const actionsEl = document.createElement('div');
+        actionsEl.className = 'card-actions';
+        card.actions.forEach((action) => {
+          if (!action || action.type !== 'Action.Submit') return;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'card-action-btn' + (action.style === 'destructive' ? ' destructive' : '');
+          btn.textContent = action.title || String((action.data || {}).action || 'Submit');
+          btn.onclick = () => sendCardAction(action.data || {}, btn.textContent, btn);
+          actionsEl.appendChild(btn);
+        });
+        if (actionsEl.childElementCount) {
+          cardEl.appendChild(actionsEl);
+        }
+      }
+
+      if (!cardEl.childElementCount) {
+        const fallback = document.createElement('div');
+        fallback.className = 'bot-card-text';
+        fallback.textContent = payloadText(card) || 'Card content received.';
+        cardEl.appendChild(fallback);
+      }
+
+      container.appendChild(cardEl);
+    }
+
+    function renderBotPayload(container, payload) {
+      const structured = parseStructuredPayload(payload);
+      const text = payloadText(structured || payload);
+      const attachments = payloadAttachments(structured);
+
+      if (text) {
+        container.innerHTML = marked.parse(text);
+      }
+
+      attachments.forEach((attachment) => {
+        if (!attachment || typeof attachment !== 'object') return;
+        if (attachment.contentType === 'application/vnd.microsoft.card.adaptive') {
+          renderAdaptiveCardAttachment(container, attachment);
+          return;
+        }
+
+        const fallback = document.createElement('pre');
+        fallback.className = 'json-block';
+        fallback.innerHTML = syntaxHighlight(attachment);
+        container.appendChild(fallback);
+      });
+
+      if (!text && !attachments.length) {
+        if (structured) {
+          const jsonPre = document.createElement('pre');
+          jsonPre.className = 'json-block';
+          jsonPre.innerHTML = syntaxHighlight(structured);
+          container.appendChild(jsonPre);
+          return;
+        }
+        container.innerHTML = marked.parse(String(payload || ''));
+      }
+    }
+
+    function addMsg(payload, cls, label) {
       const d = document.createElement('div');
       d.className = 'msg ' + cls;
 
@@ -432,30 +641,10 @@
       const container = document.createElement('div');
 
       if (cls === 'bot') {
-        // Check if the text is JSON
-        let isJson = false;
-        let jsonContent = null;
-        try {
-          if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-            jsonContent = JSON.parse(text);
-            if (typeof jsonContent === 'object' && jsonContent !== null) {
-              isJson = true;
-            }
-          }
-        } catch (e) { }
-
-        if (isJson) {
-          const jsonPre = document.createElement('pre');
-          jsonPre.className = 'json-block';
-          jsonPre.innerHTML = syntaxHighlight(jsonContent);
-          container.appendChild(jsonPre);
-        } else {
-          // Use marked.js for Markdown
-          container.innerHTML = marked.parse(text);
-        }
+        renderBotPayload(container, payload);
       } else {
         // User messages and errors: just text
-        container.textContent = text;
+        container.textContent = String(payload || '');
         container.style.whiteSpace = 'pre-wrap';
       }
 
@@ -531,8 +720,13 @@
     async function sendMessage() {
       const text = msgInput.value.trim();
       if (!text) return;
-      addMsg(text, 'user', 'You');
       msgInput.value = '';
+      await sendPrompt(text, text);
+    }
+
+    async function sendPrompt(text, userEcho = null) {
+      if (!text) return;
+      addMsg(userEcho || text, 'user', 'You');
       sendBtn.disabled = true;
       msgInput.disabled = true;
       typingEl.style.display = 'block';
@@ -587,7 +781,9 @@
                 if (progressEl) progressEl.remove();
                 progressEl = document.createElement('div');
                 progressEl.className = 'msg progress';
-                progressEl.textContent = parsed;
+                progressEl.textContent = typeof parsed === 'string'
+                  ? parsed
+                  : payloadText(parseStructuredPayload(parsed) || parsed) || JSON.stringify(parsed);
                 chatArea.appendChild(progressEl);
                 chatArea.scrollTop = chatArea.scrollHeight;
               } else if (eventType === 'done') {

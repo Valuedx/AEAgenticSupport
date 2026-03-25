@@ -134,6 +134,60 @@
     .msg.bot blockquote { border-left: 4px solid #3b82f6; padding-left: 12px; font-style: italic; color: #4b5563; margin: 12px 0; }
     .msg.bot a { color: #1565c0; text-decoration: underline; }
     .msg.bot img { max-width: 100%; border-radius: 8px; margin: 12px 0; }
+    .msg.bot .bot-card {
+      margin-top: 10px;
+      padding: 14px;
+      border: 1px solid #dbe5f4;
+      border-radius: 12px;
+      background: #f8fbff;
+    }
+    .msg.bot .bot-card:first-child { margin-top: 0; }
+    .msg.bot .bot-card-title {
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: #0d47a1;
+    }
+    .msg.bot .bot-card-text {
+      white-space: pre-wrap;
+      margin-bottom: 8px;
+    }
+    .msg.bot .bot-card-facts {
+      display: grid;
+      grid-template-columns: minmax(110px, auto) 1fr;
+      gap: 8px 12px;
+      margin-top: 10px;
+    }
+    .msg.bot .bot-card-facts dt {
+      font-weight: 600;
+      color: #334155;
+    }
+    .msg.bot .bot-card-facts dd {
+      margin: 0;
+      color: #0f172a;
+      word-break: break-word;
+    }
+    .msg.bot .card-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .msg.bot .card-action-btn {
+      border: none;
+      border-radius: 999px;
+      padding: 10px 16px;
+      background: #1565c0;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .msg.bot .card-action-btn.destructive {
+      background: #c62828;
+    }
+    .msg.bot .card-action-btn:disabled {
+      opacity: .65;
+      cursor: not-allowed;
+    }
 
     .msg .label {
       font-size: 11px;
@@ -334,7 +388,205 @@
     const titleEl = document.getElementById('chatTitle');
     const quickActionsEl = document.getElementById('quickActions');
 
-    function addMsg(text, cls, label) {
+    function parseStructuredPayload(payload) {
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        return payload;
+      }
+      if (typeof payload !== 'string') return null;
+      const trimmed = payload.trim();
+      if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+        return null;
+      }
+      try {
+        const parsed = JSON.parse(trimmed);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+      } catch (_err) {
+        return null;
+      }
+    }
+
+    function payloadText(payload) {
+      if (typeof payload === 'string') return payload;
+      if (payload && typeof payload.text === 'string') return payload.text;
+      return '';
+    }
+
+    function payloadAttachments(payload) {
+      return payload && Array.isArray(payload.attachments) ? payload.attachments : [];
+    }
+
+    function renderFactSet(container, facts) {
+      if (!Array.isArray(facts) || !facts.length) return;
+      const factList = document.createElement('dl');
+      factList.className = 'bot-card-facts';
+      facts.forEach((fact) => {
+        if (!fact || typeof fact !== 'object') return;
+        const dt = document.createElement('dt');
+        dt.textContent = fact.title || '';
+        const dd = document.createElement('dd');
+        dd.textContent = fact.value || '';
+        factList.appendChild(dt);
+        factList.appendChild(dd);
+      });
+      container.appendChild(factList);
+    }
+
+    function createBaseActivity(overrides = {}) {
+      return {
+        type: 'message',
+        from: { id: 'webchat_user', name: 'Webchat User' },
+        channelId: 'webchat',
+        user_type: roleSel.value || 'technical',
+        channelData: { user_role: roleSel.value || 'technical' },
+        ...overrides,
+      };
+    }
+
+    async function postActivity(activity, userEcho) {
+      if (!conversationId) return false;
+      const echoText = (typeof userEcho === 'string' && userEcho.trim())
+        ? userEcho
+        : (activity && typeof activity.text === 'string' && activity.text.trim())
+          ? activity.text
+          : 'Submitted action';
+
+      addMsg(echoText, 'user', 'You');
+      sendBtn.disabled = true;
+      msgInput.disabled = true;
+      typingEl.style.display = 'block';
+      chatArea.scrollTop = chatArea.scrollHeight;
+
+      try {
+        const r = await fetch('/api/aistudio/conversations/' + encodeURIComponent(conversationId) + '/activities', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(activity),
+        });
+        if (!r.ok) {
+          typingEl.style.display = 'none';
+          addMsg('Failed to send: HTTP ' + r.status, 'error');
+          sendBtn.disabled = false;
+          msgInput.disabled = false;
+          return false;
+        }
+        return true;
+      } catch (e) {
+        typingEl.style.display = 'none';
+        addMsg('Send failed: ' + e.message, 'error');
+        sendBtn.disabled = false;
+        msgInput.disabled = false;
+        return false;
+      }
+    }
+
+    async function submitCardAction(actionData, title, buttonEl) {
+      const data = actionData && typeof actionData === 'object' ? { ...actionData } : {};
+      const actionText = String(data.action || title || 'submit').trim();
+      if (!actionText) return;
+      if (buttonEl) buttonEl.disabled = true;
+      const sent = await postActivity(
+        createBaseActivity({ text: actionText, value: data }),
+        title || actionText
+      );
+      if (!sent && buttonEl) buttonEl.disabled = false;
+    }
+
+    function renderAdaptiveCardAttachment(container, attachment) {
+      const card = attachment && attachment.content && typeof attachment.content === 'object'
+        ? attachment.content
+        : {};
+      const cardEl = document.createElement('div');
+      cardEl.className = 'bot-card';
+
+      if (Array.isArray(card.body)) {
+        card.body.forEach((item) => {
+          if (!item || typeof item !== 'object') return;
+          if (item.type === 'TextBlock') {
+            const block = document.createElement('div');
+            block.className = item.weight === 'Bolder' || item.size === 'Medium'
+              ? 'bot-card-title'
+              : 'bot-card-text';
+            block.textContent = item.text || '';
+            cardEl.appendChild(block);
+            return;
+          }
+          if (item.type === 'FactSet') {
+            renderFactSet(cardEl, item.facts);
+            return;
+          }
+          if (typeof item.text === 'string' && item.text) {
+            const block = document.createElement('div');
+            block.className = 'bot-card-text';
+            block.textContent = item.text;
+            cardEl.appendChild(block);
+          }
+        });
+      }
+
+      if (Array.isArray(card.actions) && card.actions.length) {
+        const actionsEl = document.createElement('div');
+        actionsEl.className = 'card-actions';
+        card.actions.forEach((action) => {
+          if (!action || action.type !== 'Action.Submit') return;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'card-action-btn' + (action.style === 'destructive' ? ' destructive' : '');
+          btn.textContent = action.title || String((action.data || {}).action || 'Submit');
+          btn.onclick = () => submitCardAction(action.data || {}, btn.textContent, btn);
+          actionsEl.appendChild(btn);
+        });
+        if (actionsEl.childElementCount) {
+          cardEl.appendChild(actionsEl);
+        }
+      }
+
+      if (!cardEl.childElementCount) {
+        const fallback = document.createElement('div');
+        fallback.className = 'bot-card-text';
+        fallback.textContent = payloadText(card) || 'Card content received.';
+        cardEl.appendChild(fallback);
+      }
+
+      container.appendChild(cardEl);
+    }
+
+    function renderBotPayload(container, payload) {
+      const structured = parseStructuredPayload(payload);
+      const text = payloadText(structured || payload);
+      const attachments = payloadAttachments(structured);
+
+      if (text) {
+        const textEl = document.createElement('div');
+        textEl.innerHTML = marked.parse(text);
+        container.appendChild(textEl);
+      }
+
+      attachments.forEach((attachment) => {
+        if (!attachment || typeof attachment !== 'object') return;
+        if (attachment.contentType === 'application/vnd.microsoft.card.adaptive') {
+          renderAdaptiveCardAttachment(container, attachment);
+          return;
+        }
+
+        const fallback = document.createElement('pre');
+        fallback.className = 'bot-card';
+        fallback.textContent = JSON.stringify(attachment, null, 2);
+        container.appendChild(fallback);
+      });
+
+      if (!text && !attachments.length) {
+        if (structured) {
+          const fallback = document.createElement('pre');
+          fallback.className = 'bot-card';
+          fallback.textContent = JSON.stringify(structured, null, 2);
+          container.appendChild(fallback);
+          return;
+        }
+        container.innerHTML = marked.parse(String(payload || ''));
+      }
+    }
+
+    function addMsg(payload, cls, label) {
       const d = document.createElement('div');
       d.className = 'msg ' + cls;
       if (label) {
@@ -346,11 +598,10 @@
       const t = document.createElement('div');
       t.className = 'content';
       if (cls.includes('bot')) {
-        // Render Markdown for bot messages
-        t.innerHTML = marked.parse(text);
+        renderBotPayload(t, payload);
       } else {
         // Plain text for user (preserve spaces/newlines)
-        t.textContent = text;
+        t.textContent = String(payload || '');
         t.style.whiteSpace = 'pre-wrap';
       }
       d.appendChild(t);
@@ -467,16 +718,21 @@
           const data = JSON.parse(event.data);
           console.log('WS full:', JSON.stringify(data));
 
-          const showReply = (text) => {
+          const showReply = (activity) => {
             typingEl.style.display = 'none';
-            addMsg(text, 'bot', assistantLabel());
+            addMsg(activity, 'bot', assistantLabel());
             sendBtn.disabled = false;
             msgInput.disabled = false;
             msgInput.focus();
           };
 
+          const hasRenderableAttachments = (act) => (
+            Array.isArray(act && act.attachments) && act.attachments.length > 0
+          );
+
           const isBotMessage = (act) => {
-            if (act.type !== 'message' || !act.text) return false;
+            if (act.type !== 'message') return false;
+            if (!act.text && !hasRenderableAttachments(act)) return false;
             const fromRole = act.from && act.from.role;
             const fromId = act.from && act.from.id;
             if (fromRole === 'bot') return true;
@@ -486,10 +742,10 @@
 
           if (data.activities) {
             for (const act of data.activities) {
-              if (isBotMessage(act)) showReply(act.text);
+              if (isBotMessage(act)) showReply(act);
             }
-          } else if (data.type === 'message' && data.text) {
-            if (isBotMessage(data)) showReply(data.text);
+          } else if (data.type === 'message' && (data.text || hasRenderableAttachments(data))) {
+            if (isBotMessage(data)) showReply(data);
           }
         } catch (e) {
           const raw = event.data;
@@ -525,40 +781,8 @@
       const text = msgInput.value.trim();
       if (!text || !conversationId) return;
 
-      addMsg(text, 'user', 'You');
       msgInput.value = '';
-      sendBtn.disabled = true;
-      msgInput.disabled = true;
-      typingEl.style.display = 'block';
-      chatArea.scrollTop = chatArea.scrollHeight;
-
-      const activity = {
-        type: 'message',
-        text: text,
-        from: { id: 'webchat_user', name: 'Webchat User' },
-        channelId: 'webchat',
-        user_type: roleSel.value || 'technical',
-        channelData: { user_role: roleSel.value || 'technical' },
-      };
-
-      try {
-        const r = await fetch('/api/aistudio/conversations/' + encodeURIComponent(conversationId) + '/activities', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(activity),
-        });
-        if (!r.ok) {
-          typingEl.style.display = 'none';
-          addMsg('Failed to send: HTTP ' + r.status, 'error');
-          sendBtn.disabled = false;
-          msgInput.disabled = false;
-        }
-      } catch (e) {
-        typingEl.style.display = 'none';
-        addMsg('Send failed: ' + e.message, 'error');
-        sendBtn.disabled = false;
-        msgInput.disabled = false;
-      }
+      await postActivity(createBaseActivity({ text: text }), text);
     }
 
     function sendQuick(text) { msgInput.value = text; sendMessage(); }

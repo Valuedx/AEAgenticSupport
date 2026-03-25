@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import agent_server
+from state.conversation_state import ConversationPhase
 
 
 def test_build_cognibot_reply_payload_wraps_async_reply():
@@ -93,3 +96,66 @@ def test_validate_reply_channel_allows_teams_without_auth_header(monkeypatch):
             "bot_id": "bot-1",
         }
     )
+
+
+def test_api_approvals_decision_accepts_enum_phase(monkeypatch):
+    client = agent_server.app.test_client()
+
+    monkeypatch.setattr(
+        agent_server._main_gateway,
+        "process_message",
+        lambda cid, decision, user_id=None: {
+            "conversation_id": cid,
+            "decision": decision,
+            "approver_id": user_id,
+        },
+    )
+
+    class FakeConversationState:
+        exists_in_store = True
+        phase = ConversationPhase.AWAITING_APPROVAL
+
+    monkeypatch.setattr(
+        "state.conversation_state.ConversationState.load",
+        lambda cid: FakeConversationState(),
+    )
+
+    response = client.post(
+        "/api/approvals/decision",
+        json={
+            "conversation_id": "conv-1",
+            "decision": "approve",
+            "approver_id": "admin-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "success": True,
+        "decision": "approve",
+        "agent_response": {
+            "conversation_id": "conv-1",
+            "decision": "approve",
+            "approver_id": "admin-1",
+        },
+    }
+
+
+def test_api_approvals_decision_404s_when_state_missing(monkeypatch):
+    client = agent_server.app.test_client()
+
+    monkeypatch.setattr(
+        "state.conversation_state.ConversationState.load",
+        lambda cid: SimpleNamespace(exists_in_store=False, phase=ConversationPhase.IDLE),
+    )
+
+    response = client.post(
+        "/api/approvals/decision",
+        json={
+            "conversation_id": "conv-missing",
+            "decision": "approve",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Conversation state not found"}
