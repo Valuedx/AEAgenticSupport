@@ -1548,5 +1548,6 @@ Key things to remember:
 > **Documentation Update (2026-03-25)**
 > - The production top-level Extension now uses `custom/custom_hooks.py::api_messages_hook` as a thin async adapter: cheap normalization, dedupe, minimal state persistence, then `POST /chat/async`.
 > - Final responses now come back through AI Studio `POST /api/reply` and `custom/custom_hooks.py::api_reply_hook`.
+> - Optional AI Studio Dialog Designer wrappers can live in `custom/functions/python/actions.py`; they are compatibility entrypoints only and should call the same external `agent_server` async path.
 > - The `AgentProxyDialog` / local DirectLine dialog flow in Section 17 should be read as **local `custom_cognibot/` guidance only**, not the recommended production path.
 >

@@ -43,7 +43,7 @@
 >
 ## AutomationEdge Agentic Support — Technical Blueprint
 
-> **Documentation Update (2026-03-25)**: The main AI Studio Extension path is now a **thin async adapter**. `custom/custom_hooks.py::api_messages_hook` does cheap normalization, dedupe, minimal state persistence, and queues work to `agent_server.py /chat/async`; completion comes back through AI Studio `POST /api/reply` and `custom/custom_hooks.py::api_reply_hook`. The older inline/support-agent-in-hook and local `custom_cognibot/` dialog proxy paths are no longer the recommended production model.
+> **Documentation Update (2026-03-25)**: The main AI Studio Extension path is now a **thin async adapter**. `custom/custom_hooks.py::api_messages_hook` does cheap normalization, dedupe, minimal state persistence, and queues work to `agent_server.py /chat/async`; completion comes back through AI Studio `POST /api/reply` and `custom/custom_hooks.py::api_reply_hook`. The older inline/support-agent-in-hook and local `custom_cognibot/` dialog proxy paths are no longer the recommended production model. Optional AI Studio Dialog Designer wrappers now live in `custom/functions/python/actions.py`.
 
 **Version:** 1.5  
 **Last updated:** 2026-03-24
@@ -125,7 +125,8 @@ Request path examples:
   - `custom_hooks.py`: Async Cognibot hooks (`api_messages_hook`) with locks, dedupe, routing, proactive Teams conversation-ref capture, and approval/card handling.
   - `models.py` + `migrations/`: Django models for cases, approvals, processed messages, links.
   - `helpers/`: Locks, DB helpers, RAG stubs, REST tool client, roster, Teams helpers, Teams proactive sender, shared activity helpers, issue classifier.
-  - `functions/python/support_agent.py`: Planner + executor for Extension, using REST tools and syncing approval state between Django and the gateway.
+  - `functions/python/support_agent.py`: Planner + executor for the inline Extension path, using REST tools and syncing approval state between Django and the gateway.
+  - `functions/python/actions.py`: Optional AI Studio Dialog Designer action wrappers that call the same external async proxy path or small local helpers.
   - In the current production path, `custom/custom_hooks.py` is thinner than that older summary: `api_messages_hook` now does cheap dedupe/minimal-state work and queues to `agent_server.py /chat/async`; `api_reply_hook` handles async completion delivery.
 - **`custom_cognibot/`**
   - Thin-proxy hooks used for local Cognibot → standalone agent server integration, including `/chat/stream` SSE forwarding for Teams progress updates.
@@ -251,7 +252,7 @@ For each routed message:
     - Handles smalltalk fast-path.
     - Persists Teams conversation references so progress updates can be sent proactively later in the turn.
     - Integrates issue classification and approval flows, including adaptive-card button handling and card-body prefix insertion for recurrence/related-case context.
-    - Delegates to `handle_support_turn` in `support_agent.py`.
+    - In the default production path, stops after dedupe/minimal-state work and queues to `agent_server.py /chat/async`.
 - `custom/functions/python/support_agent.py`:
   - Planner:
     - Uses RAG (via REST or direct pgvector) over SOPs and tool docs.
@@ -262,6 +263,10 @@ For each routed message:
     - Executes an already approved risky plan without re-opening a second approval gate.
     - Syncs agentic gateway approval decisions back into the Django `Approval` row for Extension-side authorization consistency.
     - Updates/creates tickets and escalations through typed tools.
+  - This file is no longer the default Teams production entrypoint; it remains the inline path and a shared library for compatibility flows.
+- `custom/functions/python/actions.py`:
+  - Provides optional AI Studio Dialog Designer action entrypoints under `custom/functions/python`.
+  - Keeps Designer compatibility without moving the main Teams production flow away from `api_messages_hook` and `POST /chat/async`.
 
 ### 5.3 Standalone Agent Server + Webchat
 

@@ -757,7 +757,7 @@ python agent_server.py
 
 **Webchat:** Open `http://localhost:5050/` in your browser for an interactive chat interface. This is the fastest way to test the agent locally without Teams or AI Studio. When using the streaming endpoint, you will see real-time progress messages (e.g., "Looking into this...", "Checking workflow status...") as italic status text that updates in-place during long investigations.
 
-For the main AI Studio Extension path, `custom/custom_hooks.py` now uses `POST /chat/async` by default. The hook acknowledges immediately, and `agent_server.py` sends the final response back through AI Studio `POST /api/reply`.
+For the main AI Studio Extension path, `custom/custom_hooks.py` now uses `POST /chat/async` by default. The hook acknowledges immediately, and `agent_server.py` sends the final response back through AI Studio `POST /api/reply`. If you need AI Studio Dialog Designer to expose Python Action entries, place the wrappers in `custom/functions/python/actions.py`; those wrappers should call the same external async proxy path instead of replacing the hook path.
 
 ### 8.3 Run the mock AE API (for local testing)
 
@@ -1042,7 +1042,7 @@ The agent sends real-time progress messages to users during long investigations 
 
 - **Cognibot proxy** — The Teams `api_messages_hook()` path now also uses the SSE endpoint and forwards `event: progress` updates through stored Teams conversation references via proactive Bot Framework sends. `event: done` is returned as the final reply. The legacy `/chat` path remains for backward compatibility, but Teams progress now depends on `/chat/stream`.
 
-**Current production note:** the main top-level Extension no longer runs long agentic work or background ORM threads inside Cognibot. It performs cheap dedupe/minimal-state work, calls `POST /chat/async`, returns an acknowledgement, and later delivers the final reply from `api_reply_hook` after AI Studio invokes `POST /api/reply`.
+**Current production note:** the main top-level Extension no longer runs long agentic work or background ORM threads inside Cognibot. It performs cheap dedupe/minimal-state work, calls `POST /chat/async`, returns an acknowledgement, and later delivers the final reply from `api_reply_hook` after AI Studio invokes `POST /api/reply`. Optional Dialog Designer wrappers can live in `custom/functions/python/actions.py`, but they should call the same async proxy flow rather than moving core logic back into dialogs.
 
 ### 11.5 Adding New Tools
 

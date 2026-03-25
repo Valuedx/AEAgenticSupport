@@ -1417,7 +1417,7 @@ if __name__ == "__main__":
 
 The agent server exposes `POST /chat/stream` for real-time progress updates. It sends Server-Sent Events (SSE): `event: progress` with status text during investigation (e.g., "Looking into this...", "Checking workflow status..."), then `event: done` with the final response. The webchat uses this endpoint so users see progress messages as italic text that updates in-place. The original `POST /chat` endpoint remains for backwards compatibility.
 
-> **Update (2026-03-25):** The main AI Studio Extension path now uses `POST /chat/async` plus AI Studio `POST /api/reply` for completion. `POST /chat/stream` remains the right fit for standalone browser streaming and the local `custom_cognibot/` sample proxy, not for the production Cognibot Extension.
+> **Update (2026-03-25):** The main AI Studio Extension path now uses `POST /chat/async` plus AI Studio `POST /api/reply` for completion. `POST /chat/stream` remains the right fit for standalone browser streaming and the local `custom_cognibot/` sample proxy, not for the production Cognibot Extension. Optional Dialog Designer action wrappers can live in `custom/functions/python/actions.py`, but they should call the same external async proxy path rather than reintroducing long-running execution inside Cognibot.
 
 ### 12.3 MS Teams Integration (Deferred Phase)
 

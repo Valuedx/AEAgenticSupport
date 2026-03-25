@@ -26,6 +26,9 @@ The chatbot interface service.
 - **Python**: `D:\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\python\python.exe`
 - **Command**: `..\python\python.exe manage.pyc runserver localhost:3978`
 
+### Optional AI Studio Dialog Designer wrappers
+If you want AI Studio Dialog Designer to expose Python Action functions, use the optional wrappers in `custom/functions/python/actions.py`. They should queue work to `agent_server.py` or use small local helpers; the production Teams path remains `custom/custom_hooks.py` -> `POST /chat/async` -> AI Studio `POST /api/reply`.
+
 ---
 
 ## Database Setup / Migration

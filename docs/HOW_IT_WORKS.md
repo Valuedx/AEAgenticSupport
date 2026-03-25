@@ -82,7 +82,7 @@ Once these are configured, every channel (Teams, AI Studio webchat, standalone w
 ## 1. Step 1 — User Sends a Message (Per Channel)
 
 > **Documentation Update (2026-03-25)**  
-> The main AI Studio Extension path is now a **thin async adapter** by default. `custom/custom_hooks.py` performs only cheap normalization, dedupe, minimal state persistence, and queueing to `agent_server.py` via `POST /chat/async`, then returns an acknowledgement immediately. Final responses come back through AI Studio `POST /api/reply` and `api_reply_hook`. Older inline execution examples and the `custom_cognibot/` dialog proxy remain as local/reference patterns only.
+> The main AI Studio Extension path is now a **thin async adapter** by default. `custom/custom_hooks.py` performs only cheap normalization, dedupe, minimal state persistence, and queueing to `agent_server.py` via `POST /chat/async`, then returns an acknowledgement immediately. Final responses come back through AI Studio `POST /api/reply` and `api_reply_hook`. Older inline execution examples and the `custom_cognibot/` dialog proxy remain as local/reference patterns only. Optional AI Studio Dialog Designer wrappers now live in `custom/functions/python/actions.py`; they are compatibility shims, not the primary production path.
 
 ### 1.1 MS Teams (Production path)
 
@@ -153,13 +153,16 @@ Regardless of channel, messages are normalized and sent to the **Message Gateway
   5. Persist the Teams conversation reference so progress updates can be pushed proactively later in the same turn.
   6. Classify multi‑issue context and approvals:
      - **File:** `custom/helpers/issue_classifier.py`
-  7. Route to the **support agent**:
+  7. For the inline path, route to the **support agent**:
      - **File:** `custom/functions/python/support_agent.py`
      - **Entry:** `handle_support_turn(...)`
+  8. Optional AI Studio Dialog Designer wrappers:
+     - **File:** `custom/functions/python/actions.py`
+     - **Entries:** `queue_support_turn(...)`, `get_support_session_status(...)`
 
 In **agentic mode**, `support_agent.py` acts mainly as a planner/executor front for the orchestrator; the full LLM+tool loop is handled in `agents/orchestrator.py`, but Django `Approval` rows are still synchronized after gateway decisions so the Extension hook stays authoritative. In deterministic mode, `support_agent.py` can execute a fixed plan using REST tools only; risky plans only open an approval gate when a non-empty on-shift roster exists, and an approved plan executes without re-opening approval.
 
-**Current production note:** the default Extension path no longer executes the full support-agent flow inline inside Cognibot. In the current thin-proxy mode, `api_messages_hook` stops after lock/dedupe/minimal-state work and queues the turn to `agent_server.py /chat/async`; the final reply is delivered later from `api_reply_hook`.
+**Current production note:** the default Extension path no longer executes the full support-agent flow inline inside Cognibot. In the current thin-proxy mode, `api_messages_hook` stops after lock/dedupe/minimal-state work and queues the turn to `agent_server.py /chat/async`; the final reply is delivered later from `api_reply_hook`. `custom/functions/python/actions.py` exists only to satisfy optional AI Studio Dialog Designer action discovery.
 
 ### 2.2 Webchat / AI Studio adapters
 
