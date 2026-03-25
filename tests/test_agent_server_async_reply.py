@@ -34,6 +34,57 @@ def test_build_cognibot_reply_payload_wraps_async_reply():
     }
 
 
+def test_build_cognibot_reply_payload_uses_standard_teams_reply_payload():
+    payload = agent_server._build_cognibot_reply_payload(
+        {
+            "channel": "msteams",
+            "conversation_id": "conv-1",
+            "service_url": "https://smba.trafficmanager.net/amer/",
+            "user_id": "user-1",
+            "user_name": "Pat User",
+            "bot_id": "bot-1",
+            "bot_name": "Agentic AI Bot",
+            "aistudio_additional_info": {
+                "conversation_details": {"conversation_id": "conv-1"},
+                "uuid": "uuid-1",
+            },
+            "aistudio_chatbot_id": "chatbot-1",
+        },
+        {"type": "message", "text": "Done"},
+    )
+
+    assert payload == {
+        "additionalInfo": {
+            "conversation_details": {"conversation_id": "conv-1"},
+            "uuid": "uuid-1",
+        },
+        "replyMessage": "Done",
+        "chatBotID": "chatbot-1",
+    }
+
+
+def test_build_cognibot_reply_payload_keeps_thin_proxy_for_structured_teams_activity():
+    payload = agent_server._build_cognibot_reply_payload(
+        {
+            "channel": "msteams",
+            "conversation_id": "conv-1",
+            "service_url": "https://smba.trafficmanager.net/amer/",
+            "user_id": "user-1",
+            "bot_id": "bot-1",
+        },
+        {
+            "type": "message",
+            "text": "Approve this?",
+            "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive"}],
+        },
+    )
+
+    assert payload["thin_proxy_reply"]["reply_channel"]["channel"] == "msteams"
+    assert payload["thin_proxy_reply"]["activity"]["attachments"] == [
+        {"contentType": "application/vnd.microsoft.card.adaptive"}
+    ]
+
+
 def test_send_reply_channel_message_posts_to_aistudio_reply(monkeypatch):
     posted = {}
 
@@ -66,7 +117,10 @@ def test_send_reply_channel_message_posts_to_aistudio_reply(monkeypatch):
             "user_name": "Pat User",
             "bot_id": "bot-1",
             "bot_name": "Agentic AI Bot",
-            "auth_header": "Bearer teams-auth",
+            "aistudio_additional_info": {
+                "conversation_details": {"conversation_id": "conv-1"},
+                "uuid": "uuid-1",
+            },
         },
         "Final reply",
     )
@@ -74,9 +128,13 @@ def test_send_reply_channel_message_posts_to_aistudio_reply(monkeypatch):
     assert posted["url"] == "http://cognibot.local/api/reply"
     assert posted["headers"] == {"Content-Type": "application/json"}
     assert posted["timeout"] == 20
-    assert posted["json"]["thin_proxy_reply"]["reply_channel"]["channel"] == "msteams"
-    assert posted["json"]["additionalInfo"]["auth_header"] == "Bearer teams-auth"
-    assert posted["json"]["additionalInfo"]["conversation_details"]["chat_channel"] == "msteams"
+    assert posted["json"] == {
+        "additionalInfo": {
+            "conversation_details": {"conversation_id": "conv-1"},
+            "uuid": "uuid-1",
+        },
+        "replyMessage": "Final reply",
+    }
 
 
 def test_validate_reply_channel_allows_teams_without_auth_header(monkeypatch):

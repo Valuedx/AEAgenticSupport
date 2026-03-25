@@ -205,6 +205,21 @@ def _normalize_outbound_activity(text_or_activity) -> dict:
     return {"type": "message", "text": str(text_or_activity)}
 
 
+def _is_plain_text_activity(text_or_activity) -> bool:
+    if isinstance(text_or_activity, str):
+        return True
+    if not isinstance(text_or_activity, dict):
+        return False
+    if str(text_or_activity.get("type") or "message").strip().lower() != "message":
+        return False
+    if text_or_activity.get("attachments"):
+        return False
+    if text_or_activity.get("suggestedActions"):
+        return False
+    text = text_or_activity.get("text")
+    return isinstance(text, str)
+
+
 def _cognibot_reply_url() -> str:
     base_url = _cognibot_base_url()
     if not base_url:
@@ -214,8 +229,11 @@ def _cognibot_reply_url() -> str:
     return f"{base_url}/api/reply"
 
 
-def _build_cognibot_reply_payload(reply_channel: dict, text_or_activity) -> dict:
-    activity = _normalize_outbound_activity(text_or_activity)
+def _build_cognibot_additional_info(reply_channel: dict) -> dict:
+    original = reply_channel.get("aistudio_additional_info")
+    if isinstance(original, dict) and original:
+        return dict(original)
+
     conversation_id = str(reply_channel.get("conversation_id") or "").strip()
     channel = str(reply_channel.get("channel") or "").strip().lower() or "webchat"
     service_url = str(reply_channel.get("service_url") or "").strip()
@@ -229,6 +247,47 @@ def _build_cognibot_reply_payload(reply_channel: dict, text_or_activity) -> dict
         or ("msteams" if channel == "msteams" else "emulator")
     ).strip() or "emulator"
 
+    return {
+        "auth_header": auth_header,
+        "uuid": "__thin_proxy_async__",
+        "conversation_details": {
+            "bot_id": bot_id,
+            "bot_name": bot_name,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "user_name": user_name,
+            "chat_channel": aistudio_chat_channel,
+            "service_url": service_url,
+            "model_conversation_id": str(
+                reply_channel.get("model_conversation_id") or conversation_id
+            ).strip() or conversation_id,
+        },
+    }
+
+
+def _build_standard_cognibot_reply_payload(reply_channel: dict, text_or_activity) -> dict:
+    activity = _normalize_outbound_activity(text_or_activity)
+    payload = {
+        "additionalInfo": _build_cognibot_additional_info(reply_channel),
+        "replyMessage": str(activity.get("text") or ""),
+    }
+    chatbot_id = str(reply_channel.get("aistudio_chatbot_id") or "").strip()
+    if chatbot_id:
+        payload["chatBotID"] = chatbot_id
+    return payload
+
+
+def _build_cognibot_reply_payload(reply_channel: dict, text_or_activity) -> dict:
+    activity = _normalize_outbound_activity(text_or_activity)
+    conversation_id = str(reply_channel.get("conversation_id") or "").strip()
+    channel = str(reply_channel.get("channel") or "").strip().lower() or "webchat"
+    service_url = str(reply_channel.get("service_url") or "").strip()
+    user_id = str(reply_channel.get("user_id") or "webchat_user").strip() or "webchat_user"
+    user_name = str(reply_channel.get("user_name") or "Webchat User").strip() or "Webchat User"
+    bot_id = str(reply_channel.get("bot_id") or "bot").strip() or "bot"
+    bot_name = str(reply_channel.get("bot_name") or "Agentic AI Bot").strip() or "Agentic AI Bot"
+    auth_header = str(reply_channel.get("auth_header") or "").strip()
+
     callback_channel = dict(reply_channel)
     callback_channel.setdefault("channel", channel)
     callback_channel.setdefault("conversation_id", conversation_id)
@@ -239,27 +298,15 @@ def _build_cognibot_reply_payload(reply_channel: dict, text_or_activity) -> dict
     callback_channel.setdefault("service_url", service_url)
     callback_channel.setdefault("auth_header", auth_header)
 
+    if channel == "msteams" and _is_plain_text_activity(activity):
+        return _build_standard_cognibot_reply_payload(reply_channel, activity)
+
     return {
         "thin_proxy_reply": {
             "activity": activity,
             "reply_channel": callback_channel,
         },
-        "additionalInfo": {
-            "auth_header": auth_header,
-            "uuid": "__thin_proxy_async__",
-            "conversation_details": {
-                "bot_id": bot_id,
-                "bot_name": bot_name,
-                "conversation_id": conversation_id,
-                "user_id": user_id,
-                "user_name": user_name,
-                "chat_channel": aistudio_chat_channel,
-                "service_url": service_url,
-                "model_conversation_id": str(
-                    reply_channel.get("model_conversation_id") or conversation_id
-                ).strip() or conversation_id,
-            },
-        },
+        "additionalInfo": _build_cognibot_additional_info(reply_channel),
     }
 
 

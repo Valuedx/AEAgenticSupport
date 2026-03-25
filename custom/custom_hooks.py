@@ -10,6 +10,7 @@ Implements the AI Studio Cognibot hook contract:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -161,6 +162,82 @@ def _extract_request_auth_header(request) -> str:
     return str(meta.get("HTTP_AUTHORIZATION") or "").strip()
 
 
+def _extract_request_payload(request) -> dict:
+    if request is None:
+        return {}
+
+    get_json = getattr(request, "get_json", None)
+    if callable(get_json):
+        try:
+            data = get_json(silent=True)
+            if isinstance(data, dict):
+                return data
+        except TypeError:
+            try:
+                data = get_json()
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    for attr in ("json", "data", "_body", "body"):
+        raw = getattr(request, attr, None)
+        if raw is None:
+            continue
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="ignore")
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+    return {}
+
+
+def _coerce_dict_payload(value) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _extract_request_additional_info(request) -> dict:
+    payload = _extract_request_payload(request)
+    return _coerce_dict_payload(payload.get("additionalInfo"))
+
+
+def _extract_request_chatbot_id(request) -> str:
+    payload = _extract_request_payload(request)
+    for key in ("chatBotID", "chatbotId", "chat_bot_id"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def _is_teams_activity(activity: dict) -> bool:
     return _extract_channel_id(activity) == "msteams"
 
@@ -263,6 +340,12 @@ def _build_proxy_payload_for_request(activity_dict: dict, request=None, dispatch
         ),
         "delivery_mode": "aistudio_api_reply",
     }
+    additional_info = _extract_request_additional_info(request)
+    if additional_info:
+        reply_channel["aistudio_additional_info"] = additional_info
+    chatbot_id = _extract_request_chatbot_id(request)
+    if chatbot_id:
+        reply_channel["aistudio_chatbot_id"] = chatbot_id
 
     return {
         "request_id": request_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import importlib
 import sys
 from contextlib import nullcontext
@@ -427,7 +428,21 @@ async def test_custom_api_messages_hook_thin_proxy_forwards_teams_identity(monke
         "user_type": "business",
     }
 
-    request = SimpleNamespace(headers={"Authorization": "Bearer teams-auth"})
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer teams-auth"},
+        body=json.dumps(
+            {
+                "additionalInfo": {
+                    "conversation_details": {
+                        "conversation_id": "thread-1",
+                        "chat_channel": "msteams",
+                    },
+                    "uuid": "uuid-1",
+                },
+                "chatBotID": "chatbot-1",
+            }
+        ).encode("utf-8"),
+    )
 
     result = await custom_hooks.CustomChatbotHooks.api_messages_hook(request, activity)
 
@@ -453,6 +468,14 @@ async def test_custom_api_messages_hook_thin_proxy_forwards_teams_identity(monke
     assert posted["json"]["reply_channel"]["channel"] == "msteams"
     assert posted["json"]["reply_channel"]["service_url"] == "https://smba.trafficmanager.net/amer/"
     assert posted["json"]["reply_channel"]["auth_header"] == "Bearer teams-auth"
+    assert posted["json"]["reply_channel"]["aistudio_additional_info"] == {
+        "conversation_details": {
+            "conversation_id": "thread-1",
+            "chat_channel": "msteams",
+        },
+        "uuid": "uuid-1",
+    }
+    assert posted["json"]["reply_channel"]["aistudio_chatbot_id"] == "chatbot-1"
 
 
 @pytest.mark.asyncio
