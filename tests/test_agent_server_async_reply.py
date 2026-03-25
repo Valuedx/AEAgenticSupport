@@ -74,3 +74,22 @@ def test_send_reply_channel_message_posts_to_aistudio_reply(monkeypatch):
     assert posted["json"]["thin_proxy_reply"]["reply_channel"]["channel"] == "msteams"
     assert posted["json"]["additionalInfo"]["auth_header"] == "Bearer teams-auth"
     assert posted["json"]["additionalInfo"]["conversation_details"]["chat_channel"] == "msteams"
+
+
+def test_validate_reply_channel_allows_teams_without_auth_header(monkeypatch):
+    monkeypatch.setattr(
+        agent_server,
+        "_cognibot_reply_url",
+        lambda: "http://cognibot.local/api/reply",
+    )
+
+    agent_server._validate_reply_channel(
+        {
+            "channel": "msteams",
+            "conversation_id": "conv-1",
+            "service_url": "https://smba.trafficmanager.net/amer/",
+            "tenant_id": "tenant-1",
+            "user_id": "user-1",
+            "bot_id": "bot-1",
+        }
+    )

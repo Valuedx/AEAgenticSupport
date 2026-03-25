@@ -355,8 +355,11 @@ def _validate_reply_channel(reply_channel: dict) -> None:
     if channel == "msteams":
         if not str(reply_channel.get("service_url") or "").strip():
             raise RuntimeError("Teams reply channel missing service_url.")
-        if not str(reply_channel.get("auth_header") or "").strip():
-            raise RuntimeError("Teams reply channel missing auth_header.")
+        # Teams completions are delivered back through AI Studio ``/api/reply``
+        # and then sent proactively via the stored Bot Framework conversation
+        # reference. The original inbound request auth header is available on
+        # the hook path, but optional for Designer-action wrappers that queue
+        # the same async callback flow.
 
 
 def _send_reply_channel_message(reply_channel: dict, text_or_activity) -> None:
