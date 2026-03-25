@@ -10,11 +10,12 @@ Implements the AI Studio Cognibot hook contract:
 """
 from __future__ import annotations
 
-import copy
 import logging
+import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
+import requests
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
@@ -31,7 +32,8 @@ from custom.helpers.activity import classify_approval_intent, extract_user_role
 from custom.helpers.locks import pg_advisory_lock
 from custom.helpers.teams_proactive import (
     save_conversation_ref,
-    send_proactive_async,
+    send_proactive_sync,
+    send_proactive_via_ref_sync,
 )
 from custom.helpers.db import is_duplicate_message, mark_message_processed
 from custom.helpers.teams import make_text_reply
@@ -43,12 +45,6 @@ from custom.helpers.issue_classifier import (
     link_cases,
     should_escalate_recurrence,
 )
-
-_BACKGROUND_TURN_POOL = ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="teams_turn",
-)
-_send_proactive_async = send_proactive_async
 
 
 # ── Activity normalisation ──
@@ -64,7 +60,18 @@ def _activity_to_dict(activity) -> dict:
         conv = getattr(activity, "conversation", None)
         result["conversation"] = {"id": getattr(conv, "id", "") or ""} if conv else {}
         frm = getattr(activity, "from_property", None) or getattr(activity, "from", None)
-        result["from"] = {"id": getattr(frm, "id", "") or ""} if frm else {}
+        if frm:
+            result["from"] = {
+                "id": getattr(frm, "id", "") or "",
+                "name": getattr(frm, "name", "") or "",
+                "aadObjectId": (
+                    getattr(frm, "aad_object_id", None)
+                    or getattr(frm, "aadObjectId", None)
+                    or ""
+                ),
+            }
+        else:
+            result["from"] = {}
         value = getattr(activity, "value", None)
         if value is not None:
             result["value"] = value
@@ -86,7 +93,14 @@ def _activity_to_dict(activity) -> dict:
         if channel_data:
             result["channelData"] = channel_data
         rcpt = getattr(activity, "recipient", None)
-        result["recipient"] = {"id": getattr(rcpt, "id", "") or ""} if rcpt else {}
+        if rcpt:
+            recipient = {"id": getattr(rcpt, "id", "") or ""}
+            recipient_name = getattr(rcpt, "name", "") or ""
+            if recipient_name:
+                recipient["name"] = recipient_name
+            result["recipient"] = recipient
+        else:
+            result["recipient"] = {}
     # Normalise user_type using the shared helper so all paths agree
     if not result.get("user_type"):
         result["user_type"] = extract_user_role(result)
@@ -127,8 +141,28 @@ def _extract_user_id(activity: dict) -> str:
     return (activity.get("from", {}) or {}).get("id", "")
 
 
+def _extract_user_name(activity: dict) -> str:
+    return str((activity.get("from", {}) or {}).get("name", "") or "").strip()
+
+
+def _extract_channel_id(activity: dict) -> str:
+    return str(activity.get("channelId") or "").strip().lower()
+
+
+def _extract_request_auth_header(request) -> str:
+    if request is None:
+        return ""
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        auth = headers.get("Authorization") or headers.get("authorization") or ""
+        if auth:
+            return str(auth).strip()
+    meta = getattr(request, "META", None) or {}
+    return str(meta.get("HTTP_AUTHORIZATION") or "").strip()
+
+
 def _is_teams_activity(activity: dict) -> bool:
-    return str(activity.get("channelId") or "").strip().lower() == "msteams"
+    return _extract_channel_id(activity) == "msteams"
 
 
 def _is_smalltalk(text: str) -> bool:
@@ -152,35 +186,239 @@ def _prepend_result_prefix(result: dict, prefix: str) -> dict:
     return result
 
 
-def _should_process_in_background(activity_dict: dict) -> bool:
-    text = _extract_text(activity_dict)
-    if not _is_teams_activity(activity_dict):
-        return False
-    if not text:
-        return False
-    if _is_smalltalk(text):
-        return False
-    return True
+def _thin_proxy_enabled() -> bool:
+    raw = os.environ.get("AI_STUDIO_THIN_PROXY_MODE", "true")
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _run_background_turn(activity_dict: dict) -> None:
-    thread_id = _extract_thread_id(activity_dict)
+def _agent_server_url() -> str:
+    return str(os.environ.get("AGENT_SERVER_URL", "http://localhost:5050")).rstrip("/")
 
-    def _on_progress(status_text: str) -> None:
-        _send_proactive_async(thread_id, status_text)
 
+def _agent_timeout_seconds() -> int:
     try:
-        result = _process_message_sync(activity_dict, on_progress=_on_progress)
-        if result is not None:
-            _send_proactive_async(thread_id, result)
-    except Exception:
-        logger.exception(
-            "Background support turn failed for thread %s", thread_id
+        return int(os.environ.get("AGENT_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        return 120
+
+
+def _extract_teams_metadata(activity: dict) -> dict:
+    frm = activity.get("from", {}) or {}
+    channel_data = activity.get("channelData", {}) or {}
+    tenant = channel_data.get("tenant", {}) if isinstance(channel_data.get("tenant"), dict) else {}
+    team = channel_data.get("team", {}) if isinstance(channel_data.get("team"), dict) else {}
+    channel = channel_data.get("channel", {}) if isinstance(channel_data.get("channel"), dict) else {}
+    recipient = activity.get("recipient", {}) or {}
+    metadata = {
+        "channel": _extract_channel_id(activity) or "unknown",
+        "service_url": str(activity.get("serviceUrl") or "").strip(),
+        "tenant_id": str(tenant.get("id") or "").strip(),
+        "team_id": str(team.get("id") or "").strip(),
+        "teams_channel_id": str(channel.get("id") or "").strip(),
+        "bot_id": str(recipient.get("id") or "").strip(),
+        "teams_user_id": str(frm.get("id") or "").strip(),
+        "aad_object_id": str(
+            frm.get("aadObjectId") or frm.get("aad_object_id") or ""
+        ).strip(),
+    }
+    return {key: value for key, value in metadata.items() if value}
+
+
+def _build_proxy_payload(activity_dict: dict) -> dict:
+    return _build_proxy_payload_for_request(activity_dict, request=None)
+
+
+def _build_proxy_payload_for_request(activity_dict: dict, request=None, dispatch_state: Optional[dict] = None) -> dict:
+    text = (
+        str(dispatch_state.get("text") or "").strip()
+        if dispatch_state else _extract_text(activity_dict)
+    )
+    thread_id = (
+        str(dispatch_state.get("thread_id") or "").strip()
+        if dispatch_state else _extract_thread_id(activity_dict)
+    )
+    request_id = (
+        str(dispatch_state.get("request_id") or "").strip()
+        if dispatch_state else _extract_message_id(activity_dict)
+    )
+    user_id = _extract_user_id(activity_dict) or "unknown-user"
+    user_name = _extract_user_name(activity_dict)
+    channel = _extract_channel_id(activity_dict) or "webchat"
+    teams_meta = _extract_teams_metadata(activity_dict)
+    recipient = activity_dict.get("recipient", {}) or {}
+
+    reply_channel = {
+        "channel": channel,
+        "conversation_id": thread_id,
+        "service_url": teams_meta.get("service_url", ""),
+        "tenant_id": teams_meta.get("tenant_id", ""),
+        "bot_id": teams_meta.get("bot_id", "") or str(recipient.get("id") or "").strip(),
+        "bot_name": str(recipient.get("name") or "").strip(),
+        "user_id": user_id,
+        "user_name": user_name,
+        "auth_header": _extract_request_auth_header(request),
+        "model_conversation_id": thread_id,
+        "aistudio_chat_channel": (
+            "msteams" if channel == "msteams" else "emulator"
+        ),
+        "delivery_mode": "aistudio_api_reply",
+    }
+
+    return {
+        "request_id": request_id,
+        "message": text,
+        "session_id": thread_id,
+        "user_id": user_id,
+        "user_role": extract_user_role(activity_dict),
+        "user_name": user_name,
+        "user_email": "",
+        "user_team": "",
+        "user_metadata": teams_meta,
+        "reply_channel": reply_channel,
+    }
+
+
+def _dispatch_proxy_turn(payload: dict) -> dict:
+    timeout = min(max(_agent_timeout_seconds(), 5), 15)
+    resp = requests.post(
+        f"{_agent_server_url()}/chat/async",
+        json=payload,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict) or not data.get("queued"):
+        raise RuntimeError("agent_server did not accept the async turn")
+    return data
+
+
+def _prepare_proxy_dispatch(activity_dict: dict):
+    """Persist minimal state and dedupe before handing the turn to agent_server."""
+    thread_id = _extract_thread_id(activity_dict)
+    request_id = _extract_message_id(activity_dict)
+    text = _extract_text(activity_dict)
+    if not text:
+        return None, make_text_reply(
+            "It looks like your message was empty. How can I help?"
         )
-        _send_proactive_async(
-            thread_id,
-            "I hit an internal error while processing your request. Please try again.",
+
+    if _is_teams_activity(activity_dict):
+        save_conversation_ref(activity_dict)
+
+    with pg_advisory_lock(thread_id):
+        if is_duplicate_message(thread_id, request_id):
+            return None, make_text_reply(
+                "I'm already working on that message. I'll send the result here shortly."
+            )
+
+        mark_message_processed(thread_id, request_id)
+
+        conv_state, _ = CogniState.objects.get_or_create(thread_id=thread_id)
+        conv_state.last_user_message_id = request_id
+        conv_state.updated_at = timezone.now()
+        conv_state.save()
+
+    return {
+        "thread_id": thread_id,
+        "request_id": request_id,
+        "text": text,
+    }, None
+
+
+def _normalize_callback_activity(text_or_activity) -> dict:
+    if isinstance(text_or_activity, dict):
+        activity = dict(text_or_activity)
+    else:
+        activity = {"type": "message", "text": str(text_or_activity)}
+    activity.setdefault("type", "message")
+    return activity
+
+
+def _directline_activity_url(service_url: str, conversation_id: str) -> str:
+    base = str(service_url or "").rstrip("/")
+    if base.endswith("/v3/directline"):
+        return f"{base}/conversations/{conversation_id}/activities"
+    return f"{base}/v3/directline/conversations/{conversation_id}/activities"
+
+
+def _send_directline_reply_sync(reply_channel: dict, text_or_activity) -> bool:
+    conversation_id = str(reply_channel.get("conversation_id") or "").strip()
+    service_url = str(reply_channel.get("service_url") or "").strip()
+    if not conversation_id or not service_url:
+        logger.warning(
+            "DirectLine callback missing conversation_id/service_url: %s",
+            reply_channel,
         )
+        return False
+
+    activity = _normalize_callback_activity(text_or_activity)
+    activity.setdefault(
+        "conversation", {"id": conversation_id}
+    )
+    activity.setdefault(
+        "channelId",
+        str(reply_channel.get("channel") or "webchat"),
+    )
+
+    bot_id = str(reply_channel.get("bot_id") or "").strip()
+    bot_name = str(reply_channel.get("bot_name") or "").strip()
+    user_id = str(reply_channel.get("user_id") or "").strip()
+    user_name = str(reply_channel.get("user_name") or "").strip()
+    if bot_id:
+        outbound_from = {"id": bot_id}
+        if bot_name:
+            outbound_from["name"] = bot_name
+        activity.setdefault("from", outbound_from)
+    if user_id:
+        outbound_recipient = {"id": user_id}
+        if user_name:
+            outbound_recipient["name"] = user_name
+        activity.setdefault("recipient", outbound_recipient)
+
+    headers = {"Content-Type": "application/json"}
+    auth_header = str(reply_channel.get("auth_header") or "").strip()
+    if auth_header:
+        headers["Authorization"] = auth_header
+
+    url = _directline_activity_url(service_url, conversation_id)
+    try:
+        resp = requests.post(
+            url,
+            json=activity,
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as exc:
+        logger.warning("DirectLine callback POST to %s failed: %s", url, exc)
+        return False
+
+
+def _send_thin_proxy_reply_sync(payload: dict) -> None:
+    reply_channel = (
+        payload.get("reply_channel")
+        if isinstance(payload.get("reply_channel"), dict)
+        else {}
+    )
+    activity = _normalize_callback_activity(payload.get("activity"))
+    channel = str(reply_channel.get("channel") or "").strip().lower()
+
+    if channel == "msteams":
+        ref = {
+            "thread_id": str(reply_channel.get("conversation_id") or "").strip(),
+            "service_url": str(reply_channel.get("service_url") or "").strip(),
+            "conversation_id": str(reply_channel.get("conversation_id") or "").strip(),
+            "bot_id": str(reply_channel.get("bot_id") or "").strip(),
+            "channel_id": "msteams",
+            "tenant_id": str(reply_channel.get("tenant_id") or "").strip() or None,
+        }
+        if not send_proactive_via_ref_sync(ref, activity):
+            raise RuntimeError("Teams callback delivery failed")
+        return
+
+    if not _send_directline_reply_sync(reply_channel, activity):
+        raise RuntimeError("DirectLine callback delivery failed")
 
 
 # ── Synchronous processing core (runs inside sync_to_async) ──
@@ -424,25 +662,82 @@ class CustomChatbotHooks(ChatbotHooks):
         """
         Invoked for every api/messages REST API call.
         Normalises the Activity, delegates to synchronous processing, and
-        wires ``send_proactive_sync`` as the progress callback so the agent
-        can push interim status messages to Teams during long investigations.
+        either dispatches to the thin external proxy or runs inline support
+        processing when proxy mode is disabled or unavailable.
         Returns a dict ``{"type": "message", "text": "..."}`` or None.
         """
         activity_dict = _activity_to_dict(activity)
+        if _thin_proxy_enabled():
+            try:
+                dispatch_state, immediate_reply = await sync_to_async(
+                    _prepare_proxy_dispatch, thread_sensitive=False
+                )(activity_dict)
+                if immediate_reply is not None:
+                    return immediate_reply
+
+                payload = _build_proxy_payload_for_request(
+                    activity_dict,
+                    request=request,
+                    dispatch_state=dispatch_state,
+                )
+                await sync_to_async(
+                    _dispatch_proxy_turn, thread_sensitive=False
+                )(payload)
+                return make_text_reply(
+                    "I'm working on that now. I'll send the result here shortly."
+                )
+            except Exception as exc:
+                logger.error(
+                    "Thin proxy dispatch failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return make_text_reply(
+                    "I couldn't queue your request right now. Please try again in a moment."
+                )
+
         thread_id = _extract_thread_id(activity_dict)
 
-        if _should_process_in_background(activity_dict):
-            save_conversation_ref(activity_dict)
-            _BACKGROUND_TURN_POOL.submit(
-                _run_background_turn, copy.deepcopy(activity_dict)
-            )
-            return make_text_reply(
-                "I'm working on that now. I'll send updates here shortly."
-            )
-
         def _on_progress(status_text: str) -> None:
-            _send_proactive_async(thread_id, status_text)
+            send_proactive_sync(thread_id, status_text)
 
         return await sync_to_async(
             _process_message_sync, thread_sensitive=False
         )(activity_dict, on_progress=_on_progress)
+
+    @staticmethod
+    async def api_reply_hook(request, body):
+        if not isinstance(body, dict):
+            return
+
+        thin_proxy_payload = (
+            body.get("thin_proxy_reply")
+            if isinstance(body.get("thin_proxy_reply"), dict)
+            else None
+        )
+        if thin_proxy_payload is None:
+            return
+
+        await sync_to_async(
+            _send_thin_proxy_reply_sync,
+            thread_sensitive=False,
+        )(thin_proxy_payload)
+
+        additional_info = (
+            body.get("additionalInfo")
+            if isinstance(body.get("additionalInfo"), dict)
+            else {}
+        )
+        conversation_details = (
+            additional_info.get("conversation_details")
+            if isinstance(additional_info.get("conversation_details"), dict)
+            else {}
+        )
+        auth_header = str(additional_info.get("auth_header") or "").strip()
+
+        body.clear()
+        body["additionalInfo"] = {
+            "auth_header": auth_header,
+            "conversation_details": conversation_details,
+            "uuid": "__thin_proxy_handled__",
+        }

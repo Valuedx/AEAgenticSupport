@@ -81,6 +81,9 @@ Once these are configured, every channel (Teams, AI Studio webchat, standalone w
 
 ## 1. Step 1 — User Sends a Message (Per Channel)
 
+> **Documentation Update (2026-03-25)**  
+> The main AI Studio Extension path is now a **thin async adapter** by default. `custom/custom_hooks.py` performs only cheap normalization, dedupe, minimal state persistence, and queueing to `agent_server.py` via `POST /chat/async`, then returns an acknowledgement immediately. Final responses come back through AI Studio `POST /api/reply` and `api_reply_hook`. Older inline execution examples and the `custom_cognibot/` dialog proxy remain as local/reference patterns only.
+
 ### 1.1 MS Teams (Production path)
 
 1. **Teams user** sends a message to the bot.
@@ -88,6 +91,19 @@ Once these are configured, every channel (Teams, AI Studio webchat, standalone w
 3. Cognibot invokes the Extension hook:
    - **File:** `custom/custom_hooks.py`
    - **Entry:** `CustomChatbotHooks.api_messages_hook(request, activity)`  
+4. The hook performs only channel-adapter work inside Cognibot:
+   - normalize the Bot Framework activity
+   - capture the Teams conversation reference
+   - acquire the per-thread lock
+   - dedupe and store minimal thread state
+   - queue the real turn to `agent_server.py /chat/async`
+   - immediately return an acknowledgement
+5. `agent_server.py` runs the real agentic workflow outside AI Studio.
+6. When that worker finishes, it calls AI Studio `POST /api/reply`.
+7. Cognibot invokes:
+   - **File:** `custom/custom_hooks.py`
+   - **Entry:** `CustomChatbotHooks.api_reply_hook(request, body)`  
+8. `api_reply_hook` delivers the final activity back to the real channel.
    - Contract details and setup are described in:
      - `AI_Studio_OnPrem_Agentic_Support_StepByStep(1).md`
      - Sections 6, 7, 12 of `SETUP_GUIDE.md`.
@@ -111,6 +127,7 @@ Once these are configured, every channel (Teams, AI Studio webchat, standalone w
     - `/admin` and `/tools` — React control center
     - `/docs` — public documentation library
   - Both call into the same `MessageGateway` as AI Studio.
+  - For AI Studio Extension callbacks, the same server also exposes `POST /chat/async`, which queues a turn for completion back through AI Studio `POST /api/reply`.
   - Setup and usage: **Section 8.2 of `SETUP_GUIDE.md`**.
 
 - **CLI:**
@@ -141,6 +158,8 @@ Regardless of channel, messages are normalized and sent to the **Message Gateway
      - **Entry:** `handle_support_turn(...)`
 
 In **agentic mode**, `support_agent.py` acts mainly as a planner/executor front for the orchestrator; the full LLM+tool loop is handled in `agents/orchestrator.py`, but Django `Approval` rows are still synchronized after gateway decisions so the Extension hook stays authoritative. In deterministic mode, `support_agent.py` can execute a fixed plan using REST tools only; risky plans only open an approval gate when a non-empty on-shift roster exists, and an approved plan executes without re-opening approval.
+
+**Current production note:** the default Extension path no longer executes the full support-agent flow inline inside Cognibot. In the current thin-proxy mode, `api_messages_hook` stops after lock/dedupe/minimal-state work and queues the turn to `agent_server.py /chat/async`; the final reply is delivered later from `api_reply_hook`.
 
 ### 2.2 Webchat / AI Studio adapters
 

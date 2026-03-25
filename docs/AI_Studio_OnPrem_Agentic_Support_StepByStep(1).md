@@ -1545,3 +1545,8 @@ Key things to remember:
 > - The AI Studio webchat browser client now uses server-side proxy routes for Direct Line activity instead of exposing the secret in page code.
 > - Public documentation is now served at `/docs` from a persisted document catalog that can be managed through the control center.
 >
+> **Documentation Update (2026-03-25)**
+> - The production top-level Extension now uses `custom/custom_hooks.py::api_messages_hook` as a thin async adapter: cheap normalization, dedupe, minimal state persistence, then `POST /chat/async`.
+> - Final responses now come back through AI Studio `POST /api/reply` and `custom/custom_hooks.py::api_reply_hook`.
+> - The `AgentProxyDialog` / local DirectLine dialog flow in Section 17 should be read as **local `custom_cognibot/` guidance only**, not the recommended production path.
+>

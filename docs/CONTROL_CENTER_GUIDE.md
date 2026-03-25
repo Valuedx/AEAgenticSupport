@@ -162,6 +162,7 @@ The UI is intended to manage configuration, wording, and operational metadata. I
 Secrets should remain in environment variables or secret storage, including:
 
 - `COGNIBOT_DIRECTLINE_SECRET`
+- server-owned AI Studio callback configuration such as `COGNIBOT_BASE_URL`
 - database credentials
 - cloud credentials
 - AE API keys and passwords

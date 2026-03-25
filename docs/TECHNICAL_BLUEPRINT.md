@@ -43,6 +43,8 @@
 >
 ## AutomationEdge Agentic Support — Technical Blueprint
 
+> **Documentation Update (2026-03-25)**: The main AI Studio Extension path is now a **thin async adapter**. `custom/custom_hooks.py::api_messages_hook` does cheap normalization, dedupe, minimal state persistence, and queues work to `agent_server.py /chat/async`; completion comes back through AI Studio `POST /api/reply` and `custom/custom_hooks.py::api_reply_hook`. The older inline/support-agent-in-hook and local `custom_cognibot/` dialog proxy paths are no longer the recommended production model.
+
 **Version:** 1.5  
 **Last updated:** 2026-03-24
 
@@ -65,6 +67,8 @@
   - MS Teams via Azure Bot / Cognibot.
   - Standalone webchat via `agent_server.py`.
   - Public documentation library via `/docs`.
+
+**Current production note:** the default AI Studio Extension path is now `custom/custom_hooks.py::api_messages_hook` -> `agent_server.py /chat/async` -> external agentic execution -> AI Studio `POST /api/reply` -> `custom/custom_hooks.py::api_reply_hook` -> channel delivery.
 
 Request path examples:
 - **AI Studio webchat → `main.py` → `MessageGateway` → `AgentRouter` → `Supervisor` → (Delegation) → `Specialist` → tools + Hybrid RAG → response**
@@ -122,12 +126,14 @@ Request path examples:
   - `models.py` + `migrations/`: Django models for cases, approvals, processed messages, links.
   - `helpers/`: Locks, DB helpers, RAG stubs, REST tool client, roster, Teams helpers, Teams proactive sender, shared activity helpers, issue classifier.
   - `functions/python/support_agent.py`: Planner + executor for Extension, using REST tools and syncing approval state between Django and the gateway.
+  - In the current production path, `custom/custom_hooks.py` is thinner than that older summary: `api_messages_hook` now does cheap dedupe/minimal-state work and queues to `agent_server.py /chat/async`; `api_reply_hook` handles async completion delivery.
 - **`custom_cognibot/`**
   - Thin-proxy hooks used for local Cognibot → standalone agent server integration, including `/chat/stream` SSE forwarding for Teams progress updates.
 - **`agent_server.py`**
   - Standalone Flask/SSE server that exposes the agent as HTTP (`/chat`, `/chat/stream`, webchat UI, admin UI, docs UI).
   - Hosts admin configuration, tool override, scheduler, document catalog, and conversation-history APIs.
   - Proxies AI Studio Direct Line requests server-side so browser clients do not need the raw secret.
+  - Also handles async AI Studio Extension turns through `POST /chat/async` and sends completion back through AI Studio `POST /api/reply`.
 - **`main.py`**
   - AI Studio project entrypoint (`handle_chat_message`), used for webchat / Extension deployments.
   - Delegates tool startup initialization to `tools/bootstrap.py`.
@@ -235,6 +241,8 @@ For each routed message:
 
 ### 5.2 AI Studio Extension + MS Teams (Cognibot)
 
+**Current production note:** by default, the top-level Extension no longer executes the full planner/executor path inside Cognibot. It now stops after cheap validation/dedupe/minimal-state work, queues to `agent_server.py /chat/async`, returns an acknowledgement, and later delivers the final activity from `api_reply_hook` after AI Studio invokes `POST /api/reply`.
+
 - `custom/custom_hooks.py`:
   - Async `api_messages_hook(request, activity)`:
     - Converts Bot Framework activity → dict, extracts `thread_id`, message ID, text, user ID, and the Bot Framework fields required for proactive sends.
@@ -256,6 +264,8 @@ For each routed message:
     - Updates/creates tickets and escalations through typed tools.
 
 ### 5.3 Standalone Agent Server + Webchat
+
+`agent_server.py` now also exposes `POST /chat/async` for the main AI Studio Extension path. That path queues work and later sends completion back through AI Studio `POST /api/reply`; the `custom_cognibot/` flow remains local-only.
 
 - `agent_server.py`:
   - `/chat`: JSON request → synchronous response.

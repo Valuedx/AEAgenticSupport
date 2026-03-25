@@ -757,6 +757,8 @@ python agent_server.py
 
 **Webchat:** Open `http://localhost:5050/` in your browser for an interactive chat interface. This is the fastest way to test the agent locally without Teams or AI Studio. When using the streaming endpoint, you will see real-time progress messages (e.g., "Looking into this...", "Checking workflow status...") as italic status text that updates in-place during long investigations.
 
+For the main AI Studio Extension path, `custom/custom_hooks.py` now uses `POST /chat/async` by default. The hook acknowledges immediately, and `agent_server.py` sends the final response back through AI Studio `POST /api/reply`.
+
 ### 8.3 Run the mock AE API (for local testing)
 
 In one terminal:
@@ -1040,6 +1042,8 @@ The agent sends real-time progress messages to users during long investigations 
 
 - **Cognibot proxy** — The Teams `api_messages_hook()` path now also uses the SSE endpoint and forwards `event: progress` updates through stored Teams conversation references via proactive Bot Framework sends. `event: done` is returned as the final reply. The legacy `/chat` path remains for backward compatibility, but Teams progress now depends on `/chat/stream`.
 
+**Current production note:** the main top-level Extension no longer runs long agentic work or background ORM threads inside Cognibot. It performs cheap dedupe/minimal-state work, calls `POST /chat/async`, returns an acknowledgement, and later delivers the final reply from `api_reply_hook` after AI Studio invokes `POST /api/reply`.
+
 ### 11.5 Adding New Tools
 
 1. Create the handler function in the appropriate `tools/*.py` file
@@ -1216,6 +1220,8 @@ for dialog_cls in CustomChatbotHooks.export_dialogs:
 
 ### 12.5 The `AgentProxyDialog` Pattern
 
+> **Scope note:** This section describes the **local `custom_cognibot/` sample proxy** used to exercise the Cognibot dialog engine during local development. The production top-level Extension in `custom/custom_hooks.py` no longer relies on `AgentProxyDialog`; it uses `api_messages_hook` â†’ `/chat/async` â†’ `/api/reply`.
+
 Our custom dialog (`AgentProxyDialog`) bridges Cognibot to the standalone agent server:
 
 ```python
@@ -1228,7 +1234,7 @@ class AgentProxyDialog(ComponentDialog):
     @staticmethod
     async def _call_agent_step(step_context):
         # 1. Extract text, conversation_id, user_id from turn_context
-        # 2. HTTP POST to agent_server:5050/chat
+        # 2. HTTP POST to agent_server:5050/chat or /chat/stream (local sample path)
         # 3. send_activity(reply_text)
         # 4. cancel_all_dialogs() — prevents RootDialog from continuing
 ```
@@ -1236,6 +1242,8 @@ class AgentProxyDialog(ComponentDialog):
 **Why `cancel_all_dialogs()`?** After the agent sends its response, we must prevent the RootDialog waterfall from continuing (which would trigger "No skill available" or other fallback messages). `cancel_all_dialogs()` halts the entire dialog stack.
 
 ### 12.6 DirectLine / WebSocket Message Flow
+
+> **Scope note:** This is the **local dialog-proxy / DirectLine** path. The production AI Studio Extension path is asynchronous: `api_messages_hook` queues work to `agent_server /chat/async`, returns immediately, and the worker later calls AI Studio `POST /api/reply`.
 
 ```
 Browser (webchat)                    Cognibot (port 3978)              Agent Server (5050)

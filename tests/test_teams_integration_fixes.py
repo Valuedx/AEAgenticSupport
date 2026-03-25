@@ -78,6 +78,16 @@ class FakeApproval:
         self.save_calls += 1
 
 
+class FakeConversationStateRecord:
+    def __init__(self):
+        self.last_user_message_id = None
+        self.updated_at = None
+        self.save_calls = 0
+
+    def save(self):
+        self.save_calls += 1
+
+
 def _load_cognibot_hooks(monkeypatch):
     hooks_mod = ModuleType("aistudiobot.hooks")
 
@@ -354,69 +364,223 @@ def test_agentic_handle_support_turn_marks_pending_approval_after_gateway_accept
 
 
 @pytest.mark.asyncio
-async def test_custom_api_messages_hook_backgrounds_teams_support_turn(monkeypatch):
-    saved_threads = []
-    submitted = []
+async def test_custom_api_messages_hook_thin_proxy_forwards_teams_identity(monkeypatch):
+    posted = {}
+    saved_refs = []
+    marked = []
+    conv_state = FakeConversationStateRecord()
 
-    class FakeExecutor:
-        def submit(self, fn, *args, **kwargs):
-            submitted.append((fn, args, kwargs))
-            return SimpleNamespace()
+    class FakeResponse:
+        content = b'{"queued": true}'
 
-    monkeypatch.setattr(custom_hooks, "_BACKGROUND_TURN_POOL", FakeExecutor())
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"queued": True}
+
+    def _fake_post(url, json=None, timeout=None, **_kwargs):
+        posted["url"] = url
+        posted["json"] = json
+        posted["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("AI_STUDIO_THIN_PROXY_MODE", "true")
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://agent.test")
+    monkeypatch.setenv("AGENT_TIMEOUT", "45")
+    monkeypatch.setattr(custom_hooks, "save_conversation_ref", lambda activity: saved_refs.append(activity))
+    monkeypatch.setattr(custom_hooks, "pg_advisory_lock", lambda _thread_id: nullcontext())
+    monkeypatch.setattr(custom_hooks, "is_duplicate_message", lambda *_args: False)
     monkeypatch.setattr(
         custom_hooks,
-        "save_conversation_ref",
-        lambda activity: saved_threads.append(activity["conversation"]["id"]),
+        "mark_message_processed",
+        lambda thread_id, request_id: marked.append((thread_id, request_id)),
     )
+    monkeypatch.setattr(
+        custom_hooks,
+        "CogniState",
+        SimpleNamespace(
+            objects=SimpleNamespace(
+                get_or_create=lambda **_kwargs: (conv_state, False)
+            )
+        ),
+    )
+    monkeypatch.setattr(custom_hooks.requests, "post", _fake_post)
 
     activity = {
         "text": "Please investigate the failed workflow",
         "id": "msg-1",
         "conversation": {"id": "thread-1"},
-        "from": {"id": "user-1"},
+        "from": {
+            "id": "user-1",
+            "name": "Pat User",
+            "aadObjectId": "aad-123",
+        },
         "channelId": "msteams",
+        "serviceUrl": "https://smba.trafficmanager.net/amer/",
+        "recipient": {"id": "bot-1"},
+        "channelData": {
+            "tenant": {"id": "tenant-1"},
+            "team": {"id": "team-1"},
+            "channel": {"id": "channel-1"},
+        },
+        "user_type": "business",
     }
 
-    result = await custom_hooks.CustomChatbotHooks.api_messages_hook(None, activity)
+    request = SimpleNamespace(headers={"Authorization": "Bearer teams-auth"})
+
+    result = await custom_hooks.CustomChatbotHooks.api_messages_hook(request, activity)
 
     assert result == {
         "type": "message",
-        "text": "I'm working on that now. I'll send updates here shortly.",
+        "text": "I'm working on that now. I'll send the result here shortly.",
     }
-    assert saved_threads == ["thread-1"]
-    assert len(submitted) == 1
-    assert submitted[0][0] is custom_hooks._run_background_turn
-    assert submitted[0][1][0]["conversation"]["id"] == "thread-1"
+    assert saved_refs == [activity]
+    assert marked == [("thread-1", "msg-1")]
+    assert conv_state.last_user_message_id == "msg-1"
+    assert conv_state.save_calls == 1
+    assert posted["url"] == "http://agent.test/chat/async"
+    assert posted["timeout"] == 15
+    assert posted["json"]["request_id"] == "msg-1"
+    assert posted["json"]["session_id"] == "thread-1"
+    assert posted["json"]["user_id"] == "user-1"
+    assert posted["json"]["user_name"] == "Pat User"
+    assert posted["json"]["user_role"] == "business"
+    assert posted["json"]["user_metadata"]["aad_object_id"] == "aad-123"
+    assert posted["json"]["user_metadata"]["tenant_id"] == "tenant-1"
+    assert posted["json"]["user_metadata"]["team_id"] == "team-1"
+    assert posted["json"]["user_metadata"]["teams_channel_id"] == "channel-1"
+    assert posted["json"]["reply_channel"]["channel"] == "msteams"
+    assert posted["json"]["reply_channel"]["service_url"] == "https://smba.trafficmanager.net/amer/"
+    assert posted["json"]["reply_channel"]["auth_header"] == "Bearer teams-auth"
 
 
-def test_run_background_turn_sends_progress_and_final_reply(monkeypatch):
-    proactive_calls = []
-
-    def _fake_process(activity_dict, on_progress=None):
-        if on_progress is not None:
-            on_progress("Investigating...")
-        return {"type": "message", "text": "Done"}
-
-    monkeypatch.setattr(custom_hooks, "_process_message_sync", _fake_process)
+@pytest.mark.asyncio
+async def test_custom_api_messages_hook_thin_proxy_duplicate_short_circuits(monkeypatch):
+    monkeypatch.setenv("AI_STUDIO_THIN_PROXY_MODE", "true")
+    monkeypatch.setattr(custom_hooks, "save_conversation_ref", lambda _activity: None)
+    monkeypatch.setattr(custom_hooks, "pg_advisory_lock", lambda _thread_id: nullcontext())
+    monkeypatch.setattr(custom_hooks, "is_duplicate_message", lambda *_args: True)
     monkeypatch.setattr(
         custom_hooks,
-        "_send_proactive_async",
-        lambda thread_id, payload: proactive_calls.append((thread_id, payload)),
+        "mark_message_processed",
+        lambda *_args: pytest.fail("duplicate should not be re-marked"),
+    )
+    monkeypatch.setattr(
+        custom_hooks.requests,
+        "post",
+        lambda *_args, **_kwargs: pytest.fail("duplicate should not dispatch"),
     )
 
-    custom_hooks._run_background_turn(
+    result = await custom_hooks.CustomChatbotHooks.api_messages_hook(
+        None,
         {
-            "text": "Investigate this",
+            "text": "Please investigate the failed workflow",
+            "id": "msg-dup",
             "conversation": {"id": "thread-1"},
+            "from": {"id": "user-1"},
             "channelId": "msteams",
-        }
+        },
     )
 
-    assert proactive_calls == [
-        ("thread-1", "Investigating..."),
-        ("thread-1", {"type": "message", "text": "Done"}),
+    assert result == {
+        "type": "message",
+        "text": "I'm already working on that message. I'll send the result here shortly.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_custom_api_messages_hook_thin_proxy_dispatch_failure_returns_queue_error(monkeypatch):
+    conv_state = FakeConversationStateRecord()
+
+    monkeypatch.setenv("AI_STUDIO_THIN_PROXY_MODE", "true")
+    monkeypatch.setattr(custom_hooks, "save_conversation_ref", lambda _activity: None)
+    monkeypatch.setattr(custom_hooks, "pg_advisory_lock", lambda _thread_id: nullcontext())
+    monkeypatch.setattr(custom_hooks, "is_duplicate_message", lambda *_args: False)
+    monkeypatch.setattr(custom_hooks, "mark_message_processed", lambda *_args: None)
+    monkeypatch.setattr(
+        custom_hooks,
+        "CogniState",
+        SimpleNamespace(
+            objects=SimpleNamespace(
+                get_or_create=lambda **_kwargs: (conv_state, False)
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        custom_hooks,
+        "handle_support_turn",
+        lambda **_kwargs: pytest.fail("thin proxy must not fall back inline"),
+    )
+
+    def _broken_post(*_args, **_kwargs):
+        raise RuntimeError("agent down")
+
+    monkeypatch.setattr(custom_hooks.requests, "post", _broken_post)
+
+    result = await custom_hooks.CustomChatbotHooks.api_messages_hook(
+        None,
+        {
+            "text": "Check this issue",
+            "id": "msg-err",
+            "conversation": {"id": "thread-1"},
+            "from": {"id": "user-1"},
+            "channelId": "msteams",
+        },
+    )
+
+    assert result == {
+        "type": "message",
+        "text": "I couldn't queue your request right now. Please try again in a moment.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_custom_api_reply_hook_handles_thin_proxy_payload(monkeypatch):
+    sent = []
+
+    monkeypatch.setattr(
+        custom_hooks,
+        "_send_thin_proxy_reply_sync",
+        lambda payload: sent.append(payload),
+    )
+
+    body = {
+        "thin_proxy_reply": {
+            "activity": {"type": "message", "text": "Final reply"},
+            "reply_channel": {"channel": "msteams", "conversation_id": "thread-1"},
+        },
+        "additionalInfo": {
+            "auth_header": "Bearer teams-auth",
+            "conversation_details": {
+                "conversation_id": "thread-1",
+                "chat_channel": "msteams",
+            },
+            "uuid": "__thin_proxy_async__",
+        },
+    }
+
+    await custom_hooks.CustomChatbotHooks.api_reply_hook(None, body)
+
+    assert sent == [
+        {
+            "activity": {"type": "message", "text": "Final reply"},
+            "reply_channel": {
+                "channel": "msteams",
+                "conversation_id": "thread-1",
+            },
+        }
     ]
+    assert body == {
+        "additionalInfo": {
+            "auth_header": "Bearer teams-auth",
+            "conversation_details": {
+                "conversation_id": "thread-1",
+                "chat_channel": "msteams",
+            },
+            "uuid": "__thin_proxy_handled__",
+        }
+    }
 
 
 @pytest.mark.asyncio

@@ -183,6 +183,61 @@ def get_conversation_ref(thread_id: str) -> Optional[dict]:
 
 # ── Proactive sender ──────────────────────────────────────────────────────────
 
+def send_proactive_via_ref_sync(ref: dict, text_or_card) -> bool:
+    """Send *text_or_card* using an explicit Bot Framework conversation ref."""
+    if not ref:
+        logger.warning("send_proactive_via_ref_sync: empty conversation ref")
+        return False
+
+    try:
+        token = _get_bot_token()
+    except Exception as exc:
+        logger.warning(
+            "send_proactive_via_ref_sync: cannot obtain bot token: %s", exc
+        )
+        return False
+
+    if isinstance(text_or_card, str):
+        activity = {"type": "message", "text": text_or_card}
+    else:
+        activity = dict(text_or_card)
+
+    # Bot Framework requires these fields on the outbound activity.
+    activity.setdefault("from", {"id": ref.get("bot_id", "")})
+    activity.setdefault(
+        "conversation", {"id": ref.get("conversation_id", "")}
+    )
+    activity.setdefault("channelId", ref.get("channel_id", "msteams"))
+    if ref.get("tenant_id"):
+        activity.setdefault(
+            "channelData", {"tenant": {"id": ref["tenant_id"]}}
+        )
+
+    url = (
+        f"{str(ref.get('service_url', '')).rstrip('/')}/v3/conversations"
+        f"/{ref.get('conversation_id', '')}/activities"
+    )
+    try:
+        resp = requests.post(
+            url,
+            json=activity,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.debug(
+            "send_proactive_via_ref_sync: sent to %s (%d chars)",
+            ref.get("thread_id") or ref.get("conversation_id"),
+            len(str(text_or_card)),
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "send_proactive_via_ref_sync: POST to %s failed: %s", url, exc
+        )
+        return False
+
+
 def send_proactive_sync(thread_id: str, text_or_card) -> bool:
     """Send *text_or_card* to a Teams thread without an incoming user message.
 
@@ -200,50 +255,7 @@ def send_proactive_sync(thread_id: str, text_or_card) -> bool:
             thread_id,
         )
         return False
-
-    try:
-        token = _get_bot_token()
-    except Exception as exc:
-        logger.warning("send_proactive_sync: cannot obtain bot token: %s", exc)
-        return False
-
-    if isinstance(text_or_card, str):
-        activity = {"type": "message", "text": text_or_card}
-    else:
-        activity = dict(text_or_card)
-
-    # Bot Framework requires these fields on the outbound activity
-    activity.setdefault("from", {"id": ref["bot_id"]})
-    activity.setdefault("conversation", {"id": ref["conversation_id"]})
-    activity.setdefault("channelId", ref["channel_id"])
-    if ref.get("tenant_id"):
-        activity.setdefault(
-            "channelData", {"tenant": {"id": ref["tenant_id"]}}
-        )
-
-    url = (
-        f"{ref['service_url']}/v3/conversations"
-        f"/{ref['conversation_id']}/activities"
-    )
-    try:
-        resp = requests.post(
-            url,
-            json=activity,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        logger.debug(
-            "send_proactive_sync: sent to %s (%d chars)",
-            thread_id,
-            len(str(text_or_card)),
-        )
-        return True
-    except Exception as exc:
-        logger.warning(
-            "send_proactive_sync: POST to %s failed: %s", url, exc
-        )
-        return False
+    return send_proactive_via_ref_sync(ref, text_or_card)
 
 
 def send_proactive_async(thread_id: str, text_or_card) -> Future:

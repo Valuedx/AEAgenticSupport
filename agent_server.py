@@ -24,6 +24,7 @@ import re
 import requests
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,6 +50,12 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 app = Flask(__name__)
 CORS(app)
 log = logging.getLogger("agent_server")
+
+_BOT_TOKEN_CACHE: tuple[str, float] = ("", 0.0)
+_BOT_TOKEN_URL = (
+    "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
+)
+_BOT_TOKEN_SCOPE = "https://api.botframework.com/.default"
 
 
 def _admin_check():
@@ -192,6 +199,170 @@ def _cognibot_request(method: str, path: str, payload: dict | None = None) -> tu
         }, 504
 
 
+def _normalize_outbound_activity(text_or_activity) -> dict:
+    if isinstance(text_or_activity, dict):
+        return dict(text_or_activity)
+    return {"type": "message", "text": str(text_or_activity)}
+
+
+def _cognibot_reply_url() -> str:
+    base_url = _cognibot_base_url()
+    if not base_url:
+        raise RuntimeError(
+            "AI Studio async reply is not configured on this server. Set COGNIBOT_BASE_URL."
+        )
+    return f"{base_url}/api/reply"
+
+
+def _build_cognibot_reply_payload(reply_channel: dict, text_or_activity) -> dict:
+    activity = _normalize_outbound_activity(text_or_activity)
+    conversation_id = str(reply_channel.get("conversation_id") or "").strip()
+    channel = str(reply_channel.get("channel") or "").strip().lower() or "webchat"
+    service_url = str(reply_channel.get("service_url") or "").strip()
+    user_id = str(reply_channel.get("user_id") or "webchat_user").strip() or "webchat_user"
+    user_name = str(reply_channel.get("user_name") or "Webchat User").strip() or "Webchat User"
+    bot_id = str(reply_channel.get("bot_id") or "bot").strip() or "bot"
+    bot_name = str(reply_channel.get("bot_name") or "Agentic AI Bot").strip() or "Agentic AI Bot"
+    auth_header = str(reply_channel.get("auth_header") or "").strip()
+    aistudio_chat_channel = str(
+        reply_channel.get("aistudio_chat_channel")
+        or ("msteams" if channel == "msteams" else "emulator")
+    ).strip() or "emulator"
+
+    callback_channel = dict(reply_channel)
+    callback_channel.setdefault("channel", channel)
+    callback_channel.setdefault("conversation_id", conversation_id)
+    callback_channel.setdefault("user_id", user_id)
+    callback_channel.setdefault("user_name", user_name)
+    callback_channel.setdefault("bot_id", bot_id)
+    callback_channel.setdefault("bot_name", bot_name)
+    callback_channel.setdefault("service_url", service_url)
+    callback_channel.setdefault("auth_header", auth_header)
+
+    return {
+        "thin_proxy_reply": {
+            "activity": activity,
+            "reply_channel": callback_channel,
+        },
+        "additionalInfo": {
+            "auth_header": auth_header,
+            "uuid": "__thin_proxy_async__",
+            "conversation_details": {
+                "bot_id": bot_id,
+                "bot_name": bot_name,
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "user_name": user_name,
+                "chat_channel": aistudio_chat_channel,
+                "service_url": service_url,
+                "model_conversation_id": str(
+                    reply_channel.get("model_conversation_id") or conversation_id
+                ).strip() or conversation_id,
+            },
+        },
+    }
+
+
+def _send_cognibot_reply(reply_channel: dict, text_or_activity) -> None:
+    payload = _build_cognibot_reply_payload(reply_channel, text_or_activity)
+    resp = requests.post(
+        _cognibot_reply_url(),
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+
+
+def _get_botframework_token() -> str:
+    global _BOT_TOKEN_CACHE
+    token, expiry = _BOT_TOKEN_CACHE
+    if token and time.time() < expiry - 60:
+        return token
+
+    app_id = str(os.environ.get("MS_APP_ID") or os.environ.get("APP_ID") or "").strip()
+    app_password = str(
+        os.environ.get("MS_APP_PASSWORD") or os.environ.get("APP_PASSWORD") or ""
+    ).strip()
+    if not app_id or not app_password:
+        raise RuntimeError("MS_APP_ID and MS_APP_PASSWORD must be set for Teams callbacks.")
+
+    resp = requests.post(
+        _BOT_TOKEN_URL,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": app_id,
+            "client_secret": app_password,
+            "scope": _BOT_TOKEN_SCOPE,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    token = str(data.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError("Bot Framework OAuth token response did not include access_token.")
+    expires_in = int(data.get("expires_in", 3600))
+    _BOT_TOKEN_CACHE = (token, time.time() + expires_in)
+    return token
+
+
+def _send_botframework_activity(reply_channel: dict, text_or_activity) -> None:
+    service_url = str(reply_channel.get("service_url") or "").rstrip("/")
+    conversation_id = str(reply_channel.get("conversation_id") or "").strip()
+    if not service_url or not conversation_id:
+        raise RuntimeError("Teams reply channel is missing service_url or conversation_id.")
+
+    token = _get_botframework_token()
+    activity = _normalize_outbound_activity(text_or_activity)
+    activity.setdefault("from", {"id": str(reply_channel.get("bot_id") or "").strip()})
+    activity.setdefault("conversation", {"id": conversation_id})
+    activity.setdefault("channelId", "msteams")
+    tenant_id = str(reply_channel.get("tenant_id") or "").strip()
+    if tenant_id:
+        activity.setdefault("channelData", {"tenant": {"id": tenant_id}})
+
+    resp = requests.post(
+        f"{service_url}/v3/conversations/{conversation_id}/activities",
+        json=activity,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+
+
+def _send_directline_activity(reply_channel: dict, text_or_activity) -> None:
+    conversation_id = str(reply_channel.get("conversation_id") or "").strip()
+    if not conversation_id:
+        raise RuntimeError("DirectLine reply channel is missing conversation_id.")
+    payload = _normalize_outbound_activity(text_or_activity)
+    data, status_code = _cognibot_request(
+        "POST",
+        f"/v3/directline/conversations/{conversation_id}/activities",
+        payload,
+    )
+    if status_code >= 300:
+        raise RuntimeError(
+            data.get("error") or data.get("message") or f"DirectLine HTTP {status_code}"
+        )
+
+
+def _validate_reply_channel(reply_channel: dict) -> None:
+    _cognibot_reply_url()
+    channel = str(reply_channel.get("channel") or "").strip().lower()
+    if not str(reply_channel.get("conversation_id") or "").strip():
+        raise RuntimeError("Reply channel missing conversation_id.")
+    if channel == "msteams":
+        if not str(reply_channel.get("service_url") or "").strip():
+            raise RuntimeError("Teams reply channel missing service_url.")
+        if not str(reply_channel.get("auth_header") or "").strip():
+            raise RuntimeError("Teams reply channel missing auth_header.")
+
+
+def _send_reply_channel_message(reply_channel: dict, text_or_activity) -> None:
+    _send_cognibot_reply(reply_channel, text_or_activity)
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(force=True, silent=True) or {}
@@ -269,6 +440,68 @@ def chat_stream():
         stream_with_context(generate()),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.route("/chat/async", methods=["POST"])
+def chat_async():
+    data = request.get_json(force=True, silent=True) or {}
+    message = str(data.get("message", "")).strip()
+    if not message:
+        return jsonify({"error": "Empty message received."}), 400
+
+    reply_channel = (
+        data.get("reply_channel")
+        if isinstance(data.get("reply_channel"), dict)
+        else {}
+    )
+    try:
+        _validate_reply_channel(reply_channel)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+    send_progress = _bool_arg(
+        os.environ.get("AI_STUDIO_PROXY_SEND_PROGRESS"),
+        default=False,
+    )
+
+    def on_progress(status_text: str):
+        if not send_progress:
+            return
+        try:
+            _send_reply_channel_message(reply_channel, status_text)
+        except Exception as exc:
+            log.warning("Progress callback delivery failed: %s", exc)
+
+    def run_agent():
+        try:
+            final = handle_chat_message(
+                message=message,
+                session_id=data.get("session_id", "default"),
+                user_id=data.get("user_id", "webchat_user"),
+                user_role=data.get("user_role", "technical"),
+                user_name=data.get("user_name", ""),
+                user_email=data.get("user_email", ""),
+                user_team=data.get("user_team", ""),
+                user_metadata=data.get("user_metadata", {}),
+                on_progress=on_progress if send_progress else None,
+            )
+        except Exception as exc:
+            log.error("Async agent error: %s", exc, exc_info=True)
+            final = "I encountered an error. Please try again."
+
+        try:
+            _send_reply_channel_message(reply_channel, final)
+        except Exception as exc:
+            log.error("Final callback delivery failed: %s", exc, exc_info=True)
+
+    threading.Thread(target=run_agent, daemon=True).start()
+    return jsonify(
+        {
+            "queued": True,
+            "session_id": data.get("session_id", "default"),
+            "channel": str(reply_channel.get("channel") or "").strip(),
+        }
     )
 
 
