@@ -256,7 +256,55 @@ def _dispatch_proxy_turn_sync(payload: dict) -> dict:
     return data
 
 
+def _load_gateway_state_sync(session_id: str):
+    try:
+        from state.conversation_state import ConversationState as GatewayConversationState
+
+        return GatewayConversationState.load(session_id)
+    except Exception:
+        logger.debug("Could not load gateway conversation state", exc_info=True)
+        return None
+
+
+def _build_gateway_status_message_sync(session_id: str) -> Optional[str]:
+    state = _load_gateway_state_sync(session_id)
+    if state is None or not getattr(state, "exists_in_store", False):
+        return None
+
+    lines = []
+    phase = getattr(state, "phase", None)
+    phase_value = str(getattr(phase, "value", phase) or "").strip()
+    if phase_value:
+        lines.append(f"- Phase: {phase_value.upper()}")
+
+    summary = str(getattr(state, "summary", "") or "").strip()
+    if summary:
+        lines.append(f"- Summary: {summary}")
+
+    affected_workflows = list(getattr(state, "affected_workflows", []) or [])
+    if affected_workflows:
+        lines.append(f"- Workflows: {affected_workflows}")
+
+    pending_action_summary = str(
+        getattr(state, "pending_action_summary", "") or ""
+    ).strip()
+    if pending_action_summary:
+        lines.append(f"- Pending action: {pending_action_summary}")
+
+    if getattr(state, "is_human_handoff", False):
+        lines.append("- Human handoff: requested")
+
+    if not lines:
+        lines.append("No active cases.")
+
+    return f"Current session status:\n{chr(10).join(lines)}"
+
+
 def _build_status_message_sync(session_id: str) -> str:
+    gateway_status = _build_gateway_status_message_sync(session_id)
+    if gateway_status:
+        return gateway_status
+
     cases = (
         Case.objects.filter(thread_id=session_id)
         .exclude(state__in=["CLOSED", "CANCELLED"])
@@ -351,4 +399,3 @@ async def get_support_session_status(
     _conv_set(aistudio_conv_state, dialog_name, "ae_support_status_response", response)
     _conv_set(aistudio_conv_state, dialog_name, "response", response)
     return {"success": True, "response": response, "session_id": session_id}
-

@@ -186,3 +186,54 @@ async def test_get_support_session_status_formats_active_cases(monkeypatch):
     assert conv_state.conv_inputs["ae_support_status_response"] == result["response"]
     assert conv_state.conv_inputs["response"] == result["response"]
 
+
+@pytest.mark.asyncio
+async def test_get_support_session_status_prefers_gateway_state(monkeypatch):
+    conv_state = FakeConvState()
+
+    monkeypatch.setattr(
+        actions,
+        "_load_gateway_state_sync",
+        lambda _session_id: SimpleNamespace(
+            exists_in_store=True,
+            phase=SimpleNamespace(value="investigating"),
+            summary="Investigating the failed claims workflow",
+            affected_workflows=["claims_daily"],
+            pending_action_summary="Waiting for workflow diagnostics",
+            is_human_handoff=False,
+        ),
+    )
+    monkeypatch.setattr(
+        actions,
+        "Case",
+        SimpleNamespace(
+            objects=SimpleNamespace(
+                filter=lambda **_kwargs: pytest.fail("gateway state should win")
+            )
+        ),
+    )
+
+    context = SimpleNamespace(
+        activity=SimpleNamespace(conversation=SimpleNamespace(id="thread-9"))
+    )
+
+    result = await actions.get_support_session_status(
+        context,
+        "SupportDialog",
+        conv_state,
+        FakeUserState(),
+    )
+
+    assert result == {
+        "success": True,
+        "response": (
+            "Current session status:\n"
+            "- Phase: INVESTIGATING\n"
+            "- Summary: Investigating the failed claims workflow\n"
+            "- Workflows: ['claims_daily']\n"
+            "- Pending action: Waiting for workflow diagnostics"
+        ),
+        "session_id": "thread-9",
+    }
+    assert conv_state.conv_inputs["ae_support_status_response"] == result["response"]
+    assert conv_state.conv_inputs["response"] == result["response"]
