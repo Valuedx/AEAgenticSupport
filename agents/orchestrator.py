@@ -37,6 +37,39 @@ logger = logging.getLogger("ops_agent.orchestrator")
 audit = logging.getLogger("ops_agent.audit")
 
 
+def _response_preview(response: Any, limit: int = 1000) -> str:
+    """Best-effort short preview for logs/traces when replies may be structured."""
+    if isinstance(response, str):
+        text = response
+    elif isinstance(response, dict):
+        text = str(response.get("text") or json.dumps(response, default=str))
+    else:
+        text = str(response)
+    return text[:limit]
+
+
+def _prepend_response_prefix(
+    response: str | dict[str, Any],
+    prefix: str,
+) -> str | dict[str, Any]:
+    if not prefix:
+        return response
+    if isinstance(response, dict):
+        updated = dict(response)
+        attachments = updated.get("attachments")
+        if isinstance(attachments, list) and attachments:
+            card_body = attachments[0].get("content", {}).get("body")
+            if isinstance(card_body, list):
+                card_body.insert(
+                    0,
+                    {"type": "TextBlock", "text": prefix.strip(), "wrap": True},
+                )
+                return updated
+        updated["text"] = prefix + str(updated.get("text") or "")
+        return updated
+    return prefix + response
+
+
 class Orchestrator:
 
     def __init__(self):
@@ -49,6 +82,47 @@ class Orchestrator:
             self.issue_trackers[conversation_id] = IssueTracker(conversation_id)
         return self.issue_trackers[conversation_id]
 
+    @staticmethod
+    def _channel_for_state(state: ConversationState) -> str:
+        return str((state.user_metadata or {}).get("channel") or "").strip().lower()
+
+    def _queue_pending_approval(
+        self,
+        *,
+        state: ConversationState,
+        tool_name: str,
+        tool_args: dict,
+        tier: str,
+        summary: str,
+        authorized_users: list[str] | None = None,
+    ) -> str | dict[str, Any]:
+        request_params = dict(tool_args or {})
+        auth_users = [str(user) for user in (authorized_users or []) if str(user).strip()]
+        if auth_users:
+            request_params["authorized_users"] = auth_users
+
+        request = self.approval_gate.create_approval_request(
+            state.conversation_id,
+            tool_name,
+            tier,
+            request_params,
+            summary,
+        )
+        state.pending_action = {
+            "tool": tool_name,
+            "args": dict(tool_args or {}),
+            "tier": tier,
+            "authorized_users": auth_users,
+            "request_id": request.request_id,
+        }
+        state.pending_action_summary = summary
+        state.phase = ConversationPhase.AWAITING_APPROVAL
+        state.is_agent_working = False
+        return self.approval_gate.format_approval_response(
+            request,
+            channel=self._channel_for_state(state),
+        )
+
     # =====================================================================
     # Public entry point
     # =====================================================================
@@ -57,7 +131,7 @@ class Orchestrator:
                        state: ConversationState,
                        on_progress: ProgressCallback | None = None,
                        allowed_categories: list[str] | None = None,
-                       feedback_agent_id: str = "ops_orchestrator") -> str:
+                       feedback_agent_id: str = "ops_orchestrator") -> str | dict[str, Any]:
         if not user_message.strip():
             return "It looks like your message was empty. How can I help?"
 
@@ -92,7 +166,7 @@ class Orchestrator:
                               allowed_categories: list[str] | None,
                               feedback_agent_id: str,
                               turn_id: str,
-                              trace) -> str:
+                              trace) -> str | dict[str, Any]:
         """Core message handling wrapped by handle_message's trace context."""
         try:
             state.add_message("user", user_message)
@@ -115,6 +189,9 @@ class Orchestrator:
                 )
                 if intent_result.intent == ApprovalIntent.NEW_REQUEST:
                     # Suspend the pending approval so the user can resume later
+                    request_id = str(
+                        (state.pending_action or {}).get("request_id") or ""
+                    ).strip()
                     state.suspended_flow = {
                         "type": "approval",
                         "pending_action": dict(state.pending_action or {}),
@@ -123,7 +200,11 @@ class Orchestrator:
                     state.pending_action = None
                     state.pending_action_summary = ""
                     state.phase = ConversationPhase.IDLE
-                    self.approval_gate.log_decision(state.conversation_id, "CANCELLED")
+                    self.approval_gate.log_decision(
+                        state.conversation_id,
+                        request_id,
+                        "CANCELLED",
+                    )
                     logger.info(
                         "approval_suspended conversation_id=%s intent=%s",
                         state.conversation_id, intent_result.reason,
@@ -142,7 +223,7 @@ class Orchestrator:
                         f"Reply **continue** to review it again, or **drop it** to cancel."
                     )
                     state.save()
-                    return inner + reminder
+                    return _prepend_response_prefix(inner, reminder)
 
                 response = self._handle_approval_response(
                     user_message, state, tracker
@@ -206,17 +287,17 @@ class Orchestrator:
                 )
                 if parent_id:
                     tracker.link_issues(parent_id, issue.issue_id)
-                response = (
-                    "This looks related to the issue I'm already investigating "
-                    "but appears to be a separate problem. I'll track it as a "
-                    "linked issue.\n\n"
-                    + self._process_message(
+                response = _prepend_response_prefix(
+                    self._process_message(
                         user_message,
                         state,
                         tracker,
                         progress,
                         feedback_agent_id=feedback_agent_id,
-                    )
+                    ),
+                    "This looks related to the issue I'm already investigating "
+                    "but appears to be a separate problem. I'll track it as a "
+                    "linked issue.\n\n",
                 )
 
             elif classification == MessageClassification.RECURRENCE:
@@ -246,12 +327,15 @@ class Orchestrator:
                         f"{cast(Any, old_issue.resolution)[:200]}. "
                         f"Let me check if the same root cause applies.\n\n"
                     )
-                response = recurrence_note + self._process_message(
-                    user_message,
-                    state,
-                    tracker,
-                    progress,
-                    feedback_agent_id=feedback_agent_id,
+                response = _prepend_response_prefix(
+                    self._process_message(
+                        user_message,
+                        state,
+                        tracker,
+                        progress,
+                        feedback_agent_id=feedback_agent_id,
+                    ),
+                    recurrence_note,
                 )
 
             elif classification == MessageClassification.FOLLOWUP:
@@ -268,17 +352,17 @@ class Orchestrator:
                     )
                 elif target_issue and target_issue.status == IssueStatus.STALE:
                     tracker.resume_stale_issue(target_issue.issue_id)
-                    response = (
-                        f"Resuming investigation of [{target_issue.issue_id}] "
-                        f"{target_issue.title}.\n\n"
-                        + self._process_message(
+                    response = _prepend_response_prefix(
+                        self._process_message(
                             user_message,
                             state,
                             tracker,
                             progress,
                             allowed_categories,
                             feedback_agent_id=feedback_agent_id,
-                        )
+                        ),
+                        f"Resuming investigation of [{target_issue.issue_id}] "
+                        f"{target_issue.title}.\n\n",
                     )
                 else:
                     response = self._process_message(
@@ -292,16 +376,7 @@ class Orchestrator:
 
             elif classification == MessageClassification.STATUS_CHECK:
                 summary = tracker.get_all_issues_summary()
-                response = (
-                    f"Here's the current session status:\n\n{summary}\n\n"
-                    + self._process_message(
-                        user_message,
-                        state,
-                        tracker,
-                        progress,
-                        feedback_agent_id=feedback_agent_id,
-                    )
-                )
+                response = f"Here's the current session status:\n\n{summary}"
             else:
                 response = self._process_message(
                     user_message,
@@ -312,7 +387,7 @@ class Orchestrator:
                 )
 
             state.save()
-            trace.update(output={"response": response[:1000]})
+            trace.update(output={"response": _response_preview(response)})
             return response
         except Exception as e:
             logger.exception(f"Error in handle_message: {e}")
@@ -623,27 +698,19 @@ class Orchestrator:
                             if not missing and self.approval_gate.needs_approval(
                                 tool_name, tool_def.tier, tool_args
                             ):
-                                state.pending_action = {
-                                    "tool": tool_name,
-                                    "args": tool_args,
-                                    "tier": tool_def.tier,
-                                    "authorized_users": tool_args.get(
-                                        "authorized_users", []
-                                    ),
-                                }
                                 summary = (
                                     f"{tool_name} on "
                                     f"{tool_args.get('workflow_name', 'unknown')}"
                                 )
-                                state.pending_action_summary = summary
-                                state.phase = ConversationPhase.AWAITING_APPROVAL
-                                state.is_agent_working = False
-                                return self.approval_gate.format_approval_prompt(
-                                    self.approval_gate.create_approval_request(
-                                        state.conversation_id,
-                                        tool_name, tool_def.tier,
-                                        tool_args, summary,
-                                    )
+                                return self._queue_pending_approval(
+                                    state=state,
+                                    tool_name=tool_name,
+                                    tool_args=tool_args,
+                                    tier=tool_def.tier,
+                                    summary=summary,
+                                    authorized_users=tool_args.get(
+                                        "authorized_users", []
+                                    ),
                                 )
 
                     messages.append(candidate.content)
@@ -903,7 +970,7 @@ class Orchestrator:
                 )
                 state.add_message("user", content)
                 resp = self._process_message(content, state, tracker)
-                parts.append(resp)
+                parts.append(_response_preview(resp, limit=500))
             elif hint == "additive":
                 state.add_message("user", f"[Additional context] {content}")
                 parts.append(
@@ -916,7 +983,7 @@ class Orchestrator:
                 )
                 state.add_message("user", content)
                 resp = self._process_message(content, state, tracker)
-                parts.append(resp)
+                parts.append(_response_preview(resp, limit=500))
 
         return "\n\n".join(parts)
 
@@ -942,7 +1009,12 @@ class Orchestrator:
             )
 
         if intent == ApprovalIntent.CANCEL:
-            self.approval_gate.log_decision(state.conversation_id, "CANCELLED")
+            request_id = str((state.pending_action or {}).get("request_id") or "").strip()
+            self.approval_gate.log_decision(
+                state.conversation_id,
+                request_id,
+                "CANCELLED",
+            )
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
             state.pending_action_summary = ""
@@ -950,15 +1022,20 @@ class Orchestrator:
             return "Understood. I cancelled the pending action. What should I do next?"
 
         if intent in (ApprovalIntent.REJECT, ApprovalIntent.NEW_REQUEST):
-            self.approval_gate.log_decision(state.conversation_id, "REJECTED")
+            request_id = str((state.pending_action or {}).get("request_id") or "").strip()
+            self.approval_gate.log_decision(
+                state.conversation_id,
+                request_id,
+                "REJECTED",
+            )
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
             state.pending_action_summary = ""
             state.param_collection = {}
             if intent == ApprovalIntent.NEW_REQUEST:
-                return (
+                return _prepend_response_prefix(
+                    self._process_message(user_message, state, tracker),
                     "Understood. I will not execute the pending action.\n\n"
-                    + self._process_message(user_message, state, tracker)
                 )
             return "Action rejected. What would you like me to do instead?"
 
@@ -987,7 +1064,13 @@ class Orchestrator:
         if not rbac_ok:
             return rbac_err
 
-        self.approval_gate.log_decision(state.conversation_id, "APPROVED", state.user_id or "user")
+        request_id = str((action or {}).get("request_id") or "").strip()
+        self.approval_gate.log_decision(
+            state.conversation_id,
+            request_id,
+            "APPROVED",
+            state.user_id or "user",
+        )
         state.phase = ConversationPhase.EXECUTING
         result = tool_registry.execute(action["tool"], **action["args"])
         state.log_tool_call(
@@ -1953,22 +2036,13 @@ CRITICAL RULES:
         # Otherwise move to approval flow.
         tool_def = tool_registry.get_tool(tool_name)
         actual_tier = tool_def.tier if tool_def else "medium_risk"
-        state.pending_action = {
-            "tool": tool_name,
-            "args": action_args,
-            "tier": actual_tier,
-            "authorized_users": [],
-        }
-        state.pending_action_summary = f"{tool_name} on {workflow_name}"
-        state.phase = ConversationPhase.AWAITING_APPROVAL
-        return self.approval_gate.format_approval_prompt(
-            self.approval_gate.create_approval_request(
-                state.conversation_id,
-                tool_name,
-                actual_tier,
-                action_args,
-                state.pending_action_summary,
-            )
+        summary = f"{tool_name} on {workflow_name}"
+        return self._queue_pending_approval(
+            state=state,
+            tool_name=tool_name,
+            tool_args=action_args,
+            tier=actual_tier,
+            summary=summary,
         )
 
     def _extract_params_from_user_message(self, user_message: str, param_names: list[str], messages: list[dict] | None = None) -> dict[str, str | None]:

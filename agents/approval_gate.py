@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from config.settings import CONFIG
 from config.llm_client import llm_client, get_current_trace
@@ -62,6 +62,13 @@ class ApprovalIntentResult:
 
 class ApprovalGate:
     """Determines whether a tool call needs approval and manages the flow."""
+
+    _DECISION_STATUSES: frozenset[str] = frozenset({
+        "APPROVED",
+        "REJECTED",
+        "CANCELLED",
+        "PENDING",
+    })
 
     # Pre-compiled patterns — compiled once at class definition time for
     # performance and to avoid re-compiling on every classification call.
@@ -216,7 +223,7 @@ class ApprovalGate:
         self,
         conversation_id: str,
         request_id: str,
-        status: str,
+        status: str = "",
         approver_id: str = "",
     ) -> None:
         """
@@ -230,25 +237,104 @@ class ApprovalGate:
         Also constrains to rows created in the last 24 hours as an extra
         safeguard against accidentally touching archived audit records.
         """
+        normalized_request_id, normalized_status, normalized_approver = (
+            self._normalize_log_decision_args(
+                request_id=request_id,
+                status=status,
+                approver_id=approver_id,
+            )
+        )
+        if not normalized_status:
+            logger.warning(
+                "Approval decision missing status for conversation_id=%s request_id=%s",
+                conversation_id,
+                normalized_request_id,
+            )
+            return
+
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE approval_audit_log
-                        SET    status      = %s,
-                               approver_id = %s,
-                               decided_at  = NOW()
-                        WHERE  conversation_id = %s
-                          AND  request_id      = %s
-                          AND  status          = 'PENDING'
-                          AND  created_at      > NOW() - INTERVAL '24 hours'
-                        """,
-                        (status, approver_id, conversation_id, request_id),
-                    )
+                    if normalized_request_id:
+                        cur.execute(
+                            """
+                            UPDATE approval_audit_log
+                            SET    status      = %s,
+                                   approver_id = %s,
+                                   decided_at  = NOW()
+                            WHERE  conversation_id = %s
+                              AND  request_id      = %s
+                              AND  status          = 'PENDING'
+                              AND  created_at      > NOW() - INTERVAL '24 hours'
+                            """,
+                            (
+                                normalized_status,
+                                normalized_approver,
+                                conversation_id,
+                                normalized_request_id,
+                            ),
+                        )
+                    else:
+                        logger.warning(
+                            "Approval decision missing request_id for conversation_id=%s; "
+                            "falling back to latest pending request",
+                            conversation_id,
+                        )
+                        cur.execute(
+                            """
+                            UPDATE approval_audit_log
+                            SET    status      = %s,
+                                   approver_id = %s,
+                                   decided_at  = NOW()
+                            WHERE  conversation_id = %s
+                              AND  request_id = (
+                                    SELECT request_id
+                                    FROM approval_audit_log
+                                    WHERE conversation_id = %s
+                                      AND status = 'PENDING'
+                                      AND created_at > NOW() - INTERVAL '24 hours'
+                                    ORDER BY created_at DESC
+                                    LIMIT 1
+                              )
+                            """,
+                            (
+                                normalized_status,
+                                normalized_approver,
+                                conversation_id,
+                                conversation_id,
+                            ),
+                        )
                 conn.commit()
         except Exception as e:
             logger.warning("Failed to log approval decision: %s", e)
+
+    def _normalize_log_decision_args(
+        self,
+        *,
+        request_id: str,
+        status: str,
+        approver_id: str,
+    ) -> tuple[str, str, str]:
+        """Support both the new and legacy call shapes.
+
+        New:
+            log_decision(conversation_id, request_id, status, approver_id="")
+
+        Legacy:
+            log_decision(conversation_id, status)
+            log_decision(conversation_id, status, approver_id)
+        """
+        req = str(request_id or "").strip()
+        stat = str(status or "").strip().upper()
+        approver = str(approver_id or "").strip()
+
+        if not stat and req.upper() in self._DECISION_STATUSES:
+            return "", req.upper(), approver
+
+        if req.upper() in self._DECISION_STATUSES and stat.upper() not in self._DECISION_STATUSES:
+            return "", req.upper(), stat or approver
+
+        return req, stat.upper(), approver
 
     @staticmethod
     def _generate_request_id() -> str:
@@ -274,6 +360,83 @@ class ApprovalGate:
         lines.append("")
         lines.append("Reply **approve** to proceed or **reject** to cancel.")
         return "\n".join(lines)
+
+    def format_approval_response(
+        self,
+        request: ApprovalRequest,
+        *,
+        channel: str = "",
+    ) -> str | dict[str, Any]:
+        """Return a user-facing approval prompt, preserving Teams cards when possible."""
+        prompt = self.format_approval_prompt(request)
+        if str(channel or "").strip().lower() != "msteams":
+            return prompt
+
+        safe = self._redact_sensitive_params(request.tool_params)
+        reviewer_ids = request.tool_params.get("authorized_users") or []
+        reviewer_text = (
+            ", ".join(str(user) for user in reviewer_ids)
+            if isinstance(reviewer_ids, list) and reviewer_ids
+            else "Any authorized reviewer"
+        )
+        facts = [
+            {"title": "Action:", "value": request.tool_name},
+            {"title": "Risk:", "value": request.tier},
+            {"title": "Summary:", "value": request.summary},
+            {"title": "Request:", "value": request.request_id or "pending"},
+            {"title": "Reviewers:", "value": reviewer_text},
+        ]
+        if safe:
+            facts.extend(
+                {"title": f"{key}:", "value": str(value)}
+                for key, value in safe.items()
+            )
+
+        return {
+            "type": "message",
+            "text": prompt,
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "type": "AdaptiveCard",
+                        "version": "1.4",
+                        "body": [
+                            {
+                                "type": "TextBlock",
+                                "text": "Action Approval Required",
+                                "weight": "Bolder",
+                                "size": "Medium",
+                                "wrap": True,
+                            },
+                            {
+                                "type": "FactSet",
+                                "facts": facts,
+                            },
+                        ],
+                        "actions": [
+                            {
+                                "type": "Action.Submit",
+                                "title": "Approve",
+                                "data": {
+                                    "action": "approve",
+                                    "request_id": request.request_id,
+                                },
+                            },
+                            {
+                                "type": "Action.Submit",
+                                "title": "Reject",
+                                "style": "destructive",
+                                "data": {
+                                    "action": "reject",
+                                    "request_id": request.request_id,
+                                },
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
 
     @staticmethod
     def _redact_sensitive_params(params: dict) -> dict:

@@ -28,12 +28,30 @@ class TestApprovalGate:
 
     def test_log_decision(self, mock_db):
         gate = ApprovalGate()
-        gate.log_decision("test-conv-1", "APPROVED", "admin-user")
-        
+        gate.log_decision("test-conv-1", "req-1", "APPROVED", "admin-user")
+
         conn = mock_db.return_value.__enter__.return_value
         cur = conn.cursor.return_value.__enter__.return_value
         assert any("UPDATE approval_audit_log" in str(call) for call in cur.execute.call_args_list)
         assert "APPROVED" in str(cur.execute.call_args_list[0])
+        assert "req-1" in str(cur.execute.call_args_list[0])
+
+    def test_format_approval_response_returns_card_for_teams(self):
+        gate = ApprovalGate()
+        request = ApprovalRequest(
+            tool_name="restart_service",
+            tool_params={"service": "nginx", "authorized_users": ["admin-user"]},
+            tier="high_risk",
+            reason="Needs approval",
+            summary="Restart nginx on prod",
+            request_id="req-123",
+        )
+
+        response = gate.format_approval_response(request, channel="msteams")
+
+        assert response["type"] == "message"
+        assert response["attachments"][0]["contentType"] == "application/vnd.microsoft.card.adaptive"
+        assert response["attachments"][0]["content"]["actions"][0]["data"]["request_id"] == "req-123"
 
 if __name__ == "__main__":
     pytest.main([__file__])

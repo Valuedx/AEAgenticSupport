@@ -31,6 +31,16 @@ audit = logging.getLogger("ops_agent.audit")
 MAX_DELEGATION_DEPTH = 5
 
 
+def _response_preview(response, limit: int = 500) -> str:
+    if isinstance(response, str):
+        text = response
+    elif isinstance(response, dict):
+        text = str(response.get("text") or response)
+    else:
+        text = str(response)
+    return text[:limit]
+
+
 def _score_agent(agent: BaseAgent, user_message: str, context: dict | None, **kwargs) -> float:
     """
     Compute a routing score for an agent given a user message.
@@ -237,7 +247,7 @@ class AgentRouter:
 
         # Store result on the blackboard
         shared.store_agent_result(agent.agent_id, {
-            "response": result.response[:500],
+            "response": _response_preview(result.response),
             "success": result.success,
             "confidence": result.confidence,
             "tool_calls_count": len(result.tool_calls),
@@ -271,9 +281,31 @@ class AgentRouter:
                     **kwargs,
                 )
 
-                # Compose: prepend original agent's partial response
-                r1 = result.response.strip()
-                r2 = delegate_result.response.strip()
+                # Compose: prepend original agent's partial response when both
+                # replies are plain text. Structured channel activities should
+                # flow through untouched.
+                if isinstance(result.response, dict) or isinstance(delegate_result.response, dict):
+                    combined_response = (
+                        delegate_result.response
+                        if isinstance(delegate_result.response, dict)
+                        else result.response
+                    )
+                    return AgentResult(
+                        response=combined_response,
+                        success=delegate_result.success,
+                        confidence=delegate_result.confidence,
+                        tool_calls=result.tool_calls + delegate_result.tool_calls,
+                        findings=result.findings + delegate_result.findings,
+                        metadata={
+                            "delegation_chain": [
+                                agent.agent_id,
+                                target.agent_id,
+                            ],
+                        },
+                    )
+
+                r1 = str(result.response or "").strip()
+                r2 = str(delegate_result.response or "").strip()
 
                 # Heuristic to avoid duplicate greetings/intros
                 # If both responses start with common greeting phrases, try to remove the second one.

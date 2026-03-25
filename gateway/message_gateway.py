@@ -222,7 +222,7 @@ class MessageGateway:
         user_name: str = "", user_email: str = "",
         user_team: str = "", user_metadata: dict | None = None,
         on_progress: Optional[Callable[[str], None]] = None,
-    ) -> str:
+    ) -> str | dict[str, Any]:
         """
         Main entry point called by the chat interface.
         Thread-safe — handles concurrent messages gracefully.
@@ -498,7 +498,7 @@ class MessageGateway:
         state: ConversationState,
         progress: ProgressCallback,
         conversation_id: str,
-    ) -> str:
+    ) -> str | dict[str, Any]:
         """
         Dispatch to the multi-agent router or fallback to legacy orchestrator.
         """

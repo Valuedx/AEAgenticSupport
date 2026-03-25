@@ -127,6 +127,33 @@ class DummyDisabledAgent(BaseAgent):
         return AgentResult(response="Should not be called", success=False)
 
 
+class DummyStructuredAgent(BaseAgent):
+    @property
+    def info(self) -> AgentInfo:
+        return AgentInfo(
+            agent_id="structured_agent",
+            name="Structured Agent",
+            description="Returns a structured channel activity",
+            capabilities=["diagnostics"],
+            domains=["approve"],
+            status=AgentStatus.ACTIVE,
+            priority=1,
+        )
+
+    def can_handle(self, user_message: str, context=None) -> float:
+        return 0.95 if "approve" in user_message.lower() else 0.1
+
+    def handle(self, user_message: str, context=None, **kwargs) -> AgentResult:
+        return AgentResult(
+            response={
+                "type": "message",
+                "text": "Approval Required",
+                "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive"}],
+            },
+            success=True,
+        )
+
+
 # ── Tests: AgentInfo & AgentResult ───────────────────────────────────
 
 class TestAgentInfoResult:
@@ -157,6 +184,12 @@ class TestAgentInfoResult:
         assert inv.completed_at != ""
         assert inv.success is True
         assert inv.delegated_to == ""
+
+    def test_invocation_complete_handles_structured_response(self):
+        inv = AgentInvocation(agent_id="test", conversation_id="conv-1")
+        result = AgentResult(response={"type": "message", "text": "done"}, success=True)
+        inv.complete(result)
+        assert inv.result_summary == "done"
 
 
 # ── Tests: SharedContext ─────────────────────────────────────────────
@@ -325,6 +358,12 @@ class TestAgentRouter:
         result = self.router.route("hello world")
         assert isinstance(result, AgentResult)
         assert result.response is not None
+
+    def test_routes_structured_response_without_string_slicing(self):
+        self.registry.register(DummyStructuredAgent())
+        result = self.router.route("please approve this action")
+        assert isinstance(result.response, dict)
+        assert result.response["attachments"][0]["contentType"] == "application/vnd.microsoft.card.adaptive"
 
 
 if __name__ == "__main__":

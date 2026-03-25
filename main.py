@@ -6,6 +6,7 @@ and exposed via its web chat interface.
 
 import os
 import sys
+from typing import Any, Union
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -19,6 +20,16 @@ tooling_summary = initialize_tooling(app_logger)
 app_logger.debug("Tool bootstrap summary: %s", tooling_summary)
 
 
+def _response_log_excerpt(response: Union[str, dict[str, Any]], limit: int = 100) -> str:
+    if isinstance(response, str):
+        text = response
+    elif isinstance(response, dict):
+        text = str(response.get("text") or response)
+    else:
+        text = str(response)
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
 def handle_chat_message(message: str, session_id: str = "default",
                         user_id: str = "",
                         user_role: str = "technical",
@@ -26,7 +37,7 @@ def handle_chat_message(message: str, session_id: str = "default",
                         user_email: str = "",
                         user_team: str = "",
                         user_metadata: dict | None = None,
-                        on_progress=None) -> str:
+                        on_progress=None) -> Union[str, dict[str, Any]]:
     """
     Called by AE AI Studio for each incoming chat message.
 
@@ -42,7 +53,7 @@ def handle_chat_message(message: str, session_id: str = "default",
         on_progress:    optional ``fn(status_text)`` for streaming progress
 
     Returns:
-        Response string to display in chat
+        Response string or activity dict to display in chat
     """
     try:
         log_msg = message[:100] + ("..." if len(message) > 100 else "")
@@ -60,7 +71,7 @@ def handle_chat_message(message: str, session_id: str = "default",
             user_metadata=user_metadata,
             on_progress=on_progress,
         )
-        log_resp = response[:100] + ("..." if len(response) > 100 else "")
+        log_resp = _response_log_excerpt(response)
         app_logger.info(f"Response: {log_resp}")
         return response
 

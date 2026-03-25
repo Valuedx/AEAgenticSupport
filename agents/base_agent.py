@@ -28,6 +28,16 @@ from typing import Any, Optional
 logger = logging.getLogger("ops_agent.agents.base")
 
 
+def _response_summary(response: Any, limit: int = 200) -> str:
+    if isinstance(response, str):
+        text = response
+    elif isinstance(response, dict):
+        text = str(response.get("text") or response)
+    else:
+        text = str(response)
+    return text[:limit]
+
+
 # ── Agent capability and status ──────────────────────────────────────
 
 class AgentStatus(Enum):
@@ -86,7 +96,7 @@ class DelegationRequest:
 @dataclass
 class AgentResult:
     """Structured output from an agent handling a message."""
-    response: str
+    response: Any
     success: bool = True
     confidence: float = 1.0
     tool_calls: list[dict] = field(default_factory=list)
@@ -120,7 +130,7 @@ class AgentInvocation:
 
     def complete(self, result: AgentResult):
         self.completed_at = datetime.now().isoformat()
-        self.result_summary = result.response[:200]
+        self.result_summary = _response_summary(result.response)
         self.success = result.success
         if result.delegation:
             self.delegated_to = (
