@@ -18,6 +18,7 @@ from psycopg2.extras import Json
 from config.db import get_conn
 from config.settings import CONFIG
 from state.app_config import get_classification_signal_groups, get_runtime_value
+from state.conversation_state import message_content_to_text
 
 logger = logging.getLogger("ops_agent.issue_tracker")
 
@@ -349,7 +350,7 @@ class IssueTracker:
             if i.status == IssueStatus.RESOLVED
         )
         recent = "\n".join(
-            f"  {m['role']}: {m['content'][:150]}"
+            f"  {m['role']}: {message_content_to_text(m.get('content'))[:150]}"
             for m in conversation_messages[-8:]
         )
 

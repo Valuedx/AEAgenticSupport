@@ -22,6 +22,93 @@ from config.settings import CONFIG
 logger = logging.getLogger("ops_agent.state")
 
 
+def _adaptive_item_to_text(item: object) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+
+    item_type = str(item.get("type") or "").strip()
+    if item_type == "TextBlock":
+        text = str(item.get("text") or "").strip()
+        return [text] if text else []
+
+    if item_type == "FactSet":
+        lines: list[str] = []
+        facts = item.get("facts") if isinstance(item.get("facts"), list) else []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            title = str(fact.get("title") or "").strip()
+            value = str(fact.get("value") or "").strip()
+            if title and value:
+                lines.append(f"{title} {value}")
+            elif title or value:
+                lines.append(title or value)
+        return lines
+
+    text = str(item.get("text") or "").strip()
+    return [text] if text else []
+
+
+def _attachment_to_text(attachment: object) -> str:
+    if not isinstance(attachment, dict):
+        return ""
+
+    content_type = str(attachment.get("contentType") or "").strip().lower()
+    content = attachment.get("content")
+
+    if (
+        content_type == "application/vnd.microsoft.card.adaptive"
+        and isinstance(content, dict)
+    ):
+        parts: list[str] = []
+        body = content.get("body") if isinstance(content.get("body"), list) else []
+        for item in body:
+            parts.extend(_adaptive_item_to_text(item))
+
+        actions = content.get("actions") if isinstance(content.get("actions"), list) else []
+        titles = [
+            str(action.get("title") or "").strip()
+            for action in actions
+            if isinstance(action, dict) and str(action.get("title") or "").strip()
+        ]
+        if titles:
+            parts.append("Actions: " + ", ".join(titles))
+
+        return "\n".join(part for part in parts if part)
+
+    if isinstance(content, dict):
+        text = str(content.get("text") or "").strip()
+        if text:
+            return text
+        return json.dumps(content, default=str)
+
+    return str(content or "").strip()
+
+
+def message_content_to_text(content: object) -> str:
+    """Project rich message content into plain text for prompts, logs, and DB rows."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        parts: list[str] = []
+        text = str(content.get("text") or "").strip()
+        if text:
+            parts.append(text)
+        attachments = content.get("attachments") if isinstance(content.get("attachments"), list) else []
+        for attachment in attachments:
+            rendered = _attachment_to_text(attachment)
+            if rendered:
+                parts.append(rendered)
+        if parts:
+            return "\n".join(parts)
+        return json.dumps(content, default=str)
+    if isinstance(content, list):
+        return json.dumps(content, default=str)
+    return str(content)
+
+
 class ConversationPhase(Enum):
     IDLE = "idle"
     INVESTIGATING = "investigating"
@@ -82,7 +169,7 @@ class ConversationState:
 
     # ── Messages ──
 
-    def add_message(self, role: str, content: str, metadata: dict = None):
+    def add_message(self, role: str, content: object, metadata: dict = None):
         """Add a message to the state; persistence to chat_messages is deferred until save()."""
         timestamp = datetime.now().isoformat()
         msg = {
@@ -93,7 +180,9 @@ class ConversationState:
         }
         self.messages.append(msg)
         if self.conversation_id:
-            self._pending_message_inserts.append((role, content, metadata or {}))
+            self._pending_message_inserts.append(
+                (role, message_content_to_text(content), metadata or {})
+            )
 
 
     # ── Findings ──
@@ -441,7 +530,10 @@ class ConversationState:
                 lines.append(f"**Summary:** {self.summary}\n")
             lines.append("## Chat History\n")
             for m in self.messages:
-                lines.append(f"**{m['role'].upper()}** ({m.get('timestamp','')}): {m['content']}\n")
+                lines.append(
+                    f"**{m['role'].upper()}** ({m.get('timestamp','')}): "
+                    f"{message_content_to_text(m.get('content'))}\n"
+                )
             lines.append("\n## Findings\n")
             for f in self.findings:
                 lines.append(f"- **{f.category}** [{f.severity}]: {f.summary}")
@@ -470,7 +562,10 @@ class ConversationState:
             ) as trace:
                 set_current_trace(trace)
                 try:
-                    history = "\n".join([f"{m['role']}: {m['content']}" for m in self.messages[-20:]])
+                    history = "\n".join(
+                        f"{m['role']}: {message_content_to_text(m.get('content'))}"
+                        for m in self.messages[-20:]
+                    )
                     prompt = f"Summarize this support conversation in ONE brief sentence (max 20 words):\n\n{history}"
                     summary = llm_client.chat(prompt, system="You provide concise summaries of support interactions.")
                     self.summary = summary.strip()
@@ -537,7 +632,7 @@ class ConversationState:
 
         # ── Scan message text ────────────────────────────────────────────────
         for msg in recent_messages:
-            text = str(msg.get("content", "") or "")
+            text = message_content_to_text(msg.get("content"))
 
             for m in _SCHEDULE_ID.finditer(text):
                 entities.setdefault("schedule_id", m.group(1))
@@ -639,7 +734,7 @@ class ConversationState:
         lines.append("\n### Last Turns Summary:")
         for msg in recent_messages[-6:]:
             role = "User" if msg["role"] == "user" else "Agent"
-            content = str(msg.get("content", ""))[:150].replace("\n", " ")
+            content = message_content_to_text(msg.get("content"))[:150].replace("\n", " ")
             lines.append(f"  [{role}] {content}")
 
         lines.append(

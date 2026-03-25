@@ -17,6 +17,7 @@ from agents.base_agent import (
 from agents.agent_context import SharedContext
 from agents.orchestrator import Orchestrator
 from config.llm_client import llm_client
+from state.conversation_state import message_content_to_text
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.agents.diagnostic")
@@ -63,7 +64,12 @@ class DiagnosticAgent(BaseAgent):
         # Contextual scoring: Claim the turn if the previous assistant message mentioned logs or agents
         state = kwargs.get("state")
         if state and state.messages:
-            last_bot_msg = next((m for m in reversed(state.messages) if m.get("role") == "assistant"), {}).get("content", "").lower()
+            last_bot_msg = message_content_to_text(
+                next(
+                    (m for m in reversed(state.messages) if m.get("role") == "assistant"),
+                    {},
+                ).get("content", "")
+            ).lower()
             if any(term in last_bot_msg for term in ("logs", "agent", "id", "2887")):
                 # Very high score to take over parameter-only messages (like date ranges)
                 logger.info("DiagnosticAgent claiming turn based on history context")

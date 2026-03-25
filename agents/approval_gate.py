@@ -15,6 +15,7 @@ from config.settings import CONFIG
 from config.llm_client import llm_client, get_current_trace
 from config.observability import span_context
 from state.app_config import get_approval_tier_sets, get_runtime_value
+from state.conversation_state import message_content_to_text
 
 from config.db import get_conn
 from psycopg2.extras import Json
@@ -660,17 +661,15 @@ class ApprovalGate:
         conversation_messages: Optional[list[dict]],
     ) -> Optional[ApprovalIntentResult]:
         context_tail = (conversation_messages or [])[-4:]
-        context_block = "\n".join(
-            # Truncate each message and append an ellipsis so the LLM knows the
+        context_block_parts: list[str] = []
+        for m in context_tail:
             # content was cut — a silent mid-sentence cut can cause misclassification.
-            f"{m.get('role', 'unknown')}: "
-            + (
-                m.get("content", "")[:220] + "..."
-                if len(m.get("content", "")) > 220
-                else m.get("content", "")
+            rendered = message_content_to_text(m.get("content"))
+            shortened = rendered[:220] + "..." if len(rendered) > 220 else rendered
+            context_block_parts.append(
+                f"{m.get('role', 'unknown')}: {shortened}"
             )
-            for m in context_tail
-        )
+        context_block = "\n".join(context_block_parts)
         action_tool = (pending_action or {}).get("tool", "")
         action_tier = (pending_action or {}).get("tier", "")
         # Never send raw args to the LLM — redact sensitive values first.
