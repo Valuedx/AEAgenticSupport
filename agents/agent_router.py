@@ -53,7 +53,14 @@ def _score_agent(agent: BaseAgent, user_message: str, context: dict | None, **kw
         if cap.lower() in msg_lower:
             cap_bonus = max(cap_bonus, 0.1)
 
-    return min(1.0, base_score + domain_bonus + cap_bonus)
+    # Stickiness bonus: if this was the last agent to handle a message, give it a boost
+    # to maintain goal persistence during multi-step flows.
+    stickiness_bonus = 0.0
+    state = kwargs.get("state")
+    if state and hasattr(state, "last_agent_id") and state.last_agent_id == agent.agent_id:
+        stickiness_bonus = 0.35
+
+    return min(1.0, base_score + domain_bonus + cap_bonus + stickiness_bonus)
 
 
 class AgentRouter:
@@ -139,6 +146,11 @@ class AgentRouter:
             "Router selected agent=%s score=%.3f for message='%s'",
             best_agent.agent_id, best_score, user_message[:80],
         )
+
+        # Update last_agent_id in state if provided
+        state = kwargs.get("state")
+        if state and hasattr(state, "last_agent_id"):
+            state.last_agent_id = best_agent.agent_id
 
         return self._execute_with_delegation(
             agent=best_agent,

@@ -1194,7 +1194,7 @@ Rules:
    - search_knowledge_base: semantic search across all KB collections
 9. If none of the above help, call discover_tools to search the full
    catalog by description or category.
-10. **CRITICAL: TECHNICAL PRIORITIZATION**. If you call a tool and it returns technical data (workflow instances, logs, agent stats), you MUST report that specific technical data to the user. Do NOT provide placeholder SOP instructions if tool data is available. Prefer the tool's live truth over static Knowledge Base or SOP text provided in the context block.
+10. **CRITICAL: TECHNICAL PRIORITIZATION**. If you call a tool and it returns technical data (workflow instances, logs, agent stats) OR a failure message, you MUST report that specific data or error message to the user. Do NOT provide placeholder SOP instructions if tool data or a specific error (e.g., 'Agent Offline') is available. Prefer the tool's live truth over static Knowledge Base or SOP text provided in the context block.
 11. **CRITICAL: NUMERIC ID RULE**. If the user provides a specific numeric request ID, or automation request ID (e.g. "request id 2501865"), you MUST call `get_execution_status` with that exact ID immediately. Do NOT ask for more information. Do NOT generate troubleshooting steps. Call the tool first, then report results. **EXCEPTION: This rule does NOT apply to Schedule IDs — see Rule 12.**
 12. **CRITICAL: SCHEDULE OPERATION RULE**. If the user says anything containing "schedule" AND an action word (disable, enable, pause, resume, stop, start, halt, activate, deactivate, turn off, turn on), you MUST call the appropriate schedule tool immediately:
     - "disable / pause / stop / halt / deactivate" → call `ae.schedule.disable` with `schedule_id` from the message
@@ -1216,7 +1216,8 @@ Rules:
 17. **LOG DATE SELECTION RULE**: 
     - **Agent Host Logs (`analyze_agent_logs`)**: When requested for an `agent_id`, you MUST inform the user that logs default to the last 24 hours and ask if they want to specify a particular `from_date` or `to_date` BEFORE performing extraction.
     - **Workflow Execution Logs (`get_execution_logs`)**: When requested for a specific Request/Execution ID, you MUST NOT ask for a time range. These logs represent the entire lifecycle of that specific run and do not require date filters. Call the tool immediately.
-18. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
+19. **GOAL PERSISTENCE**: If you have started a multi-step intent (e.g., creating a ticket, triggering a workflow, or asking for specific details), you MUST maintain that goal as your primary objective in the next turn. If the user's response provides the requested details but also mentions a failure symptom, you SHOULD call the relevant tool (e.g., `create_hdfc_ticket` or `trigger_workflow`) FIRST while acknowledging the symptom. Do NOT abandon the original goal to start a fresh diagnostics discovery unless the user explicitly cancels the request.
+20. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
 
 Available tool categories: status, logs, file, remediation, dependency,
 config, notification, general, meta.
@@ -2256,9 +2257,17 @@ CRITICAL RULES:
             return msg
 
         guidance = self._get_sop_troubleshooting_steps(f"{workflow_name or ''} {error_text}")
-        msg = f"I couldn't complete the action for {wf_label} automatically."
-        if guidance:
+        
+        if error_text:
+            msg = error_text.strip()
+        else:
+            msg = f"I couldn't complete the action for **{wf_label}** automatically."
+            
+        # Only add guidance if the error is short/generic OR if no specific error exists.
+        # Specific errors like 'agent offline' don't need generic SOP steps.
+        if guidance and (not error_text or len(error_text) < 50):
             msg += "\n\nRecommended troubleshooting steps:\n" + "\n".join(f"- {g}" for g in guidance)
+            
         msg += "\n\nWould you like me to retry, create an incident ticket, or escalate?"
         return msg
 

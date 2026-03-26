@@ -6,24 +6,24 @@ This document contains instructions for starting the various components of the A
 
 ### 1. Agent Server
 Responsible for agentic logic and communication.
-- **Directory**: `D:\AEAgenticSupport`
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
 - **Command**: `python agent_server.py`
 
 ### 2. MCP Server
 Provides Model Context Protocol (MCP) tools over HTTP.
-- **Directory**: `D:\AEAgenticSupport`
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
 - **Command**: `python -m mcp_server --transport streamable-http --host 127.0.0.1 --port 3000`
 
 ### 3. AI Studio Engine
 The main backend engine for AI Studio.
-- **Directory**: `D:\AEAgenticSupport\AI_Studio_Local\AIStudio\engine`
-- **Python**: `D:\AEAgenticSupport\AI_Studio_Local\AIStudio\python\python.exe`
+- **Directory**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\AIStudio\engine`
+- **Python**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\AIStudio\python\python.exe`
 - **Command**: `..\python\python.exe manage.pyc runserver localhost:8000`
 
 ### 4. Chatbot Webservice (Cognibot)
 The chatbot interface service.
-- **Directory**: `D:\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\cognibot`
-- **Python**: `D:\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\python\python.exe`
+- **Directory**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\cognibot`
+- **Python**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\python\python.exe`
 - **Command**: `..\python\python.exe manage.pyc runserver localhost:3978`
 
 ---
@@ -32,13 +32,13 @@ The chatbot interface service.
 
 Run **once** on first deployment to create all required PostgreSQL tables and extensions.
 
-- **Directory**: `D:\AEAgenticSupport`
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
 - **Script**: `setup_db.py`
 - **Requires**: `POSTGRES_DSN` set in `.env` and PostgreSQL running
 
 ### Create all tables (first-time setup)
 ```bash
-cd D:\AEAgenticSupport
+cd D:\AG_V2\AEAgenticSupport
 python setup_db.py
 ```
 
@@ -74,12 +74,12 @@ This moves `active_issue_id` data into `conversation_state` and drops the old ta
 
 Run this **before starting the agent for the first time**, or whenever tools, SOPs, KB articles, or workflows are updated. It embeds all documents into the RAG vector database so the agent can discover and route to the correct tools.
 
-- **Directory**: `D:\AEAgenticSupport`
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
 - **Script**: `run_rag_index.py`
 
 ### Index everything (recommended on first run)
 ```bash
-cd D:\AEAgenticSupport
+cd D:\AG_V2\AEAgenticSupport
 python run_rag_index.py
 ```
 
@@ -117,6 +117,6 @@ python run_rag_index.py --skip t4
 You can use the provided `start_servers.bat` script to launch all components in separate terminal windows.
 
 ```bash
-cd D:\AEAgenticSupport
+cd D:\AG_V2\AEAgenticSupport
 .\start_servers.bat
 ```

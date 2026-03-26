@@ -87,6 +87,66 @@ def extract_error_blocks(log_lines: list[str], context_lines: int = 50) -> list[
 
 
 def get_execution_logs(execution_id: str, tail: int = 100) -> dict:
+    # Guard: check if the assigned agent is running before extracting logs
+    try:
+        from mcp_server.ae_client import get_ae_client as get_mcp_client
+        client = get_mcp_client()
+        try:
+            request_data = client.get_request(execution_id)
+        except Exception:
+            request_data = {}
+
+        agent_name = (
+            request_data.get("agentName")
+            or request_data.get("agentId")
+            or ""
+        )
+        workflow_name = (
+            request_data.get("workflowName")
+            or (request_data.get("workflowConfiguration") or {}).get("name")
+            or ""
+        )
+
+        if agent_name:
+            try:
+                agents = client.list_agents()
+                for a in agents:
+                    aid = str(a.get("agentId") or a.get("id") or "")
+                    aname = str(a.get("agentName") or a.get("name") or "")
+                    if aid == agent_name or aname.lower() == agent_name.lower():
+                        state = (a.get("agentState") or a.get("state") or "UNKNOWN").upper()
+                        resolved_name = a.get("agentName") or a.get("name") or agent_name
+                        if state not in ("CONNECTED", "RUNNING", "ACTIVE"):
+                            logger.info(
+                                "Agent guard blocked log access: agent=%s state=%s request=%s",
+                                resolved_name, state, execution_id,
+                            )
+                            return {
+                                "execution_id": execution_id,
+                                "agent_offline": True,
+                                "status": "blocked",
+                                "error": (
+                                    f"Cannot retrieve logs — the agent '{resolved_name}' is currently "
+                                    f"{state}. Please restart the agent first and try again."
+                                ),
+                                "message": (
+                                    f"⚠️ Your agent **{resolved_name}** is currently **{state}** "
+                                    f"for workflow **{workflow_name or 'N/A'}**.\n\n"
+                                    f"Logs can only be extracted when the assigned agent is Running. "
+                                    f"Please restart the agent and then request the logs again."
+                                ),
+                                "agent_name": resolved_name,
+                                "agent_state": state,
+                                "workflow_name": workflow_name,
+                                "log_lines": [],
+                                "error_blocks": [],
+                            }
+                        break
+            except Exception:
+                pass  # Don't block log access if agent lookup fails
+    except Exception:
+        pass  # Guard is best-effort; never block on import/lookup failures
+
     resp = get_ae_client().get_execution_logs(execution_id=execution_id, tail=tail)
 
     if not resp:

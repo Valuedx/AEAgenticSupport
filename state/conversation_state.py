@@ -75,6 +75,7 @@ class ConversationState:
         # Concurrency
         self.is_agent_working: bool = False
         self.interrupt_requested: bool = False
+        self.last_agent_id: str = ""  # Tracks the last agent that handled a message
         self._message_queue: list[dict] = []
         self._queue_lock = threading.Lock()
         # Deferred message writes: flushed in save() to reduce hot-path DB round-trips
@@ -196,6 +197,7 @@ class ConversationState:
                         "param_collection": self.param_collection,
                         "suspended_flow": self.suspended_flow,
                         "preferred_language": self.preferred_language,
+                        "last_agent_id": self.last_agent_id,
                         "user": {
                             "user_name": self.user_name,
                             "user_email": self.user_email,
@@ -264,6 +266,7 @@ class ConversationState:
                         state.param_collection = data.get("param_collection", {}) or {}
                         state.suspended_flow = data.get("suspended_flow", {}) or {}
                         state.preferred_language = data.get("preferred_language", "en")
+                        state.last_agent_id = data.get("last_agent_id", "")
                         for f_data in data.get("findings", []):
                             state.findings.append(Finding(**f_data))
                         

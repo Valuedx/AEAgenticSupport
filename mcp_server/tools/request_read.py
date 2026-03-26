@@ -316,6 +316,12 @@ async def request_list_awaiting_input(
 
 async def request_get_logs(request_id: str, tail: int = 100) -> str:
     """Retrieve raw execution logs for a request (tail)."""
+    # Guard: check if the assigned agent is running
+    from mcp_server.tools.agent_guard import check_agent_for_request
+    guard = await check_agent_for_request(request_id)
+    if guard:
+        return _safe_json(guard)
+
     client = get_ae_client()
     data = client.get_request_logs(request_id, tail=tail)
     

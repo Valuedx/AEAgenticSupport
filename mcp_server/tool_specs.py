@@ -572,69 +572,7 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         },
         "extra_tags": ["ticket", "incident", "create-ticket", "support-case", "raise-ticket", "escalation", "hdfc"],
     },
-    "ae.ticket.get": {
-        "title": "Ticket: Get Ticket Status",
-        "description": (
-            "Fetch the current status and details of a support ticket from the local registry. "
-            "Shows status (OPEN/IN_PROGRESS/CLOSED/REOPENED), timestamps, process name, and resolution notes."
-        ),
-        "use_when": "User asks for ticket status, details, or wants to know if a ticket is open or closed.",
-        "avoid_when": "Ticket ID is not known — use ae.ticket.list to find tickets first.",
-        "input_examples": [{"ticket_id": "881"}],
-        "parameter_docs": {"ticket_id": "The ticket ID returned when the ticket was created (e.g. '881')."},
-        "extra_tags": ["ticket-status", "get-ticket", "check-ticket", "hdfc"],
-    },
-    "ae.ticket.close": {
-        "title": "Ticket: Close Ticket",
-        "description": (
-            "Mark a support ticket as CLOSED in the local registry and record the resolution. "
-            "Records closure timestamp and resolution notes for audit trail."
-        ),
-        "use_when": (
-            "The issue is resolved and the ticket should be closed. "
-            "User says 'close ticket', 'mark as resolved', 'resolve ticket', or 'ticket is fixed'."
-        ),
-        "avoid_when": "Ticket is already closed. Use ae.ticket.reopen to reactivate it.",
-        "input_examples": [
-            {"ticket_id": "881", "resolution_notes": "Root cause fixed — DB connection pool increased."}
-        ],
-        "parameter_docs": {
-            "ticket_id": "The ticket ID to close (e.g. '881').",
-            "resolution_notes": "How the issue was resolved. Recommended for audit purposes.",
-        },
-        "extra_tags": ["close-ticket", "resolve-ticket", "ticket-resolved", "hdfc"],
-    },
-    "ae.ticket.reopen": {
-        "title": "Ticket: Reopen Ticket",
-        "description": (
-            "Reopen a previously CLOSED ticket. Status changes to REOPENED and closure "
-            "timestamp is cleared so the issue can be tracked again."
-        ),
-        "use_when": "A closed ticket needs to be reactivated because the issue recurred.",
-        "avoid_when": "Ticket is already OPEN or IN_PROGRESS.",
-        "input_examples": [{"ticket_id": "881"}],
-        "parameter_docs": {"ticket_id": "The ticket ID to reopen (e.g. '881')."},
-        "extra_tags": ["reopen-ticket", "ticket-reopen", "hdfc"],
-    },
-    "ae.ticket.list": {
-        "title": "Ticket: List Tickets",
-        "description": (
-            "List support tickets from the local registry with optional filters. "
-            "Can filter by status (OPEN/CLOSED/IN_PROGRESS/REOPENED) or process name."
-        ),
-        "use_when": "User asks to see all open tickets, list recent tickets, or find tickets for a process.",
-        "avoid_when": "A specific ticket ID is already known — use ae.ticket.get instead.",
-        "input_examples": [
-            {"status": "OPEN", "limit": 10},
-            {"process_name": "Demat", "status": "CLOSED"},
-        ],
-        "parameter_docs": {
-            "status": "Filter: 'OPEN', 'CLOSED', 'IN_PROGRESS', 'REOPENED', or empty for all.",
-            "process_name": "Optional partial process name filter (case-insensitive).",
-            "limit": "Max tickets to return (default 20).",
-        },
-        "extra_tags": ["list-tickets", "open-tickets", "ticket-list", "hdfc"],
-    },
+
     "ae.agent.analyze_logs": {
         "title": "Agent: Analyze Debug Logs",
         "description": (
@@ -1024,8 +962,5 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.support.build_case_snapshot", _support.build_case_snapshot, "support_composite", "safe_read"),
         _spec("ae.support.prepare_human_handoff_note", _support.prepare_human_handoff_note, "support_composite", "safe_read"),
         _spec("ae.ticket.create", _ticket.ticket_create, "support_composite", "safe_mutation"),
-        _spec("ae.ticket.get", _ticket.ticket_get, "support_composite", "safe_read"),
-        _spec("ae.ticket.close", _ticket.ticket_close, "support_composite", "safe_mutation"),
-        _spec("ae.ticket.reopen", _ticket.ticket_reopen, "support_composite", "safe_mutation"),
-        _spec("ae.ticket.list", _ticket.ticket_list, "support_composite", "safe_read"),
+
     )

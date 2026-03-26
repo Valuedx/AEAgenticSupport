@@ -58,7 +58,7 @@ class DiagnosticAgent(BaseAgent):
         
         # Base scoring on keyword matching
         if any(cue in msg for cue in cues):
-            return 0.8
+            return 0.7
             
         # Contextual scoring: Claim the turn if the previous assistant message mentioned logs or agents
         state = kwargs.get("state")

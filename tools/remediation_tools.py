@@ -47,9 +47,9 @@ def _build_approval_message(workflow_name: str, parameters: dict, risk: str = "m
     Reply **approve** to proceed or **reject** to cancel.
     """
     risk_labels = {
-        "low_risk":    "🟢 Low",
-        "medium_risk": "🟡 Medium",
-        "high_risk":   "🔴 High",
+        "low_risk":    "Low",
+        "medium_risk": "Medium",
+        "high_risk":   "High",
     }
     risk_display = risk_labels.get(risk, "🟡 Medium")
 
@@ -64,8 +64,8 @@ def _build_approval_message(workflow_name: str, parameters: dict, risk: str = "m
         param_table = "\n_No parameters required._\n"
 
     return (
-        f"🤖 **Ready to trigger: {workflow_name}**\n"
-        f"{risk_display} Risk level: {risk_display}\n"
+        f"**Ready to trigger: {workflow_name}**\n"
+        f"Risk level: {risk_display}\n"
         f"{param_table}\n"
         "Reply **approve** to proceed or **reject** to cancel."
     )
@@ -82,10 +82,10 @@ def _friendly_status_message(
     s = str(status or "").upper()
 
     if s == "COMPLETE":
-        return detail_msg or f"✅ **{workflow_name}** completed successfully. (Request ID: `{req_id}`)"
+        return detail_msg or f"**{workflow_name}** completed successfully. (Request ID: `{req_id}`)"
 
     if s in {"FAILURE", "ERROR"}:
-        base = detail_msg or f"❌ **{workflow_name}** failed during execution."
+        base = detail_msg or f"**{workflow_name}** failed during execution."
         return (
             f"{base}\n\n"
             f"Request ID: `{req_id}`. "
@@ -94,31 +94,31 @@ def _friendly_status_message(
 
     if s == "IN_PROGRESS":
         return (
-            f"⏳ **{workflow_name}** is currently running. "
+            f"**{workflow_name}** is currently running. "
             f"Request ID: `{req_id}`. Check back shortly for the final status."
         )
 
     if s == "TIMEOUT":
         return (
-            f"⏱️ **{workflow_name}** timed out waiting for a status update. "
+            f"**{workflow_name}** timed out waiting for a status update. "
             f"Request ID: `{req_id}`. "
             "The bot may still be running — please verify in the AE portal."
         )
 
     if s == "NO_AGENT":
         return (
-            f"🚫 **{workflow_name}** could not start — no automation agent is currently available. "
+            f"**{workflow_name}** could not start — no automation agent is currently available. "
             "Please ask your administrator to start or reconnect an agent, then retry."
         )
 
     # QUEUED / PENDING / NEW or anything unrecognised
     if healthy_agent:
         return (
-            f"📋 **{workflow_name}** has been accepted and is queued for execution. "
+            f"**{workflow_name}** has been accepted and is queued for execution. "
             f"Request ID: `{req_id}`. An agent is online; it should start shortly."
         )
     return (
-        f"📋 **{workflow_name}** has been queued. Request ID: `{req_id}`. "
+        f"**{workflow_name}** has been queued. Request ID: `{req_id}`. "
         "No active agent was detected — contact your administrator if it doesn't start soon."
     )
 
@@ -323,7 +323,7 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
         return {
             "success": False,
             "error": (
-                f"⛔ **{resolved_name}** is a protected workflow and cannot be "
+                f"**{resolved_name}** is a protected workflow and cannot be "
                 "triggered automatically. Please request a manual trigger from the operations team."
             ),
         }
@@ -342,7 +342,7 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
         return {
             "success": False,
             "error": (
-                f"📎 I've identified that **{resolved_name}** requires a **file upload** "
+                f"I've identified that **{resolved_name}** requires a **file upload** "
                 f"for the following parameter(s): {param_list}.\n\n"
                 "Since file uploading is not supported via chat, please log in to the "
                 "**AutomationEdge (AE) portal** to trigger this bot manually.\n\n"
@@ -369,7 +369,7 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
                 return {
                     "success": False,
                     "error": (
-                        f"🚫 **{resolved_name}** cannot be triggered because all assigned agents are currently offline or stopped ({agent_names}).\n\n"
+                        f"**{resolved_name}** cannot be triggered because all assigned agents are currently offline or stopped ({agent_names}).\n\n"
                         "Please start at least one assigned agent in the AutomationEdge portal before proceeding."
                     ),
                     "workflow_name": resolved_name,
@@ -399,7 +399,7 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
                 "success": False,
                 "blocked_reason": "concurrent_execution",
                 "message": (
-                    f"⏳ **{friendly}** is already running (Execution ID: `{exec_id}`).\n\n"
+                    f"**{friendly}** is already running (Execution ID: `{exec_id}`).\n\n"
                     f"Please wait for the current execution to complete before triggering it again. "
                     f"I'll help you monitor the status if needed!"
                 ),
@@ -475,7 +475,7 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
             error_msg = raw.get("errorMessage") or raw.get("message") or "T4 returned failure without details."
             return {
                 "success": False,
-                "error": f"❌ Trigger failed: {error_msg}",
+                "error": f"Trigger failed: {error_msg}",
                 "raw": raw,
             }
 
@@ -584,7 +584,7 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
         return {
             "success": False,
             "error": (
-                f"❌ An unexpected error occurred while triggering **{resolved_name}**: {e}\n\n"
+                f"An unexpected error occurred while triggering **{resolved_name}**: {e}\n\n"
                 "Please try again or contact your administrator."
             ),
         }

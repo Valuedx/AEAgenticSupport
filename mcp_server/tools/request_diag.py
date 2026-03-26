@@ -57,6 +57,12 @@ async def request_get_execution_details(request_id: str) -> str:
 
 async def request_get_audit_logs(request_id: str) -> str:
     """Fetch the audit trail for a request."""
+    # Guard: check if the assigned agent is running
+    from mcp_server.tools.agent_guard import check_agent_for_request
+    guard = await check_agent_for_request(request_id)
+    if guard:
+        return _safe_json(guard)
+
     client = get_ae_client()
     try:
         data = client.get_request_audit(request_id)
@@ -82,6 +88,12 @@ async def request_get_audit_logs(request_id: str) -> str:
 
 async def request_get_step_logs(request_id: str) -> str:
     """Fetch step-level execution logs for a request."""
+    # Guard: check if the assigned agent is running
+    from mcp_server.tools.agent_guard import check_agent_for_request
+    guard = await check_agent_for_request(request_id)
+    if guard:
+        return _safe_json(guard)
+
     client = get_ae_client()
     try:
         data = client.get_request_steps(request_id)

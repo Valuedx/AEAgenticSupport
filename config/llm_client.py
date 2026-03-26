@@ -39,7 +39,7 @@ class VertexAIClient:
         )
         
         self.default_temp = 0.1
-        self.default_max_tokens = 4096
+        self.default_max_tokens = CONFIG.get("VERTEX_AI_MAX_TOKENS", 30000)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def chat(self, prompt: str, system: str = "",
