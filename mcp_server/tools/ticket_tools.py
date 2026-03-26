@@ -59,8 +59,8 @@ async def ticket_create(
         return _safe_json({"success": False, "error": "TICKET_API_EMAIL or TICKET_API_PASSWORD not set."})
 
     form_data = {
-        "process_name": process_name.strip(),
-        "Description": description.strip(),
+        "process_name": process_name.strip().replace('"', "'"),
+        "Description": description.strip().replace('"', "'"),
         "request_type": request_type,
         "Email": email,
         "password": password,

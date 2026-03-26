@@ -2263,9 +2263,10 @@ CRITICAL RULES:
         else:
             msg = f"I couldn't complete the action for **{wf_label}** automatically."
             
-        # Only add guidance if the error is short/generic OR if no specific error exists.
-        # Specific errors like 'agent offline' don't need generic SOP steps.
-        if guidance and (not error_text or len(error_text) < 50):
+        # Only add generic guidance if the error is short/generic AND doesn't look like a formal API rejection.
+        # Specific errors like 'agent offline' or 'malicious code' don't need generic SOP steps.
+        is_formal_rejection = any(k in error_text.lower() for k in ("malicious", "unauthorized", "connection", "not found", "offline"))
+        if guidance and (not error_text or len(error_text) < 50) and not is_formal_rejection:
             msg += "\n\nRecommended troubleshooting steps:\n" + "\n".join(f"- {g}" for g in guidance)
             
         msg += "\n\nWould you like me to retry, create an incident ticket, or escalate?"

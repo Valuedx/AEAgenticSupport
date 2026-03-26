@@ -205,32 +205,49 @@ class ConversationState:
                             "user_metadata": self.user_metadata,
                         }
                     }
-                    cur.execute("""
-                        INSERT INTO conversation_state
-                            (conversation_id, user_id, user_role,
-                             phase, state_data, summary, is_human_handoff, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-                        ON CONFLICT (conversation_id)
-                        DO UPDATE SET
-                            user_id = EXCLUDED.user_id,
-                            user_role = EXCLUDED.user_role,
-                            phase = EXCLUDED.phase,
-                            state_data = EXCLUDED.state_data,
-                            summary = EXCLUDED.summary,
-                            is_human_handoff = EXCLUDED.is_human_handoff,
-                            updated_at = NOW()
-                    """, (
-                        self.conversation_id,
-                        self.user_id,
-                        self.user_role,
-                        self.phase.value,
-                        Json(state_data),
-                        self.summary,
-                        self.is_human_handoff,
-                    ))
+                    # Try to save state with fallback to UPDATE if it exists to avoid ON CONFLICT constraint issues
+                    cur.execute("SELECT 1 FROM conversation_state WHERE conversation_id = %s", (self.conversation_id,))
+                    if cur.fetchone():
+                        cur.execute("""
+                            UPDATE conversation_state SET
+                                user_id = %s,
+                                user_role = %s,
+                                phase = %s,
+                                state_data = %s,
+                                summary = %s,
+                                is_human_handoff = %s,
+                                updated_at = NOW()
+                            WHERE conversation_id = %s
+                        """, (
+                            self.user_id,
+                            self.user_role,
+                            self.phase.value,
+                            Json(state_data),
+                            self.summary,
+                            self.is_human_handoff,
+                            self.conversation_id,
+                        ))
+                    else:
+                        cur.execute("""
+                            INSERT INTO conversation_state
+                                (conversation_id, user_id, user_role,
+                                 phase, state_data, summary, is_human_handoff, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                        """, (
+                            self.conversation_id,
+                            self.user_id,
+                            self.user_role,
+                            self.phase.value,
+                            Json(state_data),
+                            self.summary,
+                            self.is_human_handoff,
+                        ))
                 conn.commit()
         except Exception as e:
             logger.warning(f"Could not persist conversation state: {e}")
+            # Ensure we don't swallow serious DB errors that block execution
+            if "duplicate key" not in str(e).lower() and "constraint" not in str(e).lower():
+                logger.error(f"Critical persistence error: {e}", exc_info=True)
 
     @classmethod
     def load(cls, conversation_id: str) -> "ConversationState":
