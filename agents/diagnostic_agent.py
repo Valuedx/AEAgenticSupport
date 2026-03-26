@@ -66,6 +66,10 @@ class DiagnosticAgent(BaseAgent):
             last_bot_msg = next((m for m in reversed(state.messages) if m.get("role") == "assistant"), {}).get("content", "").lower()
             if any(term in last_bot_msg for term in ("logs", "agent", "id", "2887")):
                 # Very high score to take over parameter-only messages (like date ranges)
+                # But don't steal if the message looks like a new high-level intent (ticket, workflow, etc)
+                if any(k in msg for k in ("ticket", "workflow", "restart", "run", "fix", "trigger")):
+                    return 0.3
+                
                 logger.info("DiagnosticAgent claiming turn based on history context")
                 return 0.95
         
