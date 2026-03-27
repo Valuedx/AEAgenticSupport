@@ -209,6 +209,67 @@ _RUNTIME_SCHEMA_STATEMENTS = (
         END IF; 
     END $$;
     """,
+    """
+    DO $$ 
+    BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_name = 'ticket_registry' AND constraint_type = 'PRIMARY KEY') THEN 
+            ALTER TABLE ticket_registry ADD PRIMARY KEY (ticket_id); 
+        END IF; 
+    END $$;
+    """,
+    """
+    DO $$ 
+    BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_name = 'tool_execution_log' AND constraint_type = 'PRIMARY KEY') THEN 
+            ALTER TABLE tool_execution_log ADD PRIMARY KEY (id); 
+        END IF; 
+    END $$;
+    """,
+    # --- Fix SERIAL auto-increment sequences (broken on some server schemas) ---
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'chat_messages_id_seq' AND relkind = 'S') THEN
+            CREATE SEQUENCE chat_messages_id_seq;
+        END IF;
+        PERFORM setval('chat_messages_id_seq', GREATEST(COALESCE((SELECT MAX(id) FROM chat_messages), 0), 1));
+        ALTER TABLE chat_messages ALTER COLUMN id SET DEFAULT nextval('chat_messages_id_seq');
+        ALTER TABLE chat_messages ALTER COLUMN id SET NOT NULL;
+    END $$;
+    """,
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'tool_execution_log_id_seq' AND relkind = 'S') THEN
+            CREATE SEQUENCE tool_execution_log_id_seq;
+        END IF;
+        PERFORM setval('tool_execution_log_id_seq', GREATEST(COALESCE((SELECT MAX(id) FROM tool_execution_log), 0), 1));
+        ALTER TABLE tool_execution_log ALTER COLUMN id SET DEFAULT nextval('tool_execution_log_id_seq');
+        ALTER TABLE tool_execution_log ALTER COLUMN id SET NOT NULL;
+    END $$;
+    """,
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'approval_audit_log_id_seq' AND relkind = 'S') THEN
+            CREATE SEQUENCE approval_audit_log_id_seq;
+        END IF;
+        PERFORM setval('approval_audit_log_id_seq', GREATEST(COALESCE((SELECT MAX(id) FROM approval_audit_log), 0), 1));
+        ALTER TABLE approval_audit_log ALTER COLUMN id SET DEFAULT nextval('approval_audit_log_id_seq');
+        ALTER TABLE approval_audit_log ALTER COLUMN id SET NOT NULL;
+    END $$;
+    """,
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'user_feedback_id_seq' AND relkind = 'S') THEN
+            CREATE SEQUENCE user_feedback_id_seq;
+        END IF;
+        PERFORM setval('user_feedback_id_seq', GREATEST(COALESCE((SELECT MAX(id) FROM user_feedback), 0), 1));
+        ALTER TABLE user_feedback ALTER COLUMN id SET DEFAULT nextval('user_feedback_id_seq');
+        ALTER TABLE user_feedback ALTER COLUMN id SET NOT NULL;
+    END $$;
+    """,
 )
 
 

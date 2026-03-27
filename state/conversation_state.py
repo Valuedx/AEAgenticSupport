@@ -185,7 +185,8 @@ class ConversationState:
                                 VALUES (%s, %s, %s, %s, %s, %s, NOW())
                             """, (self.user_id, self.user_role, self.user_name, self.user_email, self.user_team, Json(self.user_metadata)))
 
-                    # Flush deferred message inserts in one batch
+                    # Flush deferred message inserts in one batch (MUST be at cursor level, not inside user_registry block)
+                    if self._pending_message_inserts:
                         logger.info("Flushing %d pending messages for conversation %s", len(self._pending_message_inserts), self.conversation_id)
                         for role, content, metadata in self._pending_message_inserts:
                             cur.execute("""
