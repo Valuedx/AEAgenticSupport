@@ -158,22 +158,99 @@ Embeds all tools, SOPs, KB articles, and workflows into the vector database.
 
 ### 5. Start All Services
 
+Use the one-click launcher to start everything:
+
 ```bash
+cd D:\AG_V2\AEAgenticSupport
 .\start_servers.bat
 ```
 
-Or start individually:
-
-| Component | Command | Port |
-|---|---|---|
-| **Agent Server** | `python agent_server.py` | `8001` |
-| **MCP Server** | `python -m mcp_server --transport streamable-http --host 127.0.0.1 --port 3000` | `3000` |
-| **AI Studio Engine** | `manage.pyc runserver localhost:8000` | `8000` |
-| **Cognibot** | `manage.pyc runserver localhost:3978` | `3978` |
+Or start each component individually (see detailed guide below).
 
 ---
 
-## 🗄️ Database Tables
+## 🖥️ Component Run Guide
+
+Detailed instructions for starting each system component independently.
+
+### 1. Agent Server
+
+Responsible for agentic logic and communication.
+
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
+- **Command**:
+```bash
+cd D:\AG_V2\AEAgenticSupport
+python agent_server.py
+```
+
+### 2. MCP Server
+
+Provides Model Context Protocol (MCP) tools over HTTP.
+
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
+- **Command**:
+```bash
+cd D:\AG_V2\AEAgenticSupport
+python -m mcp_server --transport streamable-http --host 127.0.0.1 --port 3000
+```
+
+### 3. AI Studio Engine
+
+The main backend engine for AI Studio.
+
+- **Directory**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\AIStudio\engine`
+- **Python**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\AIStudio\python\python.exe`
+- **Command**:
+```bash
+cd D:\AG_V2\AEAgenticSupport\AI_Studio_Local\AIStudio\engine
+..\python\python.exe manage.pyc runserver localhost:8000
+```
+
+### 4. Chatbot Webservice (Cognibot)
+
+The chatbot interface service.
+
+- **Directory**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\cognibot`
+- **Python**: `D:\AG_V2\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\python\python.exe`
+- **Command**:
+```bash
+cd D:\AG_V2\AEAgenticSupport\AI_Studio_Local\Chatbot-Webservice\cognibot
+..\python\python.exe manage.pyc runserver localhost:3978
+```
+
+### Component Summary
+
+| Component | Directory | Port |
+|---|---|---|
+| **Agent Server** | `AEAgenticSupport/` | `8001` |
+| **MCP Server** | `AEAgenticSupport/` | `3000` |
+| **AI Studio Engine** | `AI_Studio_Local/AIStudio/engine/` | `8000` |
+| **Cognibot** | `AI_Studio_Local/Chatbot-Webservice/cognibot/` | `3978` |
+
+---
+
+## 🗄️ Database Setup / Migration
+
+Run **once** on first deployment to create all required PostgreSQL tables and extensions.
+
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
+- **Script**: `setup_db.py`
+- **Requires**: `POSTGRES_DSN` set in `.env` and PostgreSQL running
+
+### Create all tables (first-time setup)
+
+```bash
+cd D:\AG_V2\AEAgenticSupport
+python setup_db.py
+```
+
+This will:
+- Auto-detect if `pgvector` extension is available (uses native vector columns if yes, JSONB fallback if no)
+- Auto-detect the embedding vector dimension from your configured `EMBEDDING_MODEL`
+- Create all tables with `IF NOT EXISTS` — safe to re-run
+
+### Database Tables
 
 | Table | Purpose |
 |---|---|
@@ -185,6 +262,16 @@ Or start individually:
 | `approval_audit_log` | Human-in-the-loop approval audit trail |
 | `tool_execution_log` | Full tool call audit log (params + result) |
 | `workflow_catalog` | T4 workflow cache (avoids repeated API calls) |
+
+### One-time migration (existing deployments only)
+
+If upgrading from an older version that had the `issue_tracker_state` table:
+
+```bash
+python setup_db.py --migrate
+```
+
+This moves `active_issue_id` data into `conversation_state` and drops the old table. Safe to run multiple times.
 
 ---
 
@@ -204,23 +291,47 @@ Exposes AutomationEdge tools via the **Model Context Protocol** over streamable 
 
 ---
 
-## 🔍 RAG Indexing Options
+## 🔍 RAG Indexing / Tool Embedding
+
+Run this **before starting the agent for the first time**, or whenever tools, SOPs, KB articles, or workflows are updated. It embeds all documents into the RAG vector database so the agent can discover and route to the correct tools.
+
+- **Directory**: `D:\AG_V2\AEAgenticSupport`
+- **Script**: `run_rag_index.py`
+
+### Index everything (recommended on first run)
 
 ```bash
-# Index everything (recommended on first run)
+cd D:\AG_V2\AEAgenticSupport
 python run_rag_index.py
-
-# Selective indexing
-python run_rag_index.py --only tools     # Static/registered tools
-python run_rag_index.py --only mcp       # Live MCP server tools
-python run_rag_index.py --only t4        # Live T4 workflows
-python run_rag_index.py --only sops      # SOPs only
-python run_rag_index.py --only kb        # Knowledge Base articles
-python run_rag_index.py --only incidents # Past incidents
-
-# Skip specific sources
-python run_rag_index.py --skip t4        # Everything except T4 (fast, offline)
 ```
+
+### Selective indexing (only re-index what changed)
+
+```bash
+# Static MCP / registered tools only
+python run_rag_index.py --only tools
+
+# Live MCP server tools only (requires AE_MCP_SERVER_URL in .env)
+python run_rag_index.py --only mcp
+
+# Live T4 AutomationEdge workflows only (requires AE_USERNAME / AE_API_KEY in .env)
+python run_rag_index.py --only t4
+
+# SOPs only
+python run_rag_index.py --only sops
+
+# Knowledge Base articles only
+python run_rag_index.py --only kb
+
+# Past incidents only
+python run_rag_index.py --only incidents
+
+# Everything except T4 live fetch (fast, offline)
+python run_rag_index.py --skip t4
+```
+
+> **Note**: T4 workflow indexing requires `AE_USERNAME` (or `AE_API_KEY`) to be set in `.env`.
+> MCP server tool indexing requires `AE_MCP_SERVER_URL`. If missing, those steps are skipped automatically with a warning.
 
 ---
 
