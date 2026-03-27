@@ -167,20 +167,26 @@ class ConversationState:
                 with conn.cursor() as cur:
                     # sync user registry first
                     if self.user_id:
-                        cur.execute("""
-                            INSERT INTO user_registry (user_id, user_role, user_name, user_email, user_team, metadata, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                            ON CONFLICT (user_id) DO UPDATE SET
-                                user_role = EXCLUDED.user_role,
-                                user_name = COALESCE(NULLIF(EXCLUDED.user_name, ''), user_registry.user_name),
-                                user_email = COALESCE(NULLIF(EXCLUDED.user_email, ''), user_registry.user_email),
-                                user_team = COALESCE(NULLIF(EXCLUDED.user_team, ''), user_registry.user_team),
-                                metadata = user_registry.metadata || EXCLUDED.metadata,
-                                updated_at = NOW()
-                        """, (self.user_id, self.user_role, self.user_name, self.user_email, self.user_team, Json(self.user_metadata)))
+                        cur.execute("SELECT 1 FROM user_registry WHERE user_id = %s", (self.user_id,))
+                        if cur.fetchone():
+                            cur.execute("""
+                                UPDATE user_registry SET
+                                    user_role = %s,
+                                    user_name = COALESCE(NULLIF(%s, ''), user_name),
+                                    user_email = COALESCE(NULLIF(%s, ''), user_email),
+                                    user_team = COALESCE(NULLIF(%s, ''), user_name),
+                                    metadata = metadata || %s,
+                                    updated_at = NOW()
+                                WHERE user_id = %s
+                            """, (self.user_role, self.user_name, self.user_email, self.user_team, Json(self.user_metadata), self.user_id))
+                        else:
+                            cur.execute("""
+                                INSERT INTO user_registry (user_id, user_role, user_name, user_email, user_team, metadata, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                            """, (self.user_id, self.user_role, self.user_name, self.user_email, self.user_team, Json(self.user_metadata)))
 
                     # Flush deferred message inserts in one batch
-                    if self._pending_message_inserts:
+                        logger.info("Flushing %d pending messages for conversation %s", len(self._pending_message_inserts), self.conversation_id)
                         for role, content, metadata in self._pending_message_inserts:
                             cur.execute("""
                                 INSERT INTO chat_messages (conversation_id, role, content, metadata)

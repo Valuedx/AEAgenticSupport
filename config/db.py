@@ -178,6 +178,37 @@ _RUNTIME_SCHEMA_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_user_registry_email
         ON user_registry(user_email)
     """,
+    # --- Self-Healing Migrations (Enforce PKs and Columns on existing tables) ---
+    "ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS active_issue_id VARCHAR(64)",
+    "ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS summary TEXT",
+    "ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS is_human_handoff BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS tsv tsvector",
+    
+    # Conditionally add Primary Keys if missing (standard ALTER fails if PK already exists)
+    """
+    DO $$ 
+    BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_name = 'workflow_catalog' AND constraint_type = 'PRIMARY KEY') THEN 
+            ALTER TABLE workflow_catalog ADD PRIMARY KEY (workflow_id, org_code); 
+        END IF; 
+    END $$;
+    """,
+    """
+    DO $$ 
+    BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_name = 'conversation_state' AND constraint_type = 'PRIMARY KEY') THEN 
+            ALTER TABLE conversation_state ADD PRIMARY KEY (conversation_id); 
+        END IF; 
+    END $$;
+    """,
+    """
+    DO $$ 
+    BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_name = 'user_registry' AND constraint_type = 'PRIMARY KEY') THEN 
+            ALTER TABLE user_registry ADD PRIMARY KEY (user_id); 
+        END IF; 
+    END $$;
+    """,
 )
 
 

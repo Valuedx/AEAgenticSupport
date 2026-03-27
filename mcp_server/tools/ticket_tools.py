@@ -27,12 +27,16 @@ async def ticket_create(
     description: str,
     request_type: str = "Request",
 ) -> str:
-    """
+    r"""
     Create a support ticket in the HDFC Life ticketing system.
 
+    CRITICAL: Use plain text only. Avoid double quotes ("), backslashes (\), 
+    or structural delimiters (like JSON or code blocks) in the description 
+    as they trigger security filters and break the API payload.
+
     Args:
-        process_name: Process/workflow name (e.g. "Demat Process").
-        description:  Error description with symptoms.
+        process_name: Process/workflow name (plain text, no quotes).
+        description:  Detailed error description (plain text, no quotes).
         request_type: 'Incident' or 'Request' (default: 'Request').
     """
     if not process_name or not process_name.strip():
@@ -58,14 +62,28 @@ async def ticket_create(
     if not email or not password:
         return _safe_json({"success": False, "error": "TICKET_API_EMAIL or TICKET_API_PASSWORD not set."})
 
+    # Ultra-aggressive sanitization to avoid "malicious code" or "breaking payload" rejection by WAF
+    # Strip ALL special characters except alphanumeric, spaces, and hyphens.
+    import re
+    def _ultra_clean(val: str) -> str:
+        if not val: return ""
+        # First replace common delimiters with spaces to preserve word boundaries
+        val = val.replace("_", " ").replace(":", " ").replace("/", " ").replace("\\", " ").replace("-", " ")
+        # Then strip everything that isn't alphanumeric or space
+        cleaned = re.sub(r'[^a-zA-Z0-9 ]', '', val)
+        return " ".join(cleaned.split()) # Normalize spaces
+
     form_data = {
-        "process_name": process_name.strip().replace('"', "'"),
-        "Description": description.strip().replace('"', "'"),
-        "request_type": request_type,
+        "process_name": _ultra_clean(process_name),
+        "Description": _ultra_clean(description),
+        "request_type": _ultra_clean(request_type),
         "Email": email,
         "password": password,
     }
 
+    # Debug log (masking password)
+    safe_payload = {k: (v if k != "password" else "****") for k, v in form_data.items()}
+    logger.info("Ticket API Payload (Sanitized): %s", json.dumps(safe_payload))
     logger.info("Creating ticket: process='%s' type='%s' env='%s'", process_name.strip(), request_type, env)
 
     try:

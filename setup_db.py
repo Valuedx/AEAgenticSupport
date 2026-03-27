@@ -225,6 +225,17 @@ CREATE TABLE IF NOT EXISTS ticket_registry (
 
 CREATE INDEX IF NOT EXISTS idx_ticket_registry_tid ON ticket_registry(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_registry_user ON ticket_registry(user_id);
+
+-- User Registry (used by state/conversation_state.py)
+CREATE TABLE IF NOT EXISTS user_registry (
+    user_id     VARCHAR(256) PRIMARY KEY,
+    user_role   VARCHAR(32) DEFAULT 'technical',
+    user_name   VARCHAR(256),
+    user_email  VARCHAR(256),
+    user_team   VARCHAR(256),
+    metadata    JSONB DEFAULT '{}'::jsonb,
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 
@@ -244,6 +255,7 @@ def setup_database():
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     with conn.cursor() as cur:
+        # Step 1: Run standard CREATE TABLE IF NOT EXISTS
         for statement in schema_sql.split(";"):
             lines = [
                 ln for ln in statement.strip().splitlines()
@@ -256,20 +268,55 @@ def setup_database():
                 cur.execute(clean + ";")
             except psycopg2.Error as e:
                 print(f"  Warning: {e.pgerror or e}")
+
+        # Step 2: Enforce Primary Keys and Missing Columns (Self-Healing Migrations)
+        print("  Verifying schema constraints...")
+        
+        # Helper to ensure PK
+        def ensure_pk(table_name, pk_cols):
+            cur.execute(f"SELECT 1 FROM information_schema.table_constraints WHERE table_name = '{table_name}' AND constraint_type = 'PRIMARY KEY'")
+            if not cur.fetchone():
+                print(f"  Fixing: Missing PRIMARY KEY on {table_name}")
+                try:
+                    cur.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY ({pk_cols})")
+                except Exception as e:
+                    print(f"    Error on {table_name}: {e}")
+                    # Try to remove duplicates first
+                    print(f"    Searching for duplicates in {table_name}...")
+                    cur.execute(f"DELETE FROM {table_name} a USING {table_name} b WHERE a.ctid < b.ctid AND " + " AND ".join([f"a.{c} = b.{c}" for c in pk_cols.split(",")]))
+                    try:
+                        cur.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY ({pk_cols})")
+                        print(f"    Success: PK added to {table_name}")
+                    except Exception as e2:
+                        print(f"    Final Failure for {table_name}: {e2}")
+
+        ensure_pk("conversation_state", "conversation_id")
+        ensure_pk("workflow_catalog", "workflow_id, org_code")
+        ensure_pk("rag_documents", "id")
+        ensure_pk("issue_registry", "conversation_id, issue_id")
+        ensure_pk("ticket_registry", "ticket_id")
+        ensure_pk("chat_messages", "id")
+        ensure_pk("user_feedback", "id")
+        ensure_pk("approval_audit_log", "id")
+        ensure_pk("tool_execution_log", "id")
+        ensure_pk("user_registry", "user_id")
+        
+        # Ensure critical columns in conversation_state
+        cur.execute("ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS summary TEXT")
+        cur.execute("ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS is_human_handoff BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS active_issue_id VARCHAR(64)")
+
+        # Ensure tsv in rag_documents
+        if use_pgvector:
+            cur.execute("ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS tsv tsvector")
+        else:
+            cur.execute("ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS tsv TEXT")
+
     conn.close()
 
     print("Database setup complete.")
-    print("Tables created:")
-    print(f"  - rag_documents (RAG vector store, vector({embed_dim}))")
-    print("  - issue_registry (issue tracking)")
-    print("  - conversation_state (session persistence + active issue pointer)")
-    print("  - ticket_registry (HDFC ticket lifecycle management)")
-    print()
-    print("Next steps:")
-    print("  1. Index KB data:  python -m rag.index_all")
-    print("  2. Run tests:      python -m pytest tests/test_scenarios.py -v")
-    print("  3. Start agent:    python main.py")
-
+    print("Tables verified and constraints enforced.")
+    print("Run 'python db_health_check.py' to confirm status.")
 
 def migrate_from_issue_tracker_state():
     """One-time migration: move active_issue_id data from the old
@@ -288,18 +335,6 @@ def migrate_from_issue_tracker_state():
             print("  issue_tracker_state does not exist — nothing to migrate.")
             conn.close()
             return
-
-        cur.execute(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = 'conversation_state' "
-            "AND column_name = 'active_issue_id'"
-        )
-        if not cur.fetchone():
-            cur.execute(
-                "ALTER TABLE conversation_state "
-                "ADD COLUMN active_issue_id VARCHAR(64)"
-            )
-            print("  Added active_issue_id column to conversation_state.")
 
         cur.execute("""
             UPDATE conversation_state cs

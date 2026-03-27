@@ -1830,7 +1830,11 @@ class AutomationEdgeClient:
             return len(rows)
 
         except Exception as exc:
-            logger.warning("T4: workflow_catalog sync failed (non-fatal): %s", exc)
+            logger.warning(
+                "T4: workflow_catalog sync failed (non-fatal): %s. "
+                "If this is a constraint error, please run 'python setup_db.py' to fix the database schema.", 
+                exc
+            )
             return 0
 
     def index_workflows_to_rag(

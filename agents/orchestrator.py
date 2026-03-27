@@ -289,7 +289,11 @@ class Orchestrator:
         except Exception as e:
             logger.exception(f"Error in handle_message: {e}")
             metrics_collector.record_turn_error(turn_id, str(e))
-            return f"I encountered a technical problem: {cast(Any, str(e))[:100]}. Please try again or contact support."
+            error_response = f"I encountered a technical problem: {cast(Any, str(e))[:100]}. Please try again or contact support."
+            # Append error response to state so it's persisted in chat_messages
+            state.add_message("assistant", error_response)
+            state.save() 
+            return error_response
         finally:
             metrics_collector.end_turn(turn_id)
 
@@ -590,6 +594,11 @@ class Orchestrator:
                                 or tool_args.get(p) in (None, "", {}, [])
                             ]
                             
+                            # Pre-sanitize args for the Approval UI to ensure the user sees WAF-safe text
+                            # and the backend tool doesn't have to strip characters silently.
+                            if tool_name == "create_hdfc_ticket":
+                                tool_args = self._sanitize_ticket_args(tool_args)
+
                             if not missing and self.approval_gate.needs_approval(
                                 tool_name, tool_def.tier, tool_args
                             ):
@@ -605,6 +614,10 @@ class Orchestrator:
                                     f"{tool_name} on "
                                     f"{tool_args.get('workflow_name', 'unknown')}"
                                 )
+                                # Clean summary too for ticketing actions
+                                if tool_name == "create_hdfc_ticket":
+                                    summary = summary.replace("_", " ").replace(":", " ")
+
                                 state.pending_action_summary = summary
                                 state.phase = ConversationPhase.AWAITING_APPROVAL
                                 state.is_agent_working = False
@@ -1216,9 +1229,9 @@ Rules:
 17. **LOG DATE SELECTION RULE**: 
     - **Agent Host Logs (`analyze_agent_logs`)**: When requested for an `agent_id`, you MUST inform the user that logs default to the last 24 hours and ask if they want to specify a particular `from_date` or `to_date` BEFORE performing extraction.
     - **Workflow Execution Logs (`get_execution_logs`)**: When requested for a specific Request/Execution ID, you MUST NOT ask for a time range. These logs represent the entire lifecycle of that specific run and do not require date filters. Call the tool immediately.
-19. **GOAL PERSISTENCE**: If you have started a multi-step intent (e.g., creating a ticket, triggering a workflow, or asking for specific details), you MUST maintain that goal as your primary objective in the next turn. If the user's response provides the requested details but also mentions a failure symptom, you SHOULD call the relevant tool (e.g., `create_hdfc_ticket` or `trigger_workflow`) FIRST while acknowledging the symptom. Do NOT abandon the original goal to start a fresh diagnostics discovery unless the user explicitly cancels the request.
-20. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
-
+18. **GOAL PERSISTENCE**: If you have started a multi-step intent (e.g., creating a ticket, triggering a workflow, or asking for specific details), you MUST maintain that goal as your primary objective in the next turn. If the user's response provides the requested details but also mentions a failure symptom, you SHOULD call the relevant tool (e.g., `create_hdfc_ticket` or `trigger_workflow`) FIRST while acknowledging the symptom. Do NOT abandon the original goal to start a fresh diagnostics discovery unless the user explicitly cancels the request.
+19. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
+20. **STRICT PAYLOAD SANITIZATION**: When calling support or ticketing tools (e.g. `ae.ticket.create`), you MUST provide `description` and `process_name` as PLAIN TEXT only. Do NOT use double quotes ("), colons (:), underscores (_), or parentheses () inside these parameters. Use spaces or hyphens instead to preserve readability. (Example: "execution_id: 2564846" -> "execution id 2564846").
 Available tool categories: status, logs, file, remediation, dependency,
 config, notification, general, meta.
 You have a subset of tools loaded. Use discover_tools to find others.
@@ -2367,3 +2380,22 @@ CRITICAL RULES:
             "I couldn’t find a matching tool or a strong SOP for this request yet. "
             "Please share one more detail (system name, error message, or workflow name), and I’ll guide you step-by-step."
         )
+
+    def _sanitize_ticket_args(self, args: dict) -> dict:
+        """Strip all special characters from ticket arguments to avoid WAF rejections."""
+        import re
+        def _clean(v):
+            if not isinstance(v, str): return v
+            # Replace underscores, colons, slashes and hyphens with spaces
+            v = v.replace("_", " ").replace(":", " ").replace("/", " ").replace("\\", " ").replace("-", " ")
+            # Strip everything else except alphanumeric and space
+            return " ".join(re.sub(r'[^a-zA-Z0-9 ]', '', v).split())
+
+        new_args = dict(args)
+        if "process_name" in new_args:
+            new_args["process_name"] = _clean(new_args["process_name"])
+        if "description" in new_args:
+            new_args["description"] = _clean(new_args["description"])
+        if "request_type" in new_args:
+            new_args["request_type"] = _clean(new_args["request_type"])
+        return new_args
