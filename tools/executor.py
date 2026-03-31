@@ -32,11 +32,45 @@ class ToolExecutor:
         }
 
     def execute(self, tool_name: str, handler: Callable, kwargs: dict) -> ToolResult:
+        import asyncio
+        import inspect
+
         logged_kwargs = self.sanitize_logged_params(kwargs)
         self._audit.info("TOOL_CALL tool=%s params=%s", tool_name, logged_kwargs)
         try:
+            # ── Execute the handler ──────────────────────────────────────────
+            # Our tool handlers can be synchronous or asynchronous.
             result = handler(**kwargs)
 
+            # ── Async Bridge: Handle coroutines from 'async def' functions ───
+            if inspect.iscoroutine(result):
+                try:
+                    # In a typical server (Flask/Threaded), we likely don't have
+                    # a running loop in this worker thread.
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    # No loop in this thread; create one.
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                if loop.is_running():
+                    # This happens if we are already inside an async context.
+                    # We use a thread-safe way to run the coroutine or nest_asyncio.
+                    # For this environment, since it's mosty sync, we'll try to use 
+                    # a nested loop if possible, or just a wrapper.
+                    try:
+                        import nest_asyncio
+                        nest_asyncio.apply()
+                        result = loop.run_until_complete(result)
+                    except (ImportError, RuntimeError):
+                        # Fallback for complex environments
+                        self._logger.warning("Already in a running loop for %s; execution might be deferred.", tool_name)
+                        # In the worst case, we might need a concurrent.futures.Future bridge.
+                        # But for our current architecture, nest_asyncio is standard.
+                else:
+                    result = loop.run_until_complete(result)
+
+            # ── Normalize Result ─────────────────────────────────────────────
             if isinstance(result, ToolResult):
                 if result.tool_name == "":
                     result.tool_name = tool_name
@@ -58,6 +92,7 @@ class ToolExecutor:
                 )
                 self._audit.warning("TOOL_FAIL tool=%s error=%s", tool_name, error)
                 self._log_interaction(tool_name, logged_kwargs, False, error)
+                # Ensure the full tool result (including error, sop, etc.) is in 'data'
                 return ToolResult(
                     success=False,
                     data=result,

@@ -963,7 +963,16 @@ class ToolRegistry:
             # Special handling for 'automationedge' category used by orchestrator preflight
             search_categories = [category] if category else None
             if category == "automationedge":
-                search_categories = ["automationedge", "dependency", "status", "logs", "agent", "remediation"]
+                search_categories = [
+                    "automationedge",
+                    "dependency",
+                    "status",
+                    "logs",
+                    "agent",
+                    "agent_read",
+                    "agent_diag",
+                    "remediation",
+                ]
 
             logger.info(
                 "discover_tools filtering by categories: %s",

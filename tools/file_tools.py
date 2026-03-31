@@ -4,46 +4,34 @@ File validation tools — check input/output file presence and format.
 
 import logging
 
-from tools.base import ToolDefinition, get_ae_client
+from tools.base import ToolDefinition
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.tools.files")
 
 
+_NOT_SUPPORTED = (
+    "Reading and writing workflow input/output files is not supported by this agent. "
+    "Please check the file directly on the agent machine or the shared network path "
+    "configured for this workflow."
+)
+
+
 def check_input_file(workflow_name: str, expected_date: str = "") -> dict:
-    params = {"date": expected_date} if expected_date else None
-    resp = get_ae_client().get(
-        f"/api/v1/workflows/{workflow_name}/input-file",
-        params=params,
-    )
     return {
+        "supported": False,
         "workflow_name": workflow_name,
-        "file_exists": resp.get("exists", False),
-        "file_path": resp.get("filePath"),
-        "file_size": resp.get("fileSize"),
-        "last_modified": resp.get("lastModified"),
-        "expected_date": expected_date,
-        "format_valid": resp.get("formatValid"),
-        "row_count": resp.get("rowCount"),
+        "message": _NOT_SUPPORTED,
     }
 
 
 def check_output_file(workflow_name: str, execution_id: str = "") -> dict:
-    params = {}
-    if execution_id:
-        params["executionId"] = execution_id
-    resp = get_ae_client().get(
-        f"/api/v1/workflows/{workflow_name}/output-file",
-        params=params,
-    )
     return {
+        "supported": False,
         "workflow_name": workflow_name,
-        "file_exists": resp.get("exists", False),
-        "file_path": resp.get("filePath"),
-        "file_size": resp.get("fileSize"),
-        "last_modified": resp.get("lastModified"),
-        "row_count": resp.get("rowCount"),
+        "message": _NOT_SUPPORTED,
     }
+
 
 
 # ── Register file tools ──

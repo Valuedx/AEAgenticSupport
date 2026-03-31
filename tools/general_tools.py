@@ -49,10 +49,31 @@ def call_ae_api(method: str, endpoint: str,
     if not endpoint.startswith("/"):
         endpoint = "/" + endpoint
 
-    client = get_ae_client()
-
     parsed_params = _safe_json(params) if params else None
     parsed_body = _safe_json(body) if body else None
+
+    # Guard: ticket creation must use ae.ticket.create, not this tool.
+    # The AE REST server has no ticket endpoint — routing there gives 404.
+    endpoint_lower = endpoint.lower()
+    _TICKET_PATTERNS = ("ticket", "support/user", "usercreateticket", "support/create", "incident", "/support/")
+    has_ticketish_payload = False
+    for candidate in (parsed_body, parsed_params):
+        if isinstance(candidate, dict):
+            lowered_keys = {str(k).lower() for k in candidate.keys()}
+            if {"process_name", "description"} & lowered_keys or "request_type" in lowered_keys:
+                has_ticketish_payload = True
+                break
+    if any(p in endpoint_lower for p in _TICKET_PATTERNS) or ("/support/" in endpoint_lower and method != "GET") or has_ticketish_payload:
+        return {
+            "error": "ticket_tool_required",
+            "message": (
+                "Ticket creation must use the 'ae.ticket.create' tool, not call_ae_api. "
+                "call_ae_api only reaches the AutomationEdge REST server which has no ticket endpoint. "
+                "Please call ae.ticket.create with process_name, description, and request_type."
+            ),
+        }
+
+    client = get_ae_client()
 
     if method == "GET":
         data = client.get(endpoint, params=parsed_params)
@@ -262,7 +283,9 @@ tool_registry.register(
         ),
         avoid_when=(
             "A typed tool already exists for the task, or the action is risky "
-            "and you have not gathered the exact endpoint and payload yet."
+            "and you have not gathered the exact endpoint and payload yet. "
+            "NEVER use for ticket creation — use ae.ticket.create instead. "
+            "The AE REST server has no ticket endpoint and will return 404."
         ),
         input_examples=[
             {

@@ -147,6 +147,34 @@ def create_hdfc_ticket(
         return {"success": False, "error": msg, "environment": api_env}
 
 
+def create_incident_ticket(
+    title: str = "",
+    description: str = "",
+    priority: str = "",
+    assignee_group: str = "",
+    user_id: str = "",
+) -> dict:
+    """
+    Backward-compatible alias for ticket creation.
+
+    Older prompts and escalation flows still refer to create_incident_ticket.
+    Route them to the HDFC ticket API using Incident semantics.
+    """
+    process_name = str(title or assignee_group or "Support Incident").strip()
+    desc = str(description or "").strip()
+    result = create_hdfc_ticket(
+        process_name=process_name,
+        description=desc,
+        request_type="Incident",
+        user_id=user_id,
+    )
+    if isinstance(result, dict):
+        result.setdefault("priority", priority)
+        result.setdefault("assignee_group", assignee_group)
+        result.setdefault("legacy_tool", "create_incident_ticket")
+    return result
+
+
 # ── Register ONLY the ticket creation tool ───────────────────────────────
 tool_registry.register(
     ToolDefinition(
@@ -176,4 +204,36 @@ tool_registry.register(
         required_params=["process_name", "description"],
     ),
     create_hdfc_ticket,
+)
+
+tool_registry.register(
+    ToolDefinition(
+        name="create_incident_ticket",
+        description=(
+            "Backward-compatible alias for raising an incident ticket in the HDFC Life ticketing system. "
+            "Use this for failures that need support tracking. Internally routes to create_hdfc_ticket."
+        ),
+        category="notification",
+        tier="medium_risk",
+        parameters={
+            "title": {
+                "type": "string",
+                "description": "Short incident title or process name.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Detailed incident description in plain text.",
+            },
+            "priority": {
+                "type": "string",
+                "description": "Optional priority label for audit context.",
+            },
+            "assignee_group": {
+                "type": "string",
+                "description": "Optional support group or queue label.",
+            },
+        },
+        required_params=["description"],
+    ),
+    create_incident_ticket,
 )

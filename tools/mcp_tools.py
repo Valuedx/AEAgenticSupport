@@ -168,7 +168,72 @@ def _normalize_remote_content_block(block: Any) -> dict[str, Any]:
     return {"type": "text", "text": str(block)}
 
 
+def _parse_jsonish_text_payload(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+
+    # Some MCP transports deliver the structured result only as a text block.
+    # Parse that JSON back into a dict so downstream formatters can use fields
+    # like report/message/error instead of falling back to generic success UI.
+    candidates = [raw]
+    if raw.startswith("```") and raw.endswith("```"):
+        lines = raw.splitlines()
+        if len(lines) >= 3:
+            candidates.append("\n".join(lines[1:-1]).strip())
+
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate or candidate[0] not in "[{":
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        return {"result": parsed}
+
+    return {}
+
+
+def _unwrap_nested_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Flatten common remote wrappers like {'result': {...}} or {'data': {...}}."""
+    current = dict(payload)
+    unwrap_keys = ("result", "data", "payload", "response")
+    signal_keys = {
+        "success",
+        "error",
+        "report",
+        "message",
+        "logs",
+        "summary",
+        "status",
+        "agent_name",
+        "agent_state",
+        "sop",
+        "action_required",
+    }
+
+    while True:
+        nested = None
+        for key in unwrap_keys:
+            candidate = current.get(key)
+            if isinstance(candidate, dict) and (
+                signal_keys.intersection(candidate.keys()) or len(current) == 1
+            ):
+                nested = dict(candidate)
+                for meta_key in ("_mcp_content", "_mcp_meta", "_mcp_is_error"):
+                    if meta_key in current and meta_key not in nested:
+                        nested[meta_key] = current[meta_key]
+                break
+        if not nested:
+            return current
+        current = nested
+
+
 def _extract_remote_error_message(payload: dict[str, Any]) -> str:
+    payload = _unwrap_nested_tool_payload(payload)
     explicit_error = str(payload.get("error", "") or "").strip()
     if explicit_error:
         return explicit_error
@@ -201,15 +266,42 @@ def _normalize_remote_call_result(raw_result: Any) -> dict[str, Any]:
         payload = {}
 
     if raw.get("content"):
-        payload["_mcp_content"] = [
+        content_blocks = [
             _normalize_remote_content_block(block)
             for block in raw.get("content", []) or []
         ]
+        payload["_mcp_content"] = content_blocks
+        has_structured_signal = any(
+            key in payload
+            for key in (
+                "success",
+                "error",
+                "report",
+                "message",
+                "logs",
+                "summary",
+                "status",
+                "agent_name",
+                "agent_state",
+            )
+        )
+        if not has_structured_signal:
+            text_blocks = []
+            for block in content_blocks:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = str(block.get("text", "") or "").strip()
+                    if text:
+                        text_blocks.append(text)
+            for text in text_blocks:
+                parsed_payload = _parse_jsonish_text_payload(text)
+                if parsed_payload:
+                    payload.update(parsed_payload)
+                    break
     if raw.get("_meta"):
         payload["_mcp_meta"] = dict(raw.get("_meta") or {})
     if "isError" in raw:
         payload["_mcp_is_error"] = bool(raw.get("isError"))
-    return payload or raw
+    return _unwrap_nested_tool_payload(payload or raw)
 
 
 def _get_streamable_http_client():

@@ -48,6 +48,60 @@ class Orchestrator:
             self.issue_trackers[conversation_id] = IssueTracker(conversation_id)
         return self.issue_trackers[conversation_id]
 
+    @staticmethod
+    def _is_ticket_like_endpoint(endpoint: str) -> bool:
+        lowered = str(endpoint or "").lower()
+        return any(token in lowered for token in ("ticket", "incident", "/support/", "support/user", "support/create", "usercreateticket"))
+
+    def _extract_ticket_args_from_call_ae_api(self, tool_args: dict) -> dict | None:
+        if str(tool_args.get("method", "GET")).upper() == "GET":
+            return None
+
+        endpoint = str(tool_args.get("endpoint", "") or "")
+        body = tool_args.get("body") or tool_args.get("payload") or {}
+        parsed: dict[str, Any] = {}
+
+        if isinstance(body, dict):
+            parsed = dict(body)
+        elif isinstance(body, str) and body.strip():
+            raw = body.strip()
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+                patterns = {
+                    "process_name": r"process[_ ]?name\s*[:=]\s*[\"']?([^,\"'\]\}]+)",
+                    "description": r"description\s*[:=]\s*[\"']?([^\"'\]\}]+)",
+                    "request_type": r"request[_ ]?type\s*[:=]\s*[\"']?([^,\"'\]\}]+)",
+                }
+                for key, pattern in patterns.items():
+                    match = re.search(pattern, raw, re.IGNORECASE)
+                    if match:
+                        parsed[key] = match.group(1).strip()
+
+        lowered_keys = {str(k).lower(): v for k, v in parsed.items()}
+        process_name = lowered_keys.get("process_name") or lowered_keys.get("title") or lowered_keys.get("processname")
+        description = lowered_keys.get("description") or lowered_keys.get("message") or lowered_keys.get("details")
+        request_type = lowered_keys.get("request_type")
+
+        if not self._is_ticket_like_endpoint(endpoint) and not (process_name or description):
+            return None
+        if not process_name or not description:
+            return None
+
+        if not request_type:
+            request_type = "Incident" if re.search(r"\b(fail\w*|error\w*|exception\w*|down|issue\w*)\b", str(description), re.IGNORECASE) else "Request"
+
+        return self._sanitize_ticket_args(
+            {
+                "process_name": str(process_name),
+                "description": str(description),
+                "request_type": str(request_type),
+            }
+        )
+
     # =====================================================================
     # Public entry point
     # =====================================================================
@@ -579,6 +633,10 @@ class Orchestrator:
                     for fc in fn_calls:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
+                        redirected_ticket_args = self._extract_ticket_args_from_call_ae_api(tool_args) if tool_name == "call_ae_api" else None
+                        if redirected_ticket_args:
+                            tool_name = "create_hdfc_ticket"
+                            tool_args = redirected_ticket_args
                         tool_def = turn_tools.get_tool(tool_name)
                         if not tool_def:
                             tool_def = tool_registry.get_tool(tool_name)
@@ -596,7 +654,7 @@ class Orchestrator:
                             
                             # Pre-sanitize args for the Approval UI to ensure the user sees WAF-safe text
                             # and the backend tool doesn't have to strip characters silently.
-                            if tool_name == "create_hdfc_ticket":
+                            if tool_name in ("create_hdfc_ticket", "create_incident_ticket"):
                                 tool_args = self._sanitize_ticket_args(tool_args)
 
                             if not missing and self.approval_gate.needs_approval(
@@ -610,12 +668,15 @@ class Orchestrator:
                                         "authorized_users", []
                                     ),
                                 }
-                                summary = (
-                                    f"{tool_name} on "
-                                    f"{tool_args.get('workflow_name', 'unknown')}"
+                                summary_target = (
+                                    tool_args.get("process_name")
+                                    or tool_args.get("title")
+                                    or tool_args.get("workflow_name")
+                                    or "unknown"
                                 )
+                                summary = f"{tool_name} on {summary_target}"
                                 # Clean summary too for ticketing actions
-                                if tool_name == "create_hdfc_ticket":
+                                if tool_name in ("create_hdfc_ticket", "create_incident_ticket"):
                                     summary = summary.replace("_", " ").replace(":", " ")
 
                                 state.pending_action_summary = summary
@@ -637,6 +698,10 @@ class Orchestrator:
                     for fc in fn_calls:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
+                        redirected_ticket_args = self._extract_ticket_args_from_call_ae_api(tool_args) if tool_name == "call_ae_api" else None
+                        if redirected_ticket_args:
+                            tool_name = "create_hdfc_ticket"
+                            tool_args = redirected_ticket_args
 
                         tool_def = turn_tools.get_tool(tool_name)
                         if not tool_def:
@@ -1021,6 +1086,7 @@ class Orchestrator:
             action_tool=str(action.get("tool") or ""),
             action_args=action.get("args") or {},
             error_text=result.error,
+            error_data=result.data if isinstance(result.data, dict) else None,
         )
 
     def _check_rbac(self, state: ConversationState, tier: str) -> tuple[bool, str]:
@@ -1056,29 +1122,171 @@ class Orchestrator:
 
     def _format_completion_message(self, tool_name: str, data: dict) -> str:
         """Create a clean, human-readable summary of the tool result with LLM-generated suggestions."""
-        report = data.get("report")
-        msg = data.get("message") or f"I've successfully completed the {tool_name} action."
+
+        # ── Normalise: MCP tools often serialise their dict return value to a
+        # JSON string over the transport layer. Parse it back so the guards below
+        # always operate on a dict.
+        if isinstance(data, str) and data.strip().startswith("{"):
+            try:
+                import json as _json
+                _parsed = _json.loads(data)
+                if isinstance(_parsed, dict):
+                    data = _parsed
+            except Exception:
+                pass
+
+        while isinstance(data, dict):
+            nested = None
+            for key in ("result", "data", "payload", "response"):
+                candidate = data.get(key)
+                if isinstance(candidate, dict) and (
+                    any(
+                        marker in candidate
+                        for marker in (
+                            "success",
+                            "error",
+                            "report",
+                            "message",
+                            "logs",
+                            "summary",
+                            "status",
+                            "agent_name",
+                            "agent_state",
+                        )
+                    )
+                    or len(data) == 1
+                ):
+                    nested = dict(candidate)
+                    for meta_key in ("_mcp_content", "_mcp_meta", "_mcp_is_error"):
+                        if meta_key in data and meta_key not in nested:
+                            nested[meta_key] = data[meta_key]
+                    break
+            if not nested:
+                break
+            data = nested
+
+        if isinstance(data, dict) and not any(
+            key in data
+            for key in (
+                "success",
+                "error",
+                "report",
+                "message",
+                "logs",
+                "summary",
+                "status",
+                "agent_name",
+                "agent_state",
+            )
+        ):
+            for block in data.get("_mcp_content", []) or []:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                raw_text = str(block.get("text", "") or "").strip()
+                if not raw_text or raw_text[0] not in "[{":
+                    continue
+                try:
+                    parsed = json.loads(raw_text)
+                except Exception:
+                    continue
+                nested = dict(parsed) if isinstance(parsed, dict) else {"result": parsed}
+                for meta_key in ("_mcp_content", "_mcp_meta", "_mcp_is_error"):
+                    if meta_key in data and meta_key not in nested:
+                        nested[meta_key] = data[meta_key]
+                data = nested
+                break
+
+        # ── Guard: detect error / not-supported responses and show a proper
+        # failure message instead of the "✅ Action Completed" banner.
+        if not isinstance(data, dict):
+            # If the tool crashed or returned a non-dict result, it's a failure.
+            # We don't want to show "Action Completed" for a crash.
+            return f"### ❌ Action Failed\nThe {tool_name} tool encountered an internal error or returned an invalid response."
+
+        if isinstance(data, dict):
+            # Extract standard AE tool failure keys
+            tool_error = data.get("error") or data.get("message") if not data.get("success") else None
+            agent_state = data.get("agent_state", "")
+            
+            # If the tool explicitly failed or returned an error key while success is False
+            if (tool_error or not data.get("success", True)) and data.get("supported") is not False:
+                # Error from a live tool (e.g. agent stopped)
+                state_tag = f" (Agent state: **{agent_state}**)" if agent_state else ""
+                action_required = data.get("action_required", "")
+                action_hint = f"\n\n**Action required:** {action_required}" if action_required else ""
+                sop = data.get("sop", "")
+                sop_block = f"\n\n{sop}" if sop else ""
+                detail_lines = []
+                if data.get("agent_name"):
+                    detail_lines.append(f"**Agent:** {data.get('agent_name')}")
+                if data.get("request_id") or data.get("execution_id"):
+                    detail_lines.append(f"**Request ID:** `{data.get('request_id') or data.get('execution_id')}`")
+                if data.get("last_status"):
+                    detail_lines.append(f"**Server Extraction Status:** {data.get('last_status')}")
+                if data.get("waited_seconds"):
+                    detail_lines.append(f"**Waited:** {data.get('waited_seconds')} seconds")
+                if data.get("zip_file_name"):
+                    detail_lines.append(f"**ZIP File:** `{data.get('zip_file_name')}`")
+                detail_block = f"\n\n" + "\n".join(detail_lines) if detail_lines else ""
+                
+                # If we have an error but no success flag, or success is False
+                if not tool_error:
+                    tool_error = "The tool encountered an operational issue."
+
+                return (
+                    f"### ❌ Unable to Complete Action\n"
+                    f"{tool_error}{state_tag}{detail_block}{action_hint}{sop_block}"
+                )
+            if data.get("supported") is False:
+                # Explicitly unsupported operation
+                return (
+                    f"### ⚠️ Not Supported\n"
+                    f"{data.get('message', 'This operation is not supported by the agent.')}"
+                )
+
+        report = data.get("report") if isinstance(data, dict) else None
+        if not report and isinstance(data, dict):
+            text_blocks = []
+            for block in data.get("_mcp_content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = str(block.get("text", "") or "").strip()
+                    if text:
+                        text_blocks.append(text)
+            if text_blocks:
+                candidate_report = "\n\n".join(text_blocks).strip()
+                if len(candidate_report) > 50:
+                    report = candidate_report
+        msg = (data.get("message") if isinstance(data, dict) else None) or f"I've successfully completed the {tool_name} action."
+
+        # 🎯 PRIORITY: If the tool provides a detailed report (Markdown), show it CLEANLY.
+        # No "Action Completed" banner, no secondary suggestions unless requested.
+        if report and len(str(report).strip()) > 50:
+            # If the report already has a header, just return it.
+            return str(report).strip()
 
         if report:
-            # If tool provided a detailed markdown report, use that as the primary message
             msg = report
         
         details = []
-        exec_id = data.get("execution_id") or data.get("request_id")
+        exec_id = (data.get("execution_id") or data.get("request_id")) if isinstance(data, dict) else None
         if exec_id:
             details.append(f"• **Request ID**: `{exec_id}`")
         
-        status = data.get("status") or data.get("state")
+        status = (data.get("status") or data.get("state")) if isinstance(data, dict) else None
         if status:
             details.append(f"• **Status**: {status}")
 
-        workflow = data.get("workflow_name")
+        workflow = data.get("workflow_name") if isinstance(data, dict) else None
         if workflow:
             details.append(f"• **Workflow**: `{workflow}`")
 
         response = f"### ✅ Action Completed\n{msg}\n"
         if details:
             response += "\n" + "\n".join(details)
+
+        # Skip suggestions if the message is already long (like a partial report)
+        if len(response) > 400:
+            return response
 
         # Ask the LLM to generate 2 context-aware suggestions for what the user might want to do next.
         # If there's an error/failure, we MUST suggest creating a support ticket.
@@ -1090,7 +1298,7 @@ class Orchestrator:
             wf_name = str(workflow or "").lower()
             is_hdfc = "hdfc" in wf_name or "hdfc" in str(tool_name).lower()
             
-            ticket_tool = "create_hdfc_ticket" if is_hdfc else "create_incident_ticket"
+            ticket_tool = "create_hdfc_ticket"
             
             error_instruction = ""
             if is_failure:
@@ -1105,7 +1313,7 @@ class Orchestrator:
                     f"If the user might need follow-up assistance, you can suggest using `{ticket_tool}` with a 'Request' type."
                 )
 
-            context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {cast(Any, msg)[:200]}"
+            context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {str(msg)[:200]}"
             raw = llm_client.chat(
                 (
                     "Based on the following action just completed by an AutomationEdge support agent, "
@@ -1224,7 +1432,7 @@ Rules:
     - **NO REDUNDANCY**: DO NOT list a parameter in your response if its value is already present in history (even if the user used similar terms like "starts tomorrow" or typos like "lleave").
     - **DECISIVE ACTION**: If the history contains ALL required parameters, you MUST skip the conversational summary and immediately propose or prepare the `trigger_workflow` tool call. Only prompt for the values that are strictly missing.
 16. **PROACTIVE DIAGNOSTIC DISCOVERY**: If the user asks for logs, status, or diagnostics but context is missing (like `agent_id` or `execution_id`), you MUST NOT ask the user for it first. Instead, call a discovery tool like `t4_check_agent_status`, `list_recent_failures`, or `ae.agent.analyze_logs` (with agent_id="") to find potential targets.
-    - **NAME RESOLUTION**: If the user provides an agent NAME, call `ae.agent.get_details` or `ae.agent.analyze_logs` with that name. Tools are designed to resolve names to IDs automatically.
+    - **NUMERIC IDS**: Always use numeric IDs for agents when available. Never guess an ID.
     - **AMBIGUITY RESOLUTION**: If discovery returns exactly one candidate, proceed with the investigation. If multiple are found, list them clearly with their names and IDs and ask the user to choose.
 17. **LOG DATE SELECTION RULE**: 
     - **Agent Host Logs (`analyze_agent_logs`)**: When requested for an `agent_id`, you MUST inform the user that logs default to the last 24 hours and ask if they want to specify a particular `from_date` or `to_date` BEFORE performing extraction.
@@ -1232,8 +1440,11 @@ Rules:
 18. **GOAL PERSISTENCE**: If you have started a multi-step intent (e.g., creating a ticket, triggering a workflow, or asking for specific details), you MUST maintain that goal as your primary objective in the next turn. If the user's response provides the requested details but also mentions a failure symptom, you SHOULD call the relevant tool (e.g., `create_hdfc_ticket` or `trigger_workflow`) FIRST while acknowledging the symptom. Do NOT abandon the original goal to start a fresh diagnostics discovery unless the user explicitly cancels the request.
 19. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
 20. **STRICT PAYLOAD SANITIZATION**: When calling support or ticketing tools (e.g. `ae.ticket.create`), you MUST provide `description` and `process_name` as PLAIN TEXT only. Do NOT use double quotes ("), colons (:), underscores (_), or parentheses () inside these parameters. Use spaces or hyphens instead to preserve readability. (Example: "execution_id: 2564846" -> "execution id 2564846").
+21. **AGENT STATUS DISCOVERY**: Always use `ae.agent.list_all` for any general agent status query to see all Running, Stopped, and Offline agents.
+22. **STRICT AGENT ENFORCEMENT**: You MUST call `ae.agent.list_all` (or `list_running`) to discover numeric IDs and verify `RUNNING` status BEFORE suggesting or triggering any diagnostic action (logs, RDP, etc.). NEVER call diagnostics if the agent is `STOPPED`.
+23. **PRECISION ID RESOLUTION**: When calling agent-related tools, always use the numeric `agent_id` (e.g. "2928") resolved from the agent list, rather than the search name (e.g. "vaishnavi.malusare..."), to ensure 100% precision.
 Available tool categories: status, logs, file, remediation, dependency,
-config, notification, general, meta.
+config, notification, general, meta, agent_read, agent_diag.
 You have a subset of tools loaded. Use discover_tools to find others.
 FORBIDDEN: Never respond with SOP steps like 'Step 1: Check workflow status...' when the user has given you a specific ID to look up. Call the tool instead.
 """
@@ -1932,6 +2143,7 @@ CRITICAL RULES:
                 action_tool=tool_name,
                 action_args=action_args,
                 error_text=result.error,
+                error_data=result.data if isinstance(result.data, dict) else None,
             )
 
         # Otherwise move to approval flow.
@@ -2246,8 +2458,31 @@ CRITICAL RULES:
 
         return [hints[i] for i in range(min(len(hints), 3))]
 
-    def _build_action_failure_response(self, *, action_tool: str, action_args: dict, error_text: str) -> str:
+    def _build_action_failure_response(
+        self,
+        *,
+        action_tool: str,
+        action_args: dict,
+        error_text: str,
+        error_data: dict | None = None,
+    ) -> str:
         """Natural fallback message with SOP-guided steps."""
+        if isinstance(error_data, dict) and error_data:
+            if any(
+                key in error_data
+                for key in (
+                    "error",
+                    "report",
+                    "message",
+                    "request_id",
+                    "agent_name",
+                    "agent_state",
+                    "last_status",
+                    "waited_seconds",
+                )
+            ):
+                return self._format_completion_message(action_tool, error_data)
+
         workflow_name = str(
             (action_args or {}).get("workflow_name")
             or (action_args or {}).get("workflow")
@@ -2255,8 +2490,10 @@ CRITICAL RULES:
         ).strip()
         wf_label = self._humanize_workflow_name(workflow_name) if workflow_name else "this request"
 
-        if action_tool == "create_incident_ticket":
+        if action_tool in ("create_incident_ticket", "create_hdfc_ticket"):
             title = str((action_args or {}).get("title") or "Support Incident").strip()
+            if action_tool == "create_hdfc_ticket":
+                title = str((action_args or {}).get("process_name") or title).strip()
             guidance = self._get_sop_troubleshooting_steps(f"{title} {error_text}")
             msg = (
                 "I couldn't reach the incident system automatically, but I can still help you resolve this.\n"
@@ -2282,7 +2519,7 @@ CRITICAL RULES:
         if guidance and (not error_text or len(error_text) < 50) and not is_formal_rejection:
             msg += "\n\nRecommended troubleshooting steps:\n" + "\n".join(f"- {g}" for g in guidance)
             
-        msg += "\n\nWould you like me to retry, create an incident ticket, or escalate?"
+        msg += "\n\nWould you like me to retry, create a support ticket, or escalate?"
         return msg
 
     def _get_sop_troubleshooting_steps(self, query: str) -> list[str]:

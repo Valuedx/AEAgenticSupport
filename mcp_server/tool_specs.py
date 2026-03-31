@@ -330,19 +330,17 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "ae.agent.restart_service": {
         "title": "Agent: Restart Agent Service",
-        "description": "Restart the AutomationEdge agent service on a target agent to recover from offline or unhealthy state.",
-        "use_when": "The agent is stopped, disconnected, or clearly unhealthy and service restart is the standard recovery step.",
-        "avoid_when": "The agent host has a broader OS or network issue that a service restart will not fix.",
+        "description": (
+            "Show the manual SOP for restarting an AutomationEdge agent. "
+            "Automatic remote restart is NOT supported by the platform. "
+            "This tool returns step-by-step instructions the user must follow on the agent's Windows machine."
+        ),
+        "use_when": "The user asks to restart an agent or the agent is stopped/offline.",
+        "avoid_when": "Never — always show the SOP when restart is requested, no approval or extra params needed.",
         "input_examples": [
-            {
-                "agent_id": "AE-AGENT-07",
-                "reason": "Agent heartbeat stale for 20 minutes; approved for service restart",
-                "requested_by": "ops.l2",
-                "case_id": "INC-4324",
-                "dry_run": True,
-            }
+            {"agent_id": "2963"}
         ],
-        "extra_tags": ["agent-restart", "heartbeat", "service-recovery"],
+        "extra_tags": ["agent-restart", "heartbeat", "service-recovery", "sop"],
     },
     "ae.agent.clear_stale_rdp_session": {
         "title": "Agent: Clear Stale RDP Session",
@@ -586,7 +584,7 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
             {"agent_id": "2887", "from_date": "2026-03-16T10:00:00", "tail_lines": 100}
         ],
         "parameter_docs": {
-            "agent_id": "REQUIRED: The ID or name from 'ae.agent.list_running'.",
+            "agent_id": "REQUIRED: The numeric Agent ID (e.g. '2928'). Always resolve the name to an ID using 'ae.agent.list_all' first to ensure 100% precision.",
             "from_date": "ISO format date and time (YYYY-MM-DDTHH:MM:SS) for start of log period. Defaults to last 24h. Note: 14-day retention and 5-day max span apply.",
             "to_date": "ISO format date and time (YYYY-MM-DDTHH:MM:SS) for end of log period. Defaults to now.",
             "tail_lines": "Number of lines to read from the end of each log file (default 100).",
@@ -594,14 +592,27 @@ _CURATED_TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         "extra_tags": ["agent-logs", "debug", "diagnostics", "agent-health"],
     },
     "ae.agent.list_running": {
-        "title": "Agent: List Running",
+        "title": "Agent: List Running Agents",
         "description": (
-            "MANDATORY: Always call this tool first for any agent-related request to discover available agents. "
-            "Lists all currently Running/Connected/Active agents with their names and IDs. "
-            "This tool is READ_ONLY and does not require approval."
+            "Lists ONLY agents in Running/Connected/Active state. "
+            "Use this ONLY when the user wants to pick a specific agent to work on (e.g. pull logs, run diagnostics). "
+            "For a general 'agent status' or 'show all agents' query, use ae.agent.list_all instead."
         ),
-        "use_when": "You need to find which agents are available to provide logs or status.",
-        "extra_tags": ["list-agents", "discovery", "status"],
+        "use_when": "User wants to pick an agent to investigate (logs, diagnostics, status of one agent).",
+        "avoid_when": "User asks for overall agent status, all agents, or how many agents are running/stopped.",
+        "extra_tags": ["list-agents", "discovery"],
+    },
+    "ae.agent.list_all": {
+        "title": "Agent: All Agents Status Overview",
+        "description": (
+            "Use this for ANY general agent status query: 'agent status', 'show all agents', "
+            "'how many agents', 'which agents are running/stopped/offline'. "
+            "Returns ALL agents grouped by state (Running, Stopped, Offline) with names, IDs, and last-seen timestamps."
+        ),
+        "use_when": "User asks for agent status, all agents overview, or how many agents are in each state.",
+        "avoid_when": "User already identified a specific agent and wants logs or diagnostics for it.",
+        "input_examples": [{}, {"__comment": "No parameters needed"}],
+        "extra_tags": ["agent-status", "list-agents", "overview", "all-agents"],
     },
 }
 
@@ -912,6 +923,7 @@ def get_mcp_tool_specs() -> tuple[MCPToolSpec, ...]:
         _spec("ae.agent.get_connectivity_state", _agent.agent_get_connectivity_state, "agent_read", "safe_read"),
         _spec("ae.agent.get_rdp_session_state", _agent.agent_get_rdp_session_state, "agent_read", "safe_read"),
         _spec("ae.agent.list_running", _agent.agent_list_running, "agent_read", "safe_read"),
+        _spec("ae.agent.list_all", _agent.agent_list_all, "agent_read", "safe_read"),
         _spec("ae.agent.get_recent_failures", _agent.agent_get_recent_failures, "agent_read", "safe_read"),
         _spec("ae.agent.get_last_heartbeat", _agent.agent_get_last_heartbeat, "agent_read", "safe_read"),
         _spec("ae.agent.collect_diagnostics", _agent.agent_collect_diagnostics, "agent_read", "safe_read"),

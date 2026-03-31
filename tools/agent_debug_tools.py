@@ -9,6 +9,7 @@ import zipfile
 import time
 import re
 import json
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -381,14 +382,34 @@ def analyze_agent_logs(
     log_file_link = None
     zip_bytes_direct = None
 
-    for _ in range(10):
-        time.sleep(10)
+    poll_interval_seconds = max(1, int(os.getenv("AE_AGENT_LOG_POLL_INTERVAL_SECONDS", "5")))
+    max_wait_seconds = max(poll_interval_seconds, int(os.getenv("AE_AGENT_LOG_MAX_WAIT_SECONDS", "180")))
+    max_polls = max(1, (max_wait_seconds + poll_interval_seconds - 1) // poll_interval_seconds)
+    last_status = "NEW"
+
+    for _ in range(max_polls):
+        time.sleep(poll_interval_seconds)
         try:
             status_resp = client.get_agent_debug_logs(str(req_id))
+            specific_status = status_resp.get("status", "") if isinstance(status_resp, dict) else ""
+            if (not isinstance(status_resp, dict)) or specific_status not in ("COMPLETE", "COMPLETED", "FAILED", "ERROR"):
+                try:
+                    list_resp = client.get_agent_debug_logs()
+                    if isinstance(list_resp, list):
+                        list_match = next(
+                            (e for e in list_resp if str(e.get("id")) == str(req_id)),
+                            None,
+                        )
+                        if isinstance(list_match, dict):
+                            status_resp = list_match
+                except Exception as list_err:
+                    logger.warning("Poll list fallback error for %s: %s", req_id, list_err)
             if isinstance(status_resp, dict) and status_resp.get("is_zip"):
                 zip_bytes_direct = status_resp.get("log_zip_content")
                 break
-            if isinstance(status_resp, dict) and status_resp.get("status") == "COMPLETE":
+            if isinstance(status_resp, dict):
+                last_status = status_resp.get("status", "") or last_status
+            if isinstance(status_resp, dict) and status_resp.get("status") in ("COMPLETE", "COMPLETED"):
                 log_file_link = status_resp.get("logFileLink")
                 break
             if isinstance(status_resp, dict) and status_resp.get("status") in ("FAILED", "ERROR"):
@@ -397,22 +418,56 @@ def analyze_agent_logs(
             logger.warning("Poll error: %s", e)
 
     if not log_file_link and not zip_bytes_direct:
-        return {"success": False, "error": "Timed out waiting for logs after 100s", "request_id": req_id}
+        return {
+            "success": False,
+            "error": "Timed out waiting for logs to be ready",
+            "request_id": req_id,
+            "agent_id": agent_id,
+            "last_status": last_status,
+            "waited_seconds": max_wait_seconds,
+        }
 
     # ── 4. Download ZIP ──
     try:
         if zip_bytes_direct:
             zip_bytes = zip_bytes_direct
         else:
-            zip_data = client._authorized_request("GET", log_file_link, use_rest_prefix=False)
-            zip_bytes = (
-                zip_data.get("log_zip_content")
-                if isinstance(zip_data, dict) and zip_data.get("is_zip")
-                else zip_data
-            )
+            zip_bytes = None
+            download_candidates = [
+                f"/agent/debuglogs/{req_id}",
+                log_file_link,
+                f"/agent/debuglogs/download?id={req_id}",
+            ]
+            last_download_error = ""
+            for candidate in download_candidates:
+                if not candidate:
+                    continue
+                try:
+                    use_rest_prefix = not str(candidate).startswith("/aeengine/rest/")
+                    zip_data = client._authorized_request("GET", candidate, use_rest_prefix=use_rest_prefix)
+                    zip_bytes = (
+                        zip_data.get("log_zip_content")
+                        if isinstance(zip_data, dict) and zip_data.get("is_zip")
+                        else zip_data
+                    )
+                    if isinstance(zip_bytes, (bytes, bytearray)):
+                        break
+                except Exception as download_err:
+                    last_download_error = str(download_err)
+                    logger.warning("Download attempt failed via %s: %s", candidate, download_err)
 
         if not isinstance(zip_bytes, (bytes, bytearray)):
-            return {"success": False, "error": "Failed to download log ZIP (unexpected format)"}
+            return {
+                "success": False,
+                "error": "Failed to download log ZIP (unexpected format)",
+                "request_id": req_id,
+                "download_attempts": [
+                    f"/agent/debuglogs/{req_id}",
+                    log_file_link,
+                    f"/agent/debuglogs/download?id={req_id}",
+                ],
+                "raw": str(zip_bytes)[:200] if zip_bytes is not None else last_download_error[:200],
+            }
 
         # ── 5. Process each file in ZIP ──
         date_pattern = re.compile(r"(\d{4}-?\d{2}-?\d{2})")
@@ -425,14 +480,24 @@ def analyze_agent_logs(
             all_names = z.namelist()
             logger.info("ZIP has %d files for agent %s", len(all_names), agent_id)
 
+            def _is_agent_log_member(name: str) -> bool:
+                lowered = name.lower()
+                base = lowered.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                if ".log" in lowered or "stdout" in lowered or "stderr" in lowered:
+                    return True
+                if base in {"aeagent", "agent"}:
+                    return True
+                return False
+
             eligible = [
                 n for n in all_names
-                if ".log" in n.lower() or "stdout" in n.lower() or "stderr" in n.lower()
+                if _is_agent_log_member(n)
             ]
 
             for name in eligible:
                 # Date filter: only process files in user's requested range
-                dt_match = date_pattern.search(name)
+                basename = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                dt_match = date_pattern.search(basename)
                 file_date_str = "unknown"
                 if dt_match:
                     try:
@@ -490,28 +555,34 @@ def analyze_agent_logs(
         # ── 6. Group errors & run AI Diagnostic ──
         error_groups: list[dict] = []
         ai_diagnostic = ""
+        ai_summary_enabled = str(os.getenv("AE_AGENT_LOG_AI_SUMMARY_ENABLED", "false")).strip().lower() in {
+            "1", "true", "yes", "on"
+        }
 
         if all_error_blocks:
             error_groups = _group_errors(all_error_blocks)
-            try:
-                prompt = _build_ai_prompt(all_error_blocks)
-                logger.info(
-                    "AI diagnostic prompt: %d chars, %d unique groups",
-                    len(prompt), len(error_groups),
-                )
-                ai_diagnostic = llm_client.chat(
-                    prompt,
-                    system=(
-                        "You are an expert AutomationEdge Support Engineer. "
-                        "Be structured, concise, and actionable. "
-                        "Always follow the exact response format requested."
-                    ),
-                    max_tokens=_AI_MAX_TOKENS,
-                )
-                logger.info("AI diagnostic complete (%d chars)", len(ai_diagnostic))
-            except Exception as llm_err:
-                logger.error("AI diagnostic failed: %s", llm_err)
-                ai_diagnostic = "(AI diagnostic unavailable)"
+            if ai_summary_enabled:
+                try:
+                    prompt = _build_ai_prompt(all_error_blocks)
+                    logger.info(
+                        "AI diagnostic prompt: %d chars, %d unique groups",
+                        len(prompt), len(error_groups),
+                    )
+                    ai_diagnostic = llm_client.chat(
+                        prompt,
+                        system=(
+                            "You are an expert AutomationEdge Support Engineer. "
+                            "Be structured, concise, and actionable. "
+                            "Always follow the exact response format requested."
+                        ),
+                        max_tokens=_AI_MAX_TOKENS,
+                    )
+                    logger.info("AI diagnostic complete (%d chars)", len(ai_diagnostic))
+                except Exception as llm_err:
+                    logger.error("AI diagnostic failed: %s", llm_err)
+                    ai_diagnostic = "(AI diagnostic unavailable)"
+            else:
+                logger.info("Skipping AI diagnostic in analyze_agent_logs because AE_AGENT_LOG_AI_SUMMARY_ENABLED is false")
 
         # ── 7. Build Report ──
         # Header
@@ -635,6 +706,21 @@ def analyze_agent_logs(
 
         full_report = "\n".join(report_lines)
         error_found = total_error_files > 0
+        per_file_summaries = []
+        for date_str in sorted(results_by_date.keys(), reverse=True):
+            for file_res in results_by_date[date_str]:
+                per_file_summaries.append({
+                    "date": date_str,
+                    "filename": file_res["filename"],
+                    "total_lines": file_res["total_lines"],
+                    "had_errors": file_res["had_errors"],
+                    "error_block_count": file_res["error_block_count"],
+                    "summary": (
+                        f"{file_res['error_block_count']} error block(s) detected"
+                        if file_res["had_errors"]
+                        else f"No errors detected; tail preview captured from {file_res['total_lines']} line(s)"
+                    ),
+                })
 
         return {
             "success":          True,
@@ -655,6 +741,7 @@ def analyze_agent_logs(
                 for g in error_groups
             ],
             "results_by_date":  results_by_date,
+            "per_file_summaries": per_file_summaries,
             "all_error_blocks": all_error_blocks,
             "report":           full_report,
             "suggested_solutions": suggested_solutions,

@@ -151,6 +151,45 @@ class TestAgentEnhancements:
         assert tool_card["latency_class"] == "medium"
         assert tool_card["mutating"] is True
 
+    @patch("rag.engine.get_rag_engine")
+    def test_discover_tools_automationedge_includes_agent_diag_categories(self, mock_get_rag, mock_conn):
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(
+                name="ae.agent.analyze_logs",
+                description="Analyze agent logs for a selected agent and time range.",
+                category="agent_diag",
+                tier="high_risk",
+                parameters={"agent_id": {"type": "string", "description": "Agent ID"}},
+                required_params=["agent_id"],
+                metadata={"tags": ["agent", "logs", "diagnostics"]},
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+
+        mock_rag = MagicMock()
+        mock_rag.search_tools.return_value = [
+            {
+                "id": "tool-ae.agent.analyze_logs",
+                "metadata": {"tool_name": "ae.agent.analyze_logs"},
+                "rrf_score": 0.91,
+            }
+        ]
+        mock_get_rag.return_value = mock_rag
+
+        reg._ensure_meta_tools()
+        result = reg.execute(
+            "discover_tools",
+            query="agent logs",
+            category="automationedge",
+            top_k=5,
+        )
+
+        assert result.success
+        names = [tool["name"] for tool in result.data["tools"]]
+        assert "ae.agent.analyze_logs" in names
+
     def test_agent_catalog_summarizes_tool_feedback(self, mock_conn):
         from state.agent_catalog import AgentCatalog
 
