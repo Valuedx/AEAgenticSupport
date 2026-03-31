@@ -236,6 +236,24 @@ CREATE TABLE IF NOT EXISTS user_registry (
     metadata    JSONB DEFAULT '{}'::jsonb,
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- User-Workflow Access Control (junction table for per-user workflow permissions)
+CREATE TABLE IF NOT EXISTS user_workflow_access (
+    id                BIGSERIAL    PRIMARY KEY,
+    user_id           VARCHAR(256) NOT NULL,
+    teams_id          VARCHAR(256),
+    workflow_id       VARCHAR(64)  NOT NULL,
+    org_code          VARCHAR(64)  NOT NULL DEFAULT '',
+    permission        VARCHAR(32)  DEFAULT 'execute',
+    ae_user_id        INTEGER,
+    ae_username       VARCHAR(256),
+    match_confidence  REAL         DEFAULT 0.0,
+    synced_at         TIMESTAMPTZ  DEFAULT NOW(),
+    CONSTRAINT uq_user_workflow UNIQUE (user_id, workflow_id, org_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_uwa_user ON user_workflow_access(user_id);
+CREATE INDEX IF NOT EXISTS idx_uwa_workflow ON user_workflow_access(workflow_id);
 """
 
 
@@ -300,6 +318,7 @@ def setup_database():
         ensure_pk("approval_audit_log", "id")
         ensure_pk("tool_execution_log", "id")
         ensure_pk("user_registry", "user_id")
+        ensure_pk("user_workflow_access", "id")
         
         # Ensure critical columns in conversation_state
         cur.execute("ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS summary TEXT")

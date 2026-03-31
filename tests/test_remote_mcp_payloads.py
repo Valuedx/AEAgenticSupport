@@ -112,3 +112,36 @@ def test_build_action_failure_response_preserves_structured_agent_log_timeout_de
     assert "Server Extraction Status" in response
     assert "Waited" in response
     assert "Recommended troubleshooting steps" not in response
+
+
+def test_format_completion_message_includes_hint_for_completed_restart_rejection():
+    orchestrator = Orchestrator()
+
+    response = orchestrator._format_completion_message(
+        "restart_execution",
+        {
+            "success": False,
+            "error": "Execution `22024` for **Claims_Processing_Daily** is already completed, so restart is not allowed.",
+            "hint": "If you need to run it again, trigger a new execution instead of restarting or resubmitting this completed one.",
+            "execution_id": "22024",
+            "workflow_name": "Claims_Processing_Daily",
+            "status": "COMPLETED",
+        },
+    )
+
+    assert "Unable to Complete Action" in response
+    assert "trigger a new execution instead" in response
+    assert "22024" in response
+
+
+def test_build_action_failure_response_for_completed_restart_skips_retry_prompt():
+    orchestrator = Orchestrator()
+
+    response = orchestrator._build_action_failure_response(
+        action_tool="restart_execution",
+        action_args={"workflow_name": "Claims_Processing_Daily"},
+        error_text="Execution `22024` for **Claims_Processing_Daily** is already completed, so restart is not allowed.",
+    )
+
+    assert "trigger a new execution instead" in response
+    assert "Would you like me to retry" not in response

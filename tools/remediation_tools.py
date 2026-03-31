@@ -27,6 +27,71 @@ from tools.registry import tool_registry
 logger = logging.getLogger("ops_agent.tools.remediation")
 
 
+def _normalize_execution_status(raw_status: str) -> str:
+    status = str(raw_status or "").strip().upper()
+    if status in {"FAILURE", "FAILED", "ERROR"}:
+        return "FAILED"
+    if status in {"COMPLETE", "COMPLETED", "SUCCESS"}:
+        return "COMPLETED"
+    if status in {"RUNNING", "IN_PROGRESS", "IN PROGRESS", "PROCESSING"}:
+        return "RUNNING"
+    if status in {"QUEUED", "NEW", "PENDING"}:
+        return "QUEUED"
+    return status or "UNKNOWN"
+
+
+def _guard_failed_execution_only(client, execution_id: str, action_name: str) -> dict | None:
+    """Allow restart/resubmit only for failed executions when status is available."""
+    try:
+        if not hasattr(client, "get_execution_status"):
+            return None
+        status_resp = client.get_execution_status(execution_id)
+    except Exception as exc:
+        logger.warning("Could not verify execution status for %s before %s: %s", execution_id, action_name, exc)
+        return None
+
+    status = _normalize_execution_status(
+        (status_resp or {}).get("status")
+        or (status_resp or {}).get("workflowStatus")
+        or (status_resp or {}).get("state")
+    )
+    workflow_name = (
+        (status_resp or {}).get("workflowName")
+        or (status_resp or {}).get("workflow_name")
+        or "this workflow"
+    )
+
+    if status == "FAILED":
+        return None
+
+    if status == "COMPLETED":
+        return {
+            "success": False,
+            "error": (
+                f"Execution `{execution_id}` for **{workflow_name}** is already completed, "
+                f"so {action_name} is not allowed."
+            ),
+            "hint": (
+                "If you need to run it again, trigger a new execution instead of restarting or resubmitting this completed one."
+            ),
+            "execution_id": execution_id,
+            "workflow_name": workflow_name,
+            "status": status,
+        }
+
+    return {
+        "success": False,
+        "error": (
+            f"Execution `{execution_id}` for **{workflow_name}** is currently `{status}`, "
+            f"so {action_name} is only allowed when the execution has failed."
+        ),
+        "hint": "Please use restart or resubmit only for failed executions.",
+        "execution_id": execution_id,
+        "workflow_name": workflow_name,
+        "status": status,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # trigger_workflow helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,6 +216,9 @@ def restart_execution(execution_id: str,
         }
 
     client = get_ae_client()
+    status_guard = _guard_failed_execution_only(client, execution_id, "restart")
+    if status_guard:
+        return status_guard
 
     # 1. Resolve workflow name (internal use/protection only)
     if not workflow_name or workflow_name == "Unknown":
@@ -249,8 +317,13 @@ def resubmit_execution(execution_id: str,
     Use from_failure_point=True to resubmit from the last failure step,
     or from_failure_point=False to resubmit from the very beginning.
     """
+    client = get_ae_client()
+    status_guard = _guard_failed_execution_only(client, execution_id, "resubmit")
+    if status_guard:
+        return status_guard
+
     try:
-        resp = get_ae_client().resubmit_request(
+        resp = client.resubmit_request(
             execution_id, reason=reason, from_failure_point=from_failure_point
         )
         mode = "from failure point" if from_failure_point else "from start"
@@ -427,15 +500,25 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
             param_lines.append(f"  • **{p}** `[{p_type}]`{example_str}")
 
         friendly_name = resolved_name.replace("_", " ").replace("-", " ").title()
+        if len(missing) == 1:
+            only = missing[0]
+            only_meta = param_schema_map.get(only, {})
+            only_desc = str(only_meta.get("description") or only_meta.get("displayName") or "").strip()
+            question = f"I'm ready to trigger **{friendly_name}**. What should I use for **{only}**?"
+            if only_desc:
+                question += f"\n\nExpected format: {only_desc}."
+            question += "\n\nOnce you share it, I'll kick it off right away."
+        else:
+            question = (
+                f"I'm ready to trigger **{friendly_name}**. "
+                "Please share these details:\n\n"
+                + "\n".join(param_lines)
+                + "\n\nShare all of them together and I'll kick it off right away."
+            )
         return {
             "success": False,
             "needs_user_input": True,
-            "question": (
-                f"I'm ready to trigger **{friendly_name}**! "
-                f"Please provide the following {'detail' if len(missing) == 1 else 'details'}:\n\n"
-                + "\n".join(param_lines)
-                + "\n\nShare all of them together and I'll kick it off right away."
-            ),
+            "question": question,
             "tool_name": "trigger_workflow",
             "workflow_name": resolved_name,
             "missing_params": missing,
@@ -666,7 +749,7 @@ tool_registry.register(
         description=(
             "Restart a failed bot (workflow) execution or request. "
             "Pass the execution_id (request id) to trigger the restart. "
-            "Use this for ANY request to 'restart', 'retry', or 'run again' a bot."
+            "Use this only when the execution is in a failed state."
         ),
         category="remediation",
         tier="medium_risk",
@@ -704,7 +787,7 @@ tool_registry.register(
             "Resubmit a failed bot (workflow) execution as a NEW run. "
             "DIFFERENT from restart_execution: restart resumes the SAME execution; "
             "resubmit creates a NEW execution. "
-            "Use when: user says 'resubmit', 'run again from scratch', or 'create new bot run'. "
+            "Use when a failed execution needs a fresh run. "
             "Use from_failure_point=True to retry from where it failed, "
             "or from_failure_point=False to start fresh from the beginning."
         ),

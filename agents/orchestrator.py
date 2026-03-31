@@ -1214,6 +1214,8 @@ class Orchestrator:
                 state_tag = f" (Agent state: **{agent_state}**)" if agent_state else ""
                 action_required = data.get("action_required", "")
                 action_hint = f"\n\n**Action required:** {action_required}" if action_required else ""
+                hint = str(data.get("hint") or "").strip()
+                hint_block = f"\n\n**Next step:** {hint}" if hint else ""
                 sop = data.get("sop", "")
                 sop_block = f"\n\n{sop}" if sop else ""
                 detail_lines = []
@@ -1235,7 +1237,7 @@ class Orchestrator:
 
                 return (
                     f"### ❌ Unable to Complete Action\n"
-                    f"{tool_error}{state_tag}{detail_block}{action_hint}{sop_block}"
+                    f"{tool_error}{state_tag}{detail_block}{action_hint}{hint_block}{sop_block}"
                 )
             if data.get("supported") is False:
                 # Explicitly unsupported operation
@@ -2372,6 +2374,11 @@ CRITICAL RULES:
     ) -> str:
         """LLM-based natural prompting inspired by the provided reference code."""
         friendly_wf = self._humanize_workflow_name(workflow_name)
+        if not items:
+            prefix = f"{intro.strip()} " if intro and intro.strip() else ""
+            return f"{prefix}I'm ready to continue with {friendly_wf}."
+
+        single_item = len(items) == 1
         param_details = "\n".join([f"- {label}: {desc}" if desc else f"- {label}" for label, desc in items])
         
         sop_str = ""
@@ -2381,9 +2388,14 @@ CRITICAL RULES:
         prompt = (
             f"You are a helpful RPA automation assistant. You are helping the user with: '{friendly_wf}'.\n"
             f"{intro}\n\n"
-            "Ask the user to provide the following required information in a warm, conversational, and premium tone.\n"
-            "List each item clearly with a bullet point. If a description is provided, use it to help the user understand what is needed.\n"
-            "Do NOT use technical terms like JSON or API. End with an encouraging note.\n\n"
+            "Ask only for the missing required user inputs in a warm, conversational tone.\n"
+            "Never ask whether the user wants to provide anything.\n"
+            "Never use the words parameter, parameters, JSON, payload, API, or values.\n"
+            "Do not mention optional inputs.\n"
+            "If exactly one item is missing, ask it as a direct natural question.\n"
+            "If multiple items are missing, ask for them directly in a short list.\n"
+            "If a description is provided, use it to clarify the expected format.\n"
+            "End with a short encouraging line.\n\n"
             f"Required Information:\n{param_details}\n{sop_str}\n\n"
             "Write the message now:"
         )
@@ -2399,13 +2411,20 @@ CRITICAL RULES:
             return response.strip()
         except Exception as e:
             logger.warning(f"LLM prompting failed: {e}. Falling back to static template.")
-            # Static fallback if LLM fails
-            lines = [f"- {label}: {desc}" if desc else f"- {label}" for label, desc in items]
-            prefix = f"{intro} " if intro else ""
-            msg = (
-                f"{prefix}To continue with {friendly_wf}, please share:\n"
-                + "\n".join(lines)
-            )
+            prefix = f"{intro.strip()} " if intro and intro.strip() else ""
+            if single_item:
+                label, desc = items[0]
+                msg = f"{prefix}To start {friendly_wf}, what should I use for {label}?"
+                if desc:
+                    msg += f" {desc}."
+                msg += " Once you share it, I'll continue."
+            else:
+                lines = [f"- {label}: {desc}" if desc else f"- {label}" for label, desc in items]
+                msg = (
+                    f"{prefix}To start {friendly_wf}, please share:\n"
+                    + "\n".join(lines)
+                    + "\n\nOnce you send them, I'll continue."
+                )
             if sop_guidance:
                 msg += "\n\nPlease follow these guidelines:\n" + "\n".join(f"- {g}" for g in [sop_guidance[i] for i in range(min(len(sop_guidance), 3))])
             return msg
@@ -2512,10 +2531,21 @@ CRITICAL RULES:
             msg = error_text.strip()
         else:
             msg = f"I couldn't complete the action for **{wf_label}** automatically."
+
+        normalized_error = error_text.lower() if error_text else ""
+        if (
+            action_tool in ("restart_execution", "resubmit_execution")
+            and "completed" in normalized_error
+        ):
+            return (
+                f"{msg}\n\n"
+                "Restart and resubmit are only available for failed executions. "
+                "If you need to run it again, trigger a new execution instead."
+            )
             
         # Only add generic guidance if the error is short/generic AND doesn't look like a formal API rejection.
         # Specific errors like 'agent offline' or 'malicious code' don't need generic SOP steps.
-        is_formal_rejection = any(k in error_text.lower() for k in ("malicious", "unauthorized", "connection", "not found", "offline"))
+        is_formal_rejection = any(k in normalized_error for k in ("malicious", "unauthorized", "connection", "not found", "offline"))
         if guidance and (not error_text or len(error_text) < 50) and not is_formal_rejection:
             msg += "\n\nRecommended troubleshooting steps:\n" + "\n".join(f"- {g}" for g in guidance)
             
