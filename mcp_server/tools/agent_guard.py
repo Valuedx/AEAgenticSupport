@@ -80,7 +80,7 @@ async def check_agent_for_request(request_id: str) -> Optional[dict[str, Any]]:
     if state in _HEALTHY_STATES:
         return None  # ✅ Agent is healthy — proceed
 
-    # ❌ Agent is NOT running
+    # ⚠️ Agent is NOT running
     logger.info(
         "Agent guard blocked log access: agent=%s state=%s workflow=%s request=%s",
         resolved_name, state, workflow_name, request_id,

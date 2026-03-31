@@ -122,7 +122,7 @@ def test_format_completion_message_includes_hint_for_completed_restart_rejection
         {
             "success": False,
             "error": "Execution `22024` for **Claims_Processing_Daily** is already completed, so restart is not allowed.",
-            "hint": "If you need to run it again, trigger a new execution instead of restarting or resubmitting this completed one.",
+            "hint": "Use Fresh Run to run this workflow again.",
             "execution_id": "22024",
             "workflow_name": "Claims_Processing_Daily",
             "status": "COMPLETED",
@@ -130,7 +130,7 @@ def test_format_completion_message_includes_hint_for_completed_restart_rejection
     )
 
     assert "Unable to Complete Action" in response
-    assert "trigger a new execution instead" in response
+    assert "Fresh Run" in response
     assert "22024" in response
 
 
@@ -143,5 +143,5 @@ def test_build_action_failure_response_for_completed_restart_skips_retry_prompt(
         error_text="Execution `22024` for **Claims_Processing_Daily** is already completed, so restart is not allowed.",
     )
 
-    assert "trigger a new execution instead" in response
+    assert "Fresh Run" in response
     assert "Would you like me to retry" not in response

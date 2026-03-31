@@ -1730,7 +1730,7 @@ def _user_msg_agent_restart_ok() -> str:
 
 def _user_msg_agent_restart_failed() -> str:
     return (
-        "❌ I wasn't able to restart the agent after multiple attempts. "
+        "⚠️ I wasn't able to restart the agent after multiple attempts. "
         "I'm escalating this now and raising a support ticket for your team."
     )
 
@@ -1745,7 +1745,7 @@ def _user_msg_workflow_status(workflow_name: str, status: str) -> str:
         "New":               f"🆕 **{workflow_name}** has just been queued and should kick off shortly.",
         "Execution Started": f"▶️ **{workflow_name}** has started executing.",
         "Complete":          f"✅ **{workflow_name}** completed successfully!",
-        "Failure":           f"❌ **{workflow_name}** has a failure on record. I'll try to restart it...",
+        "Failure":           f"⚠️ **{workflow_name}** has a failure on record. I'll try to restart it...",
         "Diverted":          f"↩️ **{workflow_name}** was diverted. Investigating further...",
         "Unknown":           f"🔵 I couldn't find a recent run for **{workflow_name}**. I'll try triggering it now...",
     }
@@ -1770,7 +1770,7 @@ def _user_msg_workflow_restart_ok(workflow_name: str) -> str:
 
 def _user_msg_workflow_restart_failed(workflow_name: str) -> str:
     return (
-        f"❌ The workflow **{workflow_name}** couldn't be restarted automatically. "
+        f"⚠️ The workflow **{workflow_name}** couldn't be restarted automatically. "
         f"I'm running a root cause analysis and will raise a ticket."
     )
 
@@ -1859,7 +1859,7 @@ def _build_final_summary(
         outcome_title = "✅ **System Healthy**"
         outcome_body  = "A full health check was performed and all components are currently operating within normal parameters."
     else:
-        outcome_title = "❌ **Attention Required**"
+        outcome_title = "⚠️ **Attention Required**"
         outcome_body  = "Automatic recovery was not possible for this specific issue. An escalation ticket has been raised for the support team."
 
     # RCA detail
@@ -2666,7 +2666,7 @@ async def remediation_agent_execute(
 
     status_messages = {
         "Complete": f"✅ **{workflow['workflow_name']}** completed successfully! Check your email for the output.",
-        "Failure":  f"❌ **{workflow['workflow_name']}** encountered an issue. Please check your input and try again.",
+        "Failure":  f"⚠️ **{workflow['workflow_name']}** encountered an issue. Please check your input and try again.",
         "no_agent": "⚠️ No automation agent was available to run this. Please contact your administrator.",
     }
 

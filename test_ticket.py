@@ -35,7 +35,7 @@ async def test():
     if parsed.get("success"):
         print("\n✅ Ticket created successfully!")
     else:
-        print(f"\n❌ Failed: {parsed.get('error')}")
+        print(f"\n⚠️ Failed: {parsed.get('error')}")
 
 
 if __name__ == "__main__":

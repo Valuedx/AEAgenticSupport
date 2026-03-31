@@ -16,7 +16,7 @@ def test_restart_execution_blocks_completed_status_and_does_not_call_restart():
     assert result["success"] is False
     assert result["status"] == "COMPLETED"
     assert "completed" in result["error"].lower()
-    assert "trigger a new execution instead" in result["hint"].lower()
+    assert "use fresh run" in result["hint"].lower()
 
 
 def test_resubmit_execution_blocks_completed_status_and_does_not_call_resubmit():
@@ -33,7 +33,7 @@ def test_resubmit_execution_blocks_completed_status_and_does_not_call_resubmit()
     assert result["success"] is False
     assert result["status"] == "COMPLETED"
     assert "completed" in result["error"].lower()
-    assert "trigger a new execution instead" in result["hint"].lower()
+    assert "use fresh run" in result["hint"].lower()
 
 
 def test_restart_execution_allows_failed_status():

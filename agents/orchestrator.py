@@ -641,6 +641,15 @@ class Orchestrator:
                         if not tool_def:
                             tool_def = tool_registry.get_tool(tool_name)
 
+                        tool_name, tool_args = self._rewrite_completed_execution_followup(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
+                        if tool_name != fc.name:
+                            tool_def = turn_tools.get_tool(tool_name) or tool_registry.get_tool(tool_name)
+
                         if tool_def:
                             # Check for missing required parameters first. 
                             # If params are missing, we don't ask for approval yet.
@@ -702,6 +711,13 @@ class Orchestrator:
                         if redirected_ticket_args:
                             tool_name = "create_hdfc_ticket"
                             tool_args = redirected_ticket_args
+
+                        tool_name, tool_args = self._rewrite_completed_execution_followup(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
 
                         tool_def = turn_tools.get_tool(tool_name)
                         if not tool_def:
@@ -1201,7 +1217,7 @@ class Orchestrator:
         if not isinstance(data, dict):
             # If the tool crashed or returned a non-dict result, it's a failure.
             # We don't want to show "Action Completed" for a crash.
-            return f"### ❌ Action Failed\nThe {tool_name} tool encountered an internal error or returned an invalid response."
+            return f"### ⚠️ Action Failed\nThe {tool_name} tool encountered an internal error or returned an invalid response."
 
         if isinstance(data, dict):
             # Extract standard AE tool failure keys
@@ -1236,7 +1252,7 @@ class Orchestrator:
                     tool_error = "The tool encountered an operational issue."
 
                 return (
-                    f"### ❌ Unable to Complete Action\n"
+                    f"### ⚠️ Unable to Complete Action\n"
                     f"{tool_error}{state_tag}{detail_block}{action_hint}{hint_block}{sop_block}"
                 )
             if data.get("supported") is False:
@@ -2268,6 +2284,29 @@ CRITICAL RULES:
             if tool_args.get(p) not in (None, "", {}, []):
                 collected[p] = tool_args.get(p)
 
+        # Also mine the recent conversation for already-known values so we do not
+        # ask the user to repeat inputs that were just discussed.
+        latest_user_message = ""
+        for msg in reversed(state.messages):
+            if str(msg.get("role") or "") == "user" and str(msg.get("content") or "").strip():
+                latest_user_message = str(msg.get("content") or "").strip()
+                break
+        extracted = self._extract_params_from_user_message(
+            user_message=latest_user_message,
+            param_names=required,
+            messages=state.messages,
+        )
+        normalized_required = {self._norm_param_key(p): p for p in required}
+        for key, value in extracted.items():
+            if value in (None, "", "null", "None"):
+                continue
+            if key in required and key not in collected:
+                collected[key] = str(value).strip()
+                continue
+            mapped = normalized_required.get(self._norm_param_key(key))
+            if mapped and mapped not in collected:
+                collected[mapped] = str(value).strip()
+
         state.param_collection = {
             "workflow_name": workflow_name,
             "required_params": required,
@@ -2336,11 +2375,13 @@ CRITICAL RULES:
             filtered = llm_client.chat(
                 f"Rewrite this for a non-technical business user. "
                 f"Remove workflow names, request IDs, error codes. "
-                f"Focus on impact and status. "
+                f"Focus on impact, timing, status, and next actions. "
+                f"Do not shorten the response unnecessarily. "
+                f"Keep the response complete and well-structured. "
                 f"CRITICAL: Keep the 'Next Steps' or 'What would you like to do next?' section, but ensure the suggestions themselves are also non-technical (e.g., 'Should I check the overall system health?' instead of 'Check agent CPU logs').\n\n"
                 f"Original Response:\n{response}",
                 system="Rewrite technical text for business audiences while preserving proactive calls to action.",
-                max_tokens=1024,
+                max_tokens=32000,
             )
             return filtered
         except Exception:
@@ -2406,7 +2447,7 @@ CRITICAL RULES:
                 prompt,
                 system="You are a warm, helpful automation assistant providing a premium experience.",
                 temperature=0.4,
-                max_tokens=1024
+                max_tokens=32000
             )
             return response.strip()
         except Exception as e:
@@ -2540,7 +2581,7 @@ CRITICAL RULES:
             return (
                 f"{msg}\n\n"
                 "Restart and resubmit are only available for failed executions. "
-                "If you need to run it again, trigger a new execution instead."
+                "Use Fresh Run to run this workflow again."
             )
             
         # Only add generic guidance if the error is short/generic AND doesn't look like a formal API rejection.
@@ -2551,6 +2592,179 @@ CRITICAL RULES:
             
         msg += "\n\nWould you like me to retry, create a support ticket, or escalate?"
         return msg
+
+    @staticmethod
+    def _get_recent_completed_execution_context(state: ConversationState) -> dict:
+        for call in reversed(state.tool_call_log[-10:]):
+            result = call.get("result") or {}
+            if not isinstance(result, dict):
+                continue
+
+            status = str(result.get("status") or result.get("state") or "").upper()
+            error_text = str(result.get("error") or result.get("message") or "").lower()
+            hint_text = str(result.get("hint") or "").lower()
+            workflow_name = str(
+                result.get("workflow_name")
+                or (call.get("params") or {}).get("workflow_name")
+                or ""
+            ).strip()
+            execution_id = str(
+                result.get("execution_id")
+                or result.get("request_id")
+                or (call.get("params") or {}).get("execution_id")
+                or (call.get("params") or {}).get("request_id")
+                or ""
+            ).strip()
+
+            is_completed_guard = (
+                status == "COMPLETED"
+                or (
+                    "completed" in error_text
+                    and (
+                        "trigger a new execution instead" in (error_text + " " + hint_text)
+                        or "fresh run" in (error_text + " " + hint_text)
+                        or "use fresh run" in (error_text + " " + hint_text)
+                    )
+                )
+            )
+            if is_completed_guard and workflow_name:
+                return {
+                    "workflow_name": workflow_name,
+                    "execution_id": execution_id,
+                }
+
+        return {}
+
+    @staticmethod
+    def _extract_requested_execution_id(user_message: str, tool_args: dict) -> str:
+        args = tool_args or {}
+        for key in ("execution_id", "request_id", "id"):
+            value = str(args.get(key) or "").strip()
+            if value and value.isdigit():
+                return value
+
+        message = str(user_message or "")
+        match = re.search(r"\b\d{4,}\b", message)
+        return match.group(0) if match else ""
+
+    def _build_fresh_run_parameters(
+        self,
+        *,
+        workflow_name: str,
+        source_execution_id: str,
+        state: ConversationState,
+    ) -> dict:
+        clean_workflow = str(workflow_name or "").strip()
+        clean_execution_id = str(source_execution_id or "").strip()
+        if not clean_workflow:
+            return {}
+
+        try:
+            schema = get_ae_client().get_cached_workflow_parameters(clean_workflow)
+        except Exception as exc:
+            logger.debug("Could not load workflow schema for fresh-run trigger %s: %s", clean_workflow, exc)
+            return {}
+
+        required = [
+            p.get("name")
+            for p in schema
+            if isinstance(p, dict)
+            and p.get("name")
+            and (
+                p.get("required")
+                or p.get("is_required")
+                or p.get("optional") is False
+                or (
+                    isinstance(p.get("optional"), str)
+                    and p.get("optional").strip().lower() in {"false", "0", "no", "n"}
+                )
+            )
+        ]
+        if not required:
+            return {}
+
+        extraction_message = str(state.messages[-1].get("content") or "").strip() if state.messages else ""
+        if clean_execution_id:
+            extraction_message = (
+                f"{extraction_message}\nKnown completed execution ID: {clean_execution_id}"
+                if extraction_message
+                else f"Known completed execution ID: {clean_execution_id}"
+            )
+
+        extracted = self._extract_params_from_user_message(
+            user_message=extraction_message,
+            param_names=[str(name) for name in required if name],
+            messages=state.messages,
+        )
+        params = {}
+        normalized_required = {self._norm_param_key(p): p for p in required if p}
+        for key, value in extracted.items():
+            if value in (None, "", "null", "None"):
+                continue
+            if key in required:
+                params[key] = str(value).strip()
+                continue
+            mapped = normalized_required.get(self._norm_param_key(key))
+            if mapped:
+                params[mapped] = str(value).strip()
+
+        return params
+
+    def _rewrite_completed_execution_followup(
+        self,
+        *,
+        user_message: str,
+        state: ConversationState,
+        tool_name: str,
+        tool_args: dict,
+    ) -> tuple[str, dict]:
+        clean_tool = str(tool_name or "").strip()
+        if (
+            not clean_tool
+            or (
+                "resubmit" not in clean_tool.lower()
+                and "restart" not in clean_tool.lower()
+            )
+        ):
+            return clean_tool, tool_args
+
+        recent = self._get_recent_completed_execution_context(state)
+        workflow_name = str(recent.get("workflow_name") or "").strip()
+        if not workflow_name:
+            return clean_tool, tool_args
+
+        requested_execution_id = self._extract_requested_execution_id(user_message, tool_args)
+        recent_execution_id = str(recent.get("execution_id") or "").strip()
+        if (
+            requested_execution_id
+            and recent_execution_id
+            and requested_execution_id != recent_execution_id
+        ):
+            logger.info(
+                "Skipping completed-execution rewrite for %s because requested execution=%s differs from recent completed execution=%s",
+                clean_tool,
+                requested_execution_id,
+                recent_execution_id,
+            )
+            return clean_tool, tool_args
+
+        logger.info(
+            "Rewriting completed-execution follow-up from %s to trigger_workflow for workflow=%s execution=%s",
+            clean_tool,
+            workflow_name,
+            recent_execution_id,
+        )
+        return (
+            "trigger_workflow",
+            {
+                "workflow_name": workflow_name,
+                "parameters": self._build_fresh_run_parameters(
+                    workflow_name=workflow_name,
+                    source_execution_id=recent_execution_id,
+                    state=state,
+                ),
+            },
+        )
 
     def _get_sop_troubleshooting_steps(self, query: str) -> list[str]:
         """Extract short SOP-like action steps for user-facing recovery guidance."""

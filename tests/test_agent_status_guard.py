@@ -218,7 +218,7 @@ async def run_all():
             passed += 1
         except Exception as e:
             failed += 1
-            print(f"❌ FAILED — {test_fn.__name__}: {e}")
+            print(f"⚠️ FAILED — {test_fn.__name__}: {e}")
 
     print(f"\n{'=' * 60}")
     print(f"  Results: {passed} passed, {failed} failed out of {len(tests)}")

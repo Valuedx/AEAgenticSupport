@@ -71,9 +71,7 @@ def _guard_failed_execution_only(client, execution_id: str, action_name: str) ->
                 f"Execution `{execution_id}` for **{workflow_name}** is already completed, "
                 f"so {action_name} is not allowed."
             ),
-            "hint": (
-                "If you need to run it again, trigger a new execution instead of restarting or resubmitting this completed one."
-            ),
+            "hint": "Use Fresh Run to run this workflow again.",
             "execution_id": execution_id,
             "workflow_name": workflow_name,
             "status": status,

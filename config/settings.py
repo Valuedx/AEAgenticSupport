@@ -94,7 +94,7 @@ CONFIG = {
     "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
     "GOOGLE_CLOUD_LOCATION": os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
     "VERTEX_AI_MODEL": os.environ.get("VERTEX_AI_MODEL", "gemini-2.0-flash"),
-    "VERTEX_AI_MAX_TOKENS": int(os.environ.get("VERTEX_AI_MAX_TOKENS", "32000")),
+    "VERTEX_AI_MAX_TOKENS": int(os.environ.get("VERTEX_AI_MAX_TOKENS", "65536")),
 
     # PostgreSQL + pgvector
     "POSTGRES_DSN": os.environ.get(
