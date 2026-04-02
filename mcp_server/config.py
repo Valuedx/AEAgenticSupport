@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv
@@ -25,8 +26,29 @@ def _bool(val: str) -> bool:
     return val.strip().lower() in ("1", "true", "yes")
 
 
+_t4_base_url = os.environ.get("T4_BASE_URL", "").strip()
+_ae_base_url_env = os.environ.get("AE_BASE_URL", "").strip()
+_ae_rest_base_path_env = os.environ.get("AE_REST_BASE_PATH", "").strip()
+
+_derived_ae_base_url = _ae_base_url_env
+_derived_rest_path = _ae_rest_base_path_env or "/aeengine/rest"
+
+if _t4_base_url:
+    parsed = urlparse(_t4_base_url)
+    if not _ae_base_url_env:
+        if parsed.scheme and parsed.netloc:
+            _derived_ae_base_url = f"{parsed.scheme}://{parsed.netloc}"
+        else:
+            _derived_ae_base_url = _t4_base_url
+    if not _ae_rest_base_path_env and parsed.path and parsed.path != "/":
+        _derived_rest_path = parsed.path.rstrip("/")
+
+if not _derived_ae_base_url:
+    _derived_ae_base_url = "https://localhost:8443"
+
+
 MCP_CONFIG = {
-    "AE_BASE_URL": os.environ.get("AE_BASE_URL", "https://localhost:8443"),
+    "AE_BASE_URL": _derived_ae_base_url,
     "AE_API_KEY": os.environ.get("AE_API_KEY", ""),
     "AE_USERNAME": os.environ.get(
         "AE_USERNAME", os.environ.get("T4_USERNAME", "")
@@ -38,12 +60,12 @@ MCP_CONFIG = {
         "AE_ORG_CODE", os.environ.get("T4_ORG_CODE", "")
     ),
     "AE_DEFAULT_USERID": os.environ.get("AE_DEFAULT_USERID", "mcp_server"),
-    "AE_REST_BASE_PATH": os.environ.get("AE_REST_BASE_PATH", "/aeengine/rest"),
+    "AE_REST_BASE_PATH": _derived_rest_path,
     "AE_AUTH_ENDPOINT": os.environ.get("AE_AUTH_ENDPOINT", "/authenticate"),
     "AE_SESSION_HEADER": os.environ.get("AE_SESSION_HEADER", "X-session-token"),
     "AE_TOKEN_FIELD": os.environ.get("AE_TOKEN_FIELD", "token"),
     "AE_TOKEN_TTL_SECONDS": int(os.environ.get("AE_TOKEN_TTL_SECONDS", "1800")),
-    "AE_TIMEOUT_SECONDS": int(os.environ.get("AE_TIMEOUT_SECONDS", "30")),
+    "AE_TIMEOUT_SECONDS": int(os.environ.get("AE_TIMEOUT_SECONDS", os.environ.get("T4_TIMEOUT_SECONDS", "30"))),
     "AE_VERIFY_SSL": _bool(os.environ.get("AE_VERIFY_SSL", "false")),
     "MCP_TRANSPORT": os.environ.get("MCP_TRANSPORT", "stdio"),
     "MCP_HOST": os.environ.get("MCP_HOST", "127.0.0.1"),

@@ -24,12 +24,13 @@ import re
 import requests
 import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, request, stream_with_context
+from flask import Flask, Response, jsonify, request, session, stream_with_context
 from flask_cors import CORS
 
 from config.settings import CONFIG
@@ -47,6 +48,9 @@ from tools.registry import tool_registry
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 app = Flask(__name__)
+app.config["SECRET_KEY"] = str(CONFIG.get("WEBCHAT_SESSION_SECRET", "") or "ae-agentic-support-webchat-secret")
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 CORS(app)
 log = logging.getLogger("agent_server")
 
@@ -74,6 +78,102 @@ def _bool_arg(value, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _webchat_auth_enabled() -> bool:
+    return bool(CONFIG.get("WEBCHAT_AUTH_ENABLED", True))
+
+
+def _fetch_ae_users_for_webchat_login() -> list[dict]:
+    from mcp_server.ae_client import get_ae_client
+
+    ae_client = get_ae_client()
+    params = {"admin": "false", "offset": 0, "size": 1000, "order": "desc"}
+    attempts = [
+        ("post", {"path": "/users", "json_body": {}, "params": params}),
+        ("get", {"path": "/users", "params": params}),
+    ]
+    last_exc: Exception | None = None
+
+    for method_name, kwargs in attempts:
+        method = getattr(ae_client, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            raw = method(**kwargs)
+            if isinstance(raw, list):
+                users = [item for item in raw if isinstance(item, dict)]
+            elif isinstance(raw, dict):
+                users = []
+                for key in ("data", "items", "results", "users"):
+                    value = raw.get(key)
+                    if isinstance(value, list):
+                        users = [item for item in value if isinstance(item, dict)]
+                        break
+            else:
+                users = []
+            if users:
+                return users
+        except Exception as exc:
+            last_exc = exc
+
+    if last_exc:
+        raise last_exc
+    return []
+
+
+def _webchat_username_exists_in_ae(username: str) -> bool:
+    clean_username = str(username or "").strip()
+    if not clean_username:
+        return False
+
+    ae_users = _fetch_ae_users_for_webchat_login()
+    for user in ae_users:
+        ae_username = str(user.get("userName") or "").strip()
+        if ae_username and ae_username == clean_username:
+            return True
+    return False
+
+
+def _webchat_session_identity() -> dict | None:
+    username = str(session.get("webchat_username", "") or "").strip()
+    if not username:
+        return None
+    user_id = str(session.get("webchat_user_id", "") or "").strip()
+    if not user_id:
+        user_id = f"webchat:{username}"
+    chat_session_id = str(session.get("webchat_chat_session_id", "") or "").strip()
+    if not chat_session_id:
+        chat_session_id = f"webchat-{_slugify(username)}-{uuid.uuid4().hex[:8]}"
+        session["webchat_chat_session_id"] = chat_session_id
+    return {
+        "username": username,
+        "user_id": user_id,
+        "chat_session_id": chat_session_id,
+        "user_email": username if "@" in username else "",
+    }
+
+
+def _require_webchat_session():
+    if not _webchat_auth_enabled():
+        username = str(session.get("webchat_username", "") or "webchat_user").strip() or "webchat_user"
+        user_id = str(session.get("webchat_user_id", "") or f"webchat:{username}").strip() or f"webchat:{username}"
+        chat_session_id = str(session.get("webchat_chat_session_id", "") or "").strip()
+        if not chat_session_id:
+            chat_session_id = f"webchat-{_slugify(username)}-{uuid.uuid4().hex[:8]}"
+            session["webchat_chat_session_id"] = chat_session_id
+        session["webchat_username"] = username
+        session["webchat_user_id"] = user_id
+        return {
+            "username": username,
+            "user_id": user_id,
+            "chat_session_id": chat_session_id,
+            "user_email": username if "@" in username else "",
+        }
+    identity = _webchat_session_identity()
+    if identity:
+        return identity
+    return jsonify({"error": "unauthorized"}), 401
 
 
 def _slugify(value: str) -> str:
@@ -340,6 +440,180 @@ def api_aistudio_start_conversation():
             "webSocketUrl": stream_url,
             "expiresIn": data.get("expires_in") or data.get("expiresIn"),
         }
+    )
+
+
+@app.route("/api/webchat/auth/me", methods=["GET"])
+def api_webchat_auth_me():
+    if not _webchat_auth_enabled():
+        return jsonify(
+            {
+                "authenticated": True,
+                "username": "webchat_user",
+                "user_id": "webchat:webchat_user",
+                "chat_session_id": session.get("webchat_chat_session_id", "webchat-default"),
+                "auth_enabled": False,
+            }
+        )
+
+    identity = _webchat_session_identity()
+    if not identity:
+        return jsonify({"authenticated": False, "auth_enabled": True})
+
+    return jsonify(
+        {
+            "authenticated": True,
+            "auth_enabled": True,
+            "username": identity["username"],
+            "user_id": identity["user_id"],
+            "chat_session_id": identity["chat_session_id"],
+        }
+    )
+
+
+@app.route("/api/webchat/auth/login", methods=["POST"])
+def api_webchat_auth_login():
+    payload = request.get_json(force=True, silent=True) or {}
+    username = str(payload.get("username", "") or "").strip()
+    password = str(payload.get("password", "") or "")
+    expected_password = str(CONFIG.get("WEBCHAT_LOGIN_PASSWORD", "") or "")
+
+    if not _webchat_auth_enabled():
+        session["webchat_username"] = username or "webchat_user"
+        session["webchat_user_id"] = f"webchat:{session['webchat_username']}"
+        session["webchat_chat_session_id"] = f"webchat-{_slugify(session['webchat_username'])}-{uuid.uuid4().hex[:8]}"
+        return jsonify(
+            {
+                "success": True,
+                "username": session["webchat_username"],
+                "user_id": session["webchat_user_id"],
+                "chat_session_id": session["webchat_chat_session_id"],
+            }
+        )
+
+    if not username:
+        return jsonify({"success": False, "error": "Username is required."}), 400
+    if password != expected_password:
+        return jsonify({"success": False, "error": "Invalid username or password."}), 401
+    try:
+        username_exists = _webchat_username_exists_in_ae(username)
+    except Exception as exc:
+        log.warning("AE username verification failed during webchat login for %r: %s", username, exc)
+        return jsonify({"success": False, "error": "Unable to verify AutomationEdge username right now."}), 503
+
+    if not username_exists:
+        return jsonify({"success": False, "error": "Username does not match any AutomationEdge user."}), 401
+
+    session.clear()
+    session["webchat_username"] = username
+    session["webchat_user_id"] = f"webchat:{username}"
+    session["webchat_chat_session_id"] = f"webchat-{_slugify(username)}-{uuid.uuid4().hex[:8]}"
+
+    return jsonify(
+        {
+            "success": True,
+            "username": username,
+            "user_id": session["webchat_user_id"],
+            "chat_session_id": session["webchat_chat_session_id"],
+        }
+    )
+
+
+@app.route("/api/webchat/auth/logout", methods=["POST"])
+def api_webchat_auth_logout():
+    session.clear()
+    return jsonify({"success": True})
+
+
+@app.route("/api/webchat/chat", methods=["POST"])
+def api_webchat_chat():
+    auth = _require_webchat_session()
+    if not isinstance(auth, dict):
+        return auth
+
+    data = request.get_json(force=True, silent=True) or {}
+    message = str(data.get("message", "")).strip()
+    if not message:
+        return jsonify({"response": "Empty message received."}), 400
+
+    response = handle_chat_message(
+        message=message,
+        session_id=auth["chat_session_id"],
+        user_id=auth["user_id"],
+        user_role=data.get("user_role", "technical"),
+        user_name=auth["username"],
+        user_email=auth["user_email"],
+        user_team=data.get("user_team", ""),
+        user_metadata={
+            "auth_source": "webchat_login",
+            "webchat_username": auth["username"],
+        },
+    )
+    return jsonify({"response": response})
+
+
+@app.route("/api/webchat/chat/stream", methods=["POST"])
+def api_webchat_chat_stream():
+    auth = _require_webchat_session()
+    if not isinstance(auth, dict):
+        return auth
+
+    data = request.get_json(force=True, silent=True) or {}
+    message = str(data.get("message", "")).strip()
+    if not message:
+        return jsonify({"response": "Empty message received."}), 400
+
+    event_queue: queue.Queue[dict] = queue.Queue()
+
+    def on_progress(status_text: str):
+        event_queue.put({"event": "progress", "data": status_text})
+
+    def run_agent():
+        try:
+            final = handle_chat_message(
+                message=message,
+                session_id=auth["chat_session_id"],
+                user_id=auth["user_id"],
+                user_role=data.get("user_role", "technical"),
+                user_name=auth["username"],
+                user_email=auth["user_email"],
+                user_team=data.get("user_team", ""),
+                user_metadata={
+                    "auth_source": "webchat_login",
+                    "webchat_username": auth["username"],
+                },
+                on_progress=on_progress,
+            )
+            event_queue.put({"event": "done", "data": final})
+        except Exception as exc:
+            log.error("Authenticated webchat agent error: %s", exc, exc_info=True)
+            event_queue.put(
+                {
+                    "event": "done",
+                    "data": "I encountered an error. Please try again.",
+                }
+            )
+
+    thread = threading.Thread(target=run_agent, daemon=True)
+    thread.start()
+
+    def generate():
+        while True:
+            try:
+                evt = event_queue.get(timeout=120)
+            except queue.Empty:
+                yield "event: done\ndata: \"Request timed out while waiting for agent output.\"\n\n"
+                break
+            payload = json.dumps(evt.get("data"))
+            yield f"event: {evt.get('event', 'message')}\n"
+            yield f"data: {payload}\n\n"
+            if evt.get("event") == "done":
+                break
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

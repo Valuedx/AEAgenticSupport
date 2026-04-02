@@ -20,6 +20,8 @@ from config.db import get_conn
 from config.settings import CONFIG
 
 logger = logging.getLogger("ops_agent.state")
+_workflow_access_sync_lock = threading.Lock()
+_workflow_access_sync_inflight: set[str] = set()
 
 
 class ConversationPhase(Enum):
@@ -78,6 +80,7 @@ class ConversationState:
         self.last_agent_id: str = ""  # Tracks the last agent that handled a message
         self._message_queue: list[dict] = []
         self._queue_lock = threading.Lock()
+        self._workflow_access_sync_requested: bool = False
         # Deferred message writes: flushed in save() to reduce hot-path DB round-trips
         self._pending_message_inserts: list[tuple[str, str, dict]] = []
 
@@ -156,6 +159,65 @@ class ConversationState:
         self.suspended_flow = {}
         logger.debug("Suspended flow cleared for conversation %s", self.conversation_id)
 
+    def ensure_workflow_access_sync(self, force: bool = False) -> None:
+        if not CONFIG.get("WF_ACCESS_ENABLE_TARGETED_SYNC", True):
+            return
+        if self._workflow_access_sync_requested and not force:
+            return
+
+        user_id = str(self.user_id or "").strip()
+        user_name = str(self.user_name or "").strip()
+        user_email = str(self.user_email or "").strip()
+        metadata = self.user_metadata if isinstance(self.user_metadata, dict) else {}
+        has_identity = bool(user_name or user_email or metadata)
+        if not user_id or not has_identity:
+            return
+
+        with _workflow_access_sync_lock:
+            if user_id in _workflow_access_sync_inflight:
+                self._workflow_access_sync_requested = True
+                return
+            _workflow_access_sync_inflight.add(user_id)
+            self._workflow_access_sync_requested = True
+
+        def _runner() -> None:
+            try:
+                try:
+                    from scripts.sync_user_workflow_access import sync_user_by_id
+                except ModuleNotFoundError:
+                    import importlib.util
+                    import os
+                    import sys
+
+                    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    if root not in sys.path:
+                        sys.path.insert(0, root)
+                    module_path = os.path.join(root, "scripts", "sync_user_workflow_access.py")
+                    spec = importlib.util.spec_from_file_location("sync_user_workflow_access_runtime", module_path)
+                    if not spec or not spec.loader:
+                        raise
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    sync_user_by_id = module.sync_user_by_id
+
+                logger.info("Starting targeted workflow access sync for user_id=%s", user_id)
+                sync_user_by_id(
+                    user_id=user_id,
+                    user_name=user_name,
+                    user_email=user_email,
+                )
+            except Exception as exc:
+                logger.warning("Targeted workflow access sync failed for user_id=%s: %s", user_id, exc)
+            finally:
+                with _workflow_access_sync_lock:
+                    _workflow_access_sync_inflight.discard(user_id)
+
+        threading.Thread(
+            target=_runner,
+            name=f"wf-access-sync-{user_id[-12:]}",
+            daemon=True,
+        ).start()
+
     # ── Persistence ──
 
     def save(self):
@@ -174,7 +236,7 @@ class ConversationState:
                                     user_role = %s,
                                     user_name = COALESCE(NULLIF(%s, ''), user_name),
                                     user_email = COALESCE(NULLIF(%s, ''), user_email),
-                                    user_team = COALESCE(NULLIF(%s, ''), user_name),
+                                    user_team = COALESCE(NULLIF(%s, ''), user_team),
                                     metadata = metadata || %s,
                                     updated_at = NOW()
                                 WHERE user_id = %s

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, Optional
 
+from config.settings import CONFIG
 from state.app_config import get_runtime_value
 from state.scheduler_store import get_scheduler_store
 
@@ -259,18 +260,42 @@ Keep it under 300 words."""
         return TaskResult(success=False, message=str(exc))
 
 
+def workflow_access_sync_handler(**kwargs) -> TaskResult:
+    """Reconcile Teams users to AE workflow grants."""
+    try:
+        from scripts.sync_user_workflow_access import sync_all_users
+
+        dry_run = bool(kwargs.get("dry_run", False))
+        user_filter = str(kwargs.get("user_filter", "") or "")
+        result = sync_all_users(dry_run=dry_run, user_filter=user_filter)
+        return TaskResult(
+            success=result.get("errors", 0) == 0,
+            message=(
+                f"Workflow access sync processed {result.get('users_synced', 0)} user(s), "
+                f"upserted {result.get('grants_upserted', 0)} grant(s), "
+                f"removed {result.get('grants_removed', 0)} stale grant(s)."
+            ),
+            data=result,
+        )
+    except Exception as exc:
+        logger.error("Workflow access sync failed: %s", exc)
+        return TaskResult(success=False, message=f"Workflow access sync error: {exc}")
+
+
 # ── Handler registry ─────────────────────────────────────────────────
 
 _BUILTIN_HANDLERS: dict[str, Callable[..., TaskResult]] = {
     "health_check": health_check_handler,
     "workflow_monitor": workflow_monitor_handler,
     "daily_summary": daily_summary_handler,
+    "workflow_access_sync": workflow_access_sync_handler,
 }
 
 _HANDLER_SUMMARIES: dict[str, str] = {
     "health_check": "Checks platform health and recent failures at a regular interval.",
     "workflow_monitor": "Watches a defined list of workflows for failures or stuck states.",
     "daily_summary": "Creates a daily plain-language operations summary for stakeholders.",
+    "workflow_access_sync": "Refreshes user-to-workflow grants from AutomationEdge and removes stale access.",
     "session_cleanup": "Removes stale conversation state after the configured retention period.",
 }
 
@@ -719,6 +744,18 @@ def setup_default_tasks(scheduler: AgentScheduler | None = None) -> None:
         cron_minute=0,
         handler_name="daily_summary",
         enabled=bool(get_runtime_value("ENABLE_DAILY_SUMMARY", False)),
+        is_system=True,
+    ))
+
+    sched.add_task(ScheduledTask(
+        task_id="default-workflow-access-sync",
+        name="Workflow Access Sync",
+        description="Reconcile user workflow access from AutomationEdge",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=int(CONFIG.get("WF_ACCESS_SYNC_INTERVAL_SECONDS", 3600)),
+        handler_name="workflow_access_sync",
+        handler_args={"dry_run": False},
+        enabled=bool(CONFIG.get("WF_ACCESS_ENABLE_SCHEDULED_SYNC", False)),
         is_system=True,
     ))
 

@@ -79,6 +79,14 @@ class MetricsCollector:
                     ToolMetric(tool_name, latency_ms, success, error)
                 )
 
+    def record_turn_error(self, turn_id: str, error: str):
+        with self._lock:
+            if turn_id in self.active_turns:
+                self.active_turns[turn_id].tool_calls.append(
+                    ToolMetric("__turn__", 0.0, False, error)
+                )
+        logger.error("Turn %s failed: %s", turn_id, error)
+
     def get_summary(self, conversation_id: Optional[str] = None) -> dict:
         """Get aggregate metrics for a conversation or globally."""
         with self._lock:

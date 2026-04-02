@@ -172,10 +172,22 @@ def _ensure_ticket(client: RestToolClient, case: Case) -> None:
         logger.warning(f"Ticket creation failed (non-fatal): {e}")
 
 
-def _build_plan_with_rag(client: RestToolClient, case: Case,
-                         user_text: str) -> dict:
+def _build_plan_with_rag(
+    client: RestToolClient,
+    case: Case,
+    user_text: str,
+    *,
+    user_id: str = "",
+    org_code: str = "",
+) -> dict:
     sop_hits = rag_search_sop(client, query=user_text, top_k=6)
-    tool_hits = rag_search_tools(client, query=user_text, top_k=8)
+    tool_hits = rag_search_tools(
+        client,
+        query=user_text,
+        top_k=8,
+        user_id=user_id,
+        org_code=org_code,
+    )
 
     issue_bucket = (
         "OUTPUT_NOT_RECEIVED"
@@ -464,7 +476,7 @@ def handle_support_turn(thread_id: str, teams_message_id: str,
     case.updated_at = timezone.now()
     case.save()
 
-    plan = _build_plan_with_rag(client, case, user_text)
+    plan = _build_plan_with_rag(client, case, user_text, user_id=_user_id)
 
     case.state = "EXECUTING"
     case.updated_at = timezone.now()

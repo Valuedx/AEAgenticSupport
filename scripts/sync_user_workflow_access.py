@@ -1,17 +1,18 @@
 """
-Sync user-workflow access from AutomationEdge API into user_workflow_access table.
+Sync user-workflow access from AutomationEdge into the local access tables.
 
 This script:
-1. Reads all users from user_registry (Teams users)
-2. Fetches all users from AE API
-3. Matches Teams user_name → AE fullName (fuzzy, case-insensitive)
-4. For each matched user, fetches their workflow grants from AE
-5. Upserts rows into user_workflow_access with teams_id + match_confidence
+1. Reads Teams users from `user_registry`
+2. Resolves each Teams user to AE identity by Teams username, then exact email, then email local-part
+3. Persists AE linkage fields on `user_registry`
+4. Reconciles `user_workflow_access` grants per user
+5. Removes stale grants when permissions are revoked upstream
 
 Usage:
-    python scripts/sync_user_workflow_access.py             # Sync all users
-    python scripts/sync_user_workflow_access.py --user "Kirtibala Gujar"  # Single user
-    python scripts/sync_user_workflow_access.py --dry-run   # Preview without writing
+    python scripts/sync_user_workflow_access.py
+    python scripts/sync_user_workflow_access.py --user "kirtibala.gujar"
+    python scripts/sync_user_workflow_access.py --user-id "29:1abc..."
+    python scripts/sync_user_workflow_access.py --dry-run
 """
 from __future__ import annotations
 
@@ -26,475 +27,797 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(ROOT, ".env"))
+
+from config.settings import CONFIG
 
 logger = logging.getLogger("sync_user_workflow_access")
 
-# ── Matching utilities (reused from find_user_workflow_assignments.py) ──
 
-def _normalize(value: str) -> str:
+def _normalize(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
-def _full_name(user: dict[str, Any]) -> str:
-    return " ".join(
-        part for part in [
-            str(user.get("firstName") or "").strip(),
-            str(user.get("lastName") or "").strip(),
-        ]
-        if part
-    ).strip()
+def _normalize_username(value: Any) -> str:
+    return _normalize(value)
 
 
-def _score_user_match(ae_user: dict[str, Any], teams_user_name: str) -> float:
-    """Score how well a Teams user_name matches an AE user. Returns 0.0-1.0."""
-    q = _normalize(teams_user_name)
-    if not q:
-        return 0.0
-
-    username = _normalize(str(ae_user.get("userName") or ""))
-    full_name = _normalize(_full_name(ae_user))
-
-    # Exact match on full name
-    if q == full_name and full_name:
-        return 1.0
-    # Exact match on username
-    if q == username and username:
-        return 0.95
-    # Full name contains query (or vice versa)
-    if full_name and q in full_name:
-        return 0.8
-    if full_name and full_name in q:
-        return 0.75
-    # Username contains query
-    if username and q in username:
-        return 0.7
-    # Partial first/last name match
-    q_parts = set(q.split())
-    name_parts = set(full_name.split()) if full_name else set()
-    if q_parts and name_parts:
-        overlap = len(q_parts & name_parts)
-        if overlap > 0:
-            return min(0.65, 0.3 + 0.2 * overlap)
-    return 0.0
+def _normalize_email(value: Any) -> str:
+    return str(value or "").strip().lower()
 
 
-def _extract_list(payload: Any) -> list[dict[str, Any]]:
+def _email_local_part(value: Any) -> str:
+    email = _normalize_email(value)
+    if "@" not in email:
+        return ""
+    return email.split("@", 1)[0].strip()
+
+
+def _ae_email_candidates(ae_user: dict[str, Any]) -> set[str]:
+    emails: set[str] = set()
+    for candidate in (
+        ae_user.get("email"),
+        ae_user.get("userEmail"),
+        ae_user.get("emailId"),
+        ae_user.get("mail"),
+        ae_user.get("userPrincipalName"),
+        ae_user.get("upn"),
+    ):
+        clean = _normalize_email(candidate)
+        if clean:
+            emails.add(clean)
+    return emails
+
+
+def _safe_list(payload: Any, keys: tuple[str, ...] = ("data", "items", "results", "workflows", "permissions")) -> list[dict]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
     if isinstance(payload, dict):
-        for key in ("data", "items", "results", "workflows", "permissions"):
+        for key in keys:
             value = payload.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
     return []
 
 
+def _extract_teams_identity(teams_user: dict[str, Any]) -> dict[str, str]:
+    metadata = teams_user.get("metadata") if isinstance(teams_user.get("metadata"), dict) else {}
+    channel_data = metadata.get("channel_data") if isinstance(metadata.get("channel_data"), dict) else {}
+    channel_user = channel_data.get("user") if isinstance(channel_data.get("user"), dict) else {}
+    entities = metadata.get("entities") if isinstance(metadata.get("entities"), list) else []
+
+    aad_object_id = ""
+    for candidate in (
+        channel_user.get("aadObjectId"),
+        channel_user.get("aad_object_id"),
+        metadata.get("aadObjectId"),
+        metadata.get("aad_object_id"),
+    ):
+        if candidate:
+            aad_object_id = str(candidate).strip()
+            break
+    if not aad_object_id:
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            candidate = entity.get("aadObjectId") or entity.get("aad_object_id")
+            if candidate:
+                aad_object_id = str(candidate).strip()
+                break
+
+    user_id = str(teams_user.get("user_id") or "").strip()
+    user_name = str(teams_user.get("user_name") or "").strip()
+    user_email = str(teams_user.get("user_email") or channel_user.get("email") or "").strip()
+
+    return {
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_email": user_email,
+        "aad_object_id": aad_object_id,
+        "teams_id": aad_object_id or user_id,
+    }
+
+
 def _is_admin_user(user: dict[str, Any]) -> bool:
+    direct_markers = (
+        user.get("isAdmin"),
+        user.get("admin"),
+        user.get("is_admin"),
+    )
+    if any(bool(marker) for marker in direct_markers if marker is not None):
+        return True
+
     for role in user.get("roles") or []:
         if not isinstance(role, dict):
             continue
-        if _normalize(str(role.get("roleName") or "")) == "admin":
+        role_name = _normalize(role.get("roleName") or role.get("name"))
+        if role_name == "admin":
             return True
     return False
 
 
-# ── Database helpers ──
-
-def _get_teams_users(conn) -> list[dict]:
-    """Fetch all users from user_registry."""
+def _build_catalog(conn) -> dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT user_id, user_name, user_email, user_team, metadata "
-            "FROM user_registry WHERE user_name IS NOT NULL AND user_name != ''"
+            """
+            SELECT workflow_id, org_code, workflow_name
+            FROM workflow_catalog
+            WHERE active = TRUE
+            """
+        )
+        rows = cur.fetchall()
+
+    all_rows: list[dict[str, str]] = []
+    by_id: dict[str, list[dict[str, str]]] = {}
+    for workflow_id, org_code, workflow_name in rows:
+        item = {
+            "workflow_id": str(workflow_id or "").strip(),
+            "org_code": str(org_code or "").strip(),
+            "workflow_name": str(workflow_name or "").strip(),
+        }
+        if not item["workflow_id"]:
+            continue
+        all_rows.append(item)
+        by_id.setdefault(item["workflow_id"], []).append(item)
+
+    return {"all": all_rows, "by_id": by_id}
+
+
+def _get_teams_users(conn, *, user_filter: str = "", user_id: str = "") -> list[dict]:
+    where_clauses = ["(COALESCE(user_name, '') != '' OR COALESCE(user_email, '') != '')"]
+    params: list[Any] = []
+    if user_filter:
+        where_clauses.append("user_name = %s")
+        params.append(user_filter)
+    if user_id:
+        where_clauses.append("user_id = %s")
+        params.append(user_id)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT user_id, user_name, user_email, user_team, metadata
+            FROM user_registry
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY updated_at DESC NULLS LAST, user_id ASC
+            """,
+            tuple(params),
         )
         cols = [desc[0] for desc in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def _get_all_workflow_ids(conn) -> dict[str, str]:
-    """Fetch all workflow_id → workflow_name from workflow_catalog."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT workflow_id, org_code, workflow_name FROM workflow_catalog WHERE active = TRUE")
-        result = {}
-        for row in cur.fetchall():
-            result[f"{row[0]}:{row[1]}"] = row[2]
-        return result
+def _fetch_ae_users(ae_client: Any) -> list[dict]:
+    params = {"admin": "false", "offset": 0, "size": 1000, "order": "desc"}
+    attempts: list[tuple[str, dict[str, Any]]] = [
+        ("post", {"path": "/users", "json_body": {}, "params": params}),
+        ("get", {"path": "/users", "params": params}),
+    ]
+    last_exc: Exception | None = None
+    for method_name, kwargs in attempts:
+        method = getattr(ae_client, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            raw = method(**kwargs)
+            users = _safe_list(raw)
+            if users:
+                return users
+        except Exception as exc:
+            last_exc = exc
+    if last_exc:
+        raise last_exc
+    return []
 
 
-def _extract_teams_id(metadata: Any) -> str:
-    """Extract AAD Object ID from user_registry metadata."""
-    if not isinstance(metadata, dict):
-        return ""
-    # Check channel_data.tenant.id or entities for AAD object ID
-    channel_data = metadata.get("channel_data", {})
-    if isinstance(channel_data, dict):
-        user_info = channel_data.get("user", {})
-        if isinstance(user_info, dict):
-            aad_id = user_info.get("aadObjectId") or user_info.get("aad_object_id") or ""
-            if aad_id:
-                return str(aad_id)
-    # Check entities
-    entities = metadata.get("entities", [])
-    if isinstance(entities, list):
-        for ent in entities:
-            if isinstance(ent, dict):
-                aad_id = ent.get("aadObjectId") or ent.get("aad_object_id") or ""
-                if aad_id:
-                    return str(aad_id)
+def _candidate_records(teams_identity: dict[str, str], ae_users: list[dict]) -> list[dict[str, Any]]:
+    teams_username = _normalize_username(teams_identity.get("user_name"))
+    teams_email = _normalize_email(teams_identity.get("user_email"))
+    teams_email_local = _email_local_part(teams_email)
+
+    records: list[dict[str, Any]] = []
+    for ae_user in ae_users:
+        ae_username = _normalize_username(ae_user.get("userName"))
+        ae_emails = _ae_email_candidates(ae_user)
+
+        if teams_username and ae_username and teams_username == ae_username:
+            records.append(
+                {
+                    "method": "username_exact",
+                    "confidence": 1.0,
+                    "ae_user": ae_user,
+                }
+            )
+            continue
+
+        if teams_email:
+            if teams_email == ae_username or teams_email in ae_emails:
+                records.append(
+                    {
+                        "method": "email_exact",
+                        "confidence": 0.95,
+                        "ae_user": ae_user,
+                    }
+                )
+                continue
+
+        if teams_email_local:
+            if teams_email_local == ae_username:
+                records.append(
+                    {
+                        "method": "email_local_part",
+                        "confidence": 0.9,
+                        "ae_user": ae_user,
+                    }
+                )
+                continue
+            if any(_email_local_part(candidate) == teams_email_local for candidate in ae_emails):
+                records.append(
+                    {
+                        "method": "email_local_part",
+                        "confidence": 0.9,
+                        "ae_user": ae_user,
+                    }
+                )
+
+    return sorted(records, key=lambda item: item["confidence"], reverse=True)
+
+
+def _resolve_match(teams_user: dict[str, Any], ae_users: list[dict]) -> dict[str, Any]:
+    identity = _extract_teams_identity(teams_user)
+    if not identity["user_name"] and not identity["user_email"]:
+        return {
+            "status": "missing_teams_identity",
+            "identity": identity,
+            "ae_user": None,
+            "confidence": 0.0,
+            "method": "unknown",
+        }
+
+    candidates = _candidate_records(identity, ae_users)
+    if not candidates:
+        return {
+            "status": "no_ae_match",
+            "identity": identity,
+            "ae_user": None,
+            "confidence": 0.0,
+            "method": "unknown",
+        }
+
+    best = candidates[0]
+    tied = [
+        candidate
+        for candidate in candidates
+        if abs(float(candidate["confidence"]) - float(best["confidence"])) < 0.0001
+    ]
+    if len(tied) > 1:
+        return {
+            "status": "multiple_ae_candidates",
+            "identity": identity,
+            "ae_user": None,
+            "confidence": float(best["confidence"]),
+            "method": str(best["method"]),
+        }
+
+    return {
+        "status": "matched",
+        "identity": identity,
+        "ae_user": best["ae_user"],
+        "confidence": float(best["confidence"]),
+        "method": str(best["method"]),
+    }
+
+
+def _permission_from_value(raw_value: Any) -> str:
+    value = _normalize(raw_value)
+    if value in {"admin", "owner"}:
+        return "admin"
+    if "read" in value and "execute" not in value and "write" not in value:
+        return "read"
+    if any(token in value for token in ("write", "execute", "run", "trigger", "owner", "admin")):
+        return "execute"
+    return "execute"
+
+
+def _catalog_org_for_workflow(catalog: dict[str, Any], workflow_id: str, org_code: str = "") -> str:
+    clean_org = str(org_code or "").strip()
+    if clean_org:
+        return clean_org
+    matches = catalog["by_id"].get(str(workflow_id or "").strip(), [])
+    if len(matches) == 1:
+        return str(matches[0]["org_code"] or "").strip()
+    default_org = str(CONFIG.get("AE_ORG_CODE", "") or "").strip()
+    if default_org:
+        preferred_matches = [row for row in matches if str(row.get("org_code") or "").strip() == default_org]
+        if preferred_matches:
+            return default_org
+        if not matches:
+            logger.info(
+                "Falling back to default org_code=%s for workflow_id=%s because catalog has no matching row",
+                default_org,
+                workflow_id,
+            )
+            return default_org
     return ""
 
 
-def _upsert_access(conn, rows: list[dict], *, dry_run: bool = False) -> int:
-    """Upsert rows into user_workflow_access. Returns count of upserted rows."""
-    if not rows:
-        return 0
+def _fetch_grants_for_user(
+    ae_client: Any,
+    ae_user: dict[str, Any],
+    catalog: dict[str, Any],
+) -> list[dict[str, Any]]:
+    ae_user_id = int(ae_user.get("id", 0))
+    ae_username = str(ae_user.get("userName") or "").strip()
+    match_rows: list[dict[str, Any]] = []
+
+    try:
+        raw_workflows = ae_client.get_user_workflows(str(ae_user_id))
+    except Exception as exc:
+        logger.warning(
+            "get_user_workflows failed for AE user %s (%s); falling back to permissions API",
+            ae_user_id,
+            exc,
+        )
+        raw_workflows = []
+
+    for item in _safe_list(raw_workflows, keys=("workflows", "items", "data")):
+        workflow_id = str(
+            item.get("workflowId")
+            or item.get("workflow_id")
+            or item.get("id")
+            or ""
+        ).strip()
+        if not workflow_id:
+            continue
+        org_code = _catalog_org_for_workflow(
+            catalog,
+            workflow_id,
+            item.get("orgCode") or item.get("org_code") or "",
+        )
+        if not org_code:
+            logger.warning(
+                "Skipping workflow grant for AE user %s workflow_id=%s because org_code is ambiguous or missing",
+                ae_user_id,
+                workflow_id,
+            )
+            continue
+        match_rows.append(
+            {
+                "workflow_id": workflow_id,
+                "org_code": org_code,
+                "permission": _permission_from_value(
+                    item.get("permission")
+                    or item.get("computedPermission")
+                    or item.get("access")
+                ),
+                "ae_user_id": ae_user_id,
+                "ae_username": ae_username,
+            }
+        )
+
+    if match_rows:
+        return match_rows
+
+    try:
+        raw_permissions = ae_client.get(f"/user/{ae_user_id}/all/permissions")
+    except Exception as exc:
+        logger.warning(
+            "permissions fallback failed for AE user %s: %s",
+            ae_user_id,
+            exc,
+        )
+        raw_permissions = []
+
+    for block in _safe_list(raw_permissions):
+        block_type = _normalize(block.get("type"))
+        if block_type and block_type != "workflow":
+            continue
+        permissions = block.get("permissions") if isinstance(block.get("permissions"), list) else []
+        for permission in permissions:
+            if not isinstance(permission, dict):
+                continue
+            workflow_id = str(
+                permission.get("workflowId")
+                or permission.get("workflow_id")
+                or permission.get("id")
+                or ""
+            ).strip()
+            if not workflow_id:
+                continue
+            org_code = _catalog_org_for_workflow(
+                catalog,
+                workflow_id,
+                permission.get("orgCode") or permission.get("org_code") or "",
+            )
+            if not org_code:
+                logger.warning(
+                    "Skipping permission grant for AE user %s workflow_id=%s because org_code is ambiguous or missing",
+                    ae_user_id,
+                    workflow_id,
+                )
+                continue
+            match_rows.append(
+                {
+                    "workflow_id": workflow_id,
+                    "org_code": org_code,
+                    "permission": _permission_from_value(permission.get("permission") or "execute"),
+                    "ae_user_id": ae_user_id,
+                    "ae_username": ae_username,
+                }
+            )
+
+    return match_rows
+
+
+def _update_user_registry_link(
+    conn,
+    *,
+    user_id: str,
+    user_name: str,
+    user_email: str,
+    ae_user_id: int | None,
+    ae_username: str,
+    ae_is_admin: bool,
+    dry_run: bool,
+) -> None:
     if dry_run:
-        logger.info("[DRY RUN] Would upsert %d rows", len(rows))
-        return len(rows)
-
-    sql = """
-        INSERT INTO user_workflow_access
-            (user_id, teams_id, workflow_id, org_code, permission,
-             ae_user_id, ae_username, match_confidence, synced_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-        ON CONFLICT (user_id, workflow_id, org_code)
-        DO UPDATE SET
-            teams_id = EXCLUDED.teams_id,
-            permission = EXCLUDED.permission,
-            ae_user_id = EXCLUDED.ae_user_id,
-            ae_username = EXCLUDED.ae_username,
-            match_confidence = EXCLUDED.match_confidence,
-            synced_at = NOW()
-    """
-    count = 0
+        return
     with conn.cursor() as cur:
-        for row in rows:
-            cur.execute(sql, (
-                row["user_id"],
-                row.get("teams_id", ""),
-                row["workflow_id"],
-                row.get("org_code", ""),
-                row.get("permission", "execute"),
-                row.get("ae_user_id"),
-                row.get("ae_username", ""),
-                row.get("match_confidence", 0.0),
-            ))
-            count += 1
+        cur.execute(
+            """
+            INSERT INTO user_registry
+                (user_id, user_role, user_name, user_email, ae_user_id, ae_username, ae_is_admin, updated_at)
+            VALUES (%s, 'technical', %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                user_name = COALESCE(NULLIF(EXCLUDED.user_name, ''), user_registry.user_name),
+                user_email = COALESCE(NULLIF(EXCLUDED.user_email, ''), user_registry.user_email),
+                ae_user_id = EXCLUDED.ae_user_id,
+                ae_username = EXCLUDED.ae_username,
+                ae_is_admin = EXCLUDED.ae_is_admin,
+                updated_at = NOW()
+            """,
+            (
+                user_id,
+                str(user_name or "").strip(),
+                str(user_email or "").strip(),
+                ae_user_id,
+                ae_username or None,
+                ae_is_admin,
+            ),
+        )
+
+
+def _reconcile_access_rows(
+    conn,
+    *,
+    user_id: str,
+    teams_id: str,
+    match_confidence: float,
+    match_method: str,
+    access_rows: list[dict[str, Any]],
+    dry_run: bool,
+) -> tuple[int, int]:
+    desired_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in access_rows:
+        key = (
+            str(row.get("workflow_id") or "").strip(),
+            str(row.get("org_code") or "").strip(),
+        )
+        if not key[0] or not key[1]:
+            continue
+        desired_rows[key] = {
+            "user_id": user_id,
+            "teams_id": teams_id,
+            "workflow_id": key[0],
+            "org_code": key[1],
+            "permission": str(row.get("permission") or "execute").strip() or "execute",
+            "ae_user_id": row.get("ae_user_id"),
+            "ae_username": str(row.get("ae_username") or "").strip(),
+            "match_confidence": match_confidence,
+            "match_method": match_method or "unknown",
+        }
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT workflow_id, org_code
+            FROM user_workflow_access
+            WHERE user_id = %s
+            """,
+            (user_id,),
+        )
+        existing_keys = {
+            (str(row[0]).strip(), str(row[1] or "").strip())
+            for row in cur.fetchall()
+            if row and row[0]
+        }
+
+    desired_keys = set(desired_rows)
+    stale_keys = existing_keys - desired_keys
+
+    if not dry_run:
+        with conn.cursor() as cur:
+            for row in desired_rows.values():
+                cur.execute(
+                    """
+                    INSERT INTO user_workflow_access
+                        (user_id, teams_id, workflow_id, org_code, permission,
+                         ae_user_id, ae_username, match_confidence, match_method,
+                         synced_at, last_seen_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (user_id, workflow_id, org_code)
+                    DO UPDATE SET
+                        teams_id = EXCLUDED.teams_id,
+                        permission = EXCLUDED.permission,
+                        ae_user_id = EXCLUDED.ae_user_id,
+                        ae_username = EXCLUDED.ae_username,
+                        match_confidence = EXCLUDED.match_confidence,
+                        match_method = EXCLUDED.match_method,
+                        synced_at = NOW(),
+                        last_seen_at = NOW()
+                    """,
+                    (
+                        row["user_id"],
+                        row["teams_id"],
+                        row["workflow_id"],
+                        row["org_code"],
+                        row["permission"],
+                        row["ae_user_id"],
+                        row["ae_username"],
+                        row["match_confidence"],
+                        row["match_method"],
+                    ),
+                )
+            for workflow_id, org_code in stale_keys:
+                cur.execute(
+                    """
+                    DELETE FROM user_workflow_access
+                    WHERE user_id = %s AND workflow_id = %s AND org_code = %s
+                    """,
+                    (user_id, workflow_id, org_code),
+                )
         conn.commit()
-    return count
 
-
-# ── Core sync logic ──
-
-MIN_MATCH_CONFIDENCE = 0.7  # Skip matches below this threshold
+    return (len(desired_rows), len(stale_keys))
 
 
 def sync_single_user(
-    teams_user: dict,
+    teams_user: dict[str, Any],
     ae_users: list[dict],
     ae_client: Any,
-    workflow_catalog_ids: dict[str, str],
+    workflow_catalog: dict[str, Any],
     *,
     dry_run: bool = False,
     conn=None,
-) -> dict:
-    """Sync workflow access for a single Teams user."""
-    user_id = teams_user["user_id"]
-    user_name = teams_user.get("user_name", "")
-    teams_id = _extract_teams_id(teams_user.get("metadata"))
-
-    # Find best matching AE user
-    best_match = None
-    best_score = 0.0
-    for ae_user in ae_users:
-        score = _score_user_match(ae_user, user_name)
-        if score > best_score:
-            best_score = score
-            best_match = ae_user
+) -> dict[str, Any]:
+    identity = _extract_teams_identity(teams_user)
+    match = _resolve_match(teams_user, ae_users)
+    ae_user = match.get("ae_user") if isinstance(match.get("ae_user"), dict) else None
 
     result = {
-        "user_id": user_id,
-        "user_name": user_name,
-        "teams_id": teams_id,
+        "user_id": identity["user_id"],
+        "user_name": identity["user_name"],
+        "user_email": identity["user_email"],
+        "teams_id": identity["teams_id"],
         "match_found": False,
-        "match_confidence": best_score,
+        "match_confidence": float(match.get("confidence") or 0.0),
+        "match_method": str(match.get("method") or "unknown"),
         "ae_username": "",
         "ae_user_id": None,
         "is_admin": False,
         "grants_upserted": 0,
-        "skipped_reason": "",
+        "grants_removed": 0,
+        "skipped_reason": str(match.get("status") or ""),
     }
 
-    if not best_match or best_score < MIN_MATCH_CONFIDENCE:
-        result["skipped_reason"] = (
-            f"No AE user match (best score: {best_score:.2f}, "
-            f"threshold: {MIN_MATCH_CONFIDENCE})"
-        )
+    if not ae_user:
+        if conn:
+            _update_user_registry_link(
+                conn,
+                user_id=identity["user_id"],
+                user_name=identity["user_name"],
+                user_email=identity["user_email"],
+                ae_user_id=None,
+                ae_username="",
+                ae_is_admin=False,
+                dry_run=dry_run,
+            )
+            _, removed = _reconcile_access_rows(
+                conn,
+                user_id=identity["user_id"],
+                teams_id=identity["teams_id"],
+                match_confidence=float(match.get("confidence") or 0.0),
+                match_method=str(match.get("method") or "unknown"),
+                access_rows=[],
+                dry_run=dry_run,
+            )
+            result["grants_removed"] = removed
         logger.warning(
-            "SKIP user '%s' (%s): %s",
-            user_name, user_id, result["skipped_reason"],
+            "Skipping user_id=%s user_name=%r due to %s",
+            identity["user_id"],
+            identity["user_name"],
+            result["skipped_reason"],
         )
         return result
 
-    ae_user_id = int(best_match.get("id", 0))
-    ae_username = str(best_match.get("userName") or _full_name(best_match))
-    is_admin = _is_admin_user(best_match)
+    ae_user_id = int(ae_user.get("id", 0))
+    ae_username = str(ae_user.get("userName") or "").strip()
+    ae_is_admin = _is_admin_user(ae_user)
 
-    result["match_found"] = True
-    result["ae_username"] = ae_username
-    result["ae_user_id"] = ae_user_id
-    result["is_admin"] = is_admin
-
-    logger.info(
-        "MATCH user '%s' → AE '%s' (id=%d, score=%.2f, admin=%s)",
-        user_name, ae_username, ae_user_id, best_score, is_admin,
+    result.update(
+        {
+            "match_found": True,
+            "ae_username": ae_username,
+            "ae_user_id": ae_user_id,
+            "is_admin": ae_is_admin,
+            "skipped_reason": "",
+        }
     )
 
-    # Build access rows
-    access_rows: list[dict] = []
-
-    if is_admin:
-        # Admin users get access to ALL workflows
-        for key, wf_name in workflow_catalog_ids.items():
-            wf_id, org = key.split(":", 1) if ":" in key else (key, "")
-            access_rows.append({
-                "user_id": user_id,
-                "teams_id": teams_id,
-                "workflow_id": wf_id,
-                "org_code": org,
+    access_rows: list[dict[str, Any]]
+    if ae_is_admin:
+        access_rows = [
+            {
+                "workflow_id": row["workflow_id"],
+                "org_code": row["org_code"],
                 "permission": "admin",
                 "ae_user_id": ae_user_id,
                 "ae_username": ae_username,
-                "match_confidence": best_score,
-            })
+            }
+            for row in workflow_catalog["all"]
+        ]
     else:
-        # Fetch user's specific workflow grants from AE
         try:
-            assigned_workflows = ae_client.get_user_workflows(str(ae_user_id))
-            items = _extract_list(assigned_workflows) if not isinstance(assigned_workflows, list) else assigned_workflows
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                wf_id = item.get("id") or item.get("workflowId") or item.get("workflow_id")
-                if wf_id is None:
-                    continue
-                wf_id_str = str(wf_id).strip()
-                permission_raw = str(
-                    item.get("permission")
-                    or item.get("computedPermission")
-                    or item.get("access")
-                    or "execute"
-                ).strip().lower()
-                # Map AE permission to our permission model
-                if "w" in permission_raw or "x" in permission_raw or "execute" in permission_raw:
-                    permission = "execute"
-                elif "r" in permission_raw or "read" in permission_raw:
-                    permission = "read"
-                else:
-                    permission = "execute"
-
-                access_rows.append({
-                    "user_id": user_id,
-                    "teams_id": teams_id,
-                    "workflow_id": wf_id_str,
-                    "org_code": "",
-                    "permission": permission,
-                    "ae_user_id": ae_user_id,
-                    "ae_username": ae_username,
-                    "match_confidence": best_score,
-                })
+            access_rows = _fetch_grants_for_user(ae_client, ae_user, workflow_catalog)
         except Exception as exc:
             logger.warning(
-                "Failed to fetch workflow grants for AE user %d: %s",
-                ae_user_id, exc,
+                "grant fetch failed for matched AE user %s (%s); preserving AE identity link with zero grants",
+                ae_user_id,
+                exc,
             )
+            access_rows = []
 
-        # Also try the permissions API
-        if not access_rows:
-            try:
-                perms_raw = ae_client.get(
-                    f"/user/{ae_user_id}/all/permissions"
-                )
-                for block in _extract_list(perms_raw):
-                    block_type = str(block.get("type") or "").strip().lower()
-                    if block_type != "workflow":
-                        continue
-                    for perm in block.get("permissions") or []:
-                        if not isinstance(perm, dict):
-                            continue
-                        wf_id = perm.get("id")
-                        if wf_id is None:
-                            continue
-                        access_rows.append({
-                            "user_id": user_id,
-                            "teams_id": teams_id,
-                            "workflow_id": str(wf_id),
-                            "org_code": "",
-                            "permission": "execute",
-                            "ae_user_id": ae_user_id,
-                            "ae_username": ae_username,
-                            "match_confidence": best_score,
-                        })
-            except Exception as exc:
-                logger.warning(
-                    "Failed to fetch permissions for AE user %d: %s",
-                    ae_user_id, exc,
-                )
-
-    if conn and access_rows:
-        result["grants_upserted"] = _upsert_access(conn, access_rows, dry_run=dry_run)
+    if conn:
+        _update_user_registry_link(
+            conn,
+            user_id=identity["user_id"],
+            user_name=identity["user_name"],
+            user_email=identity["user_email"],
+            ae_user_id=ae_user_id,
+            ae_username=ae_username,
+            ae_is_admin=ae_is_admin,
+            dry_run=dry_run,
+        )
+        upserted, removed = _reconcile_access_rows(
+            conn,
+            user_id=identity["user_id"],
+            teams_id=identity["teams_id"],
+            match_confidence=float(match.get("confidence") or 0.0),
+            match_method=str(match.get("method") or "unknown"),
+            access_rows=access_rows,
+            dry_run=dry_run,
+        )
+        result["grants_upserted"] = upserted
+        result["grants_removed"] = removed
     else:
         result["grants_upserted"] = len(access_rows)
 
     return result
 
 
-def sync_all_users(*, dry_run: bool = False, user_filter: str = "") -> dict:
-    """
-    Main sync function. Called by CLI and scheduler.
-    Returns summary dict with users_synced, grants_upserted, etc.
-    """
+def sync_all_users(*, dry_run: bool = False, user_filter: str = "", user_id: str = "") -> dict[str, Any]:
     from config.db import get_conn
     from mcp_server.ae_client import get_ae_client
 
-    ae_client = get_ae_client()
-
-    # 1. Fetch Teams users from user_registry
-    with get_conn() as conn:
-        teams_users = _get_teams_users(conn)
-        workflow_catalog_ids = _get_all_workflow_ids(conn)
-
-    if user_filter:
-        teams_users = [
-            u for u in teams_users
-            if _normalize(user_filter) in _normalize(u.get("user_name", ""))
-        ]
-
-    logger.info(
-        "Sync starting: %d Teams users, %d workflows in catalog",
-        len(teams_users), len(workflow_catalog_ids),
-    )
-
-    if not teams_users:
-        logger.warning("No Teams users found in user_registry")
-        return {"users_synced": 0, "grants_upserted": 0, "errors": 0}
-
-    # 2. Fetch all AE users
-    try:
-        raw = ae_client.post(
-            "/users",
-            params={"admin": "false", "offset": 0, "size": 500, "order": "desc"},
-            json_body={},
-        )
-        if isinstance(raw, dict) and isinstance(raw.get("data"), list):
-            ae_users = [item for item in raw["data"] if isinstance(item, dict)]
-        else:
-            ae_users = _extract_list(raw)
-    except Exception as exc:
-        logger.error("Failed to fetch AE users: %s", exc)
-        return {"users_synced": 0, "grants_upserted": 0, "errors": 1, "error": str(exc)}
-
-    logger.info("Fetched %d AE users for matching", len(ae_users))
-
-    # 3. Sync each Teams user
     summary = {
         "users_synced": 0,
         "users_skipped": 0,
         "grants_upserted": 0,
+        "grants_removed": 0,
         "errors": 0,
         "details": [],
     }
+
+    ae_client = get_ae_client()
+    with get_conn() as conn:
+        teams_users = _get_teams_users(conn, user_filter=user_filter, user_id=user_id)
+        workflow_catalog = _build_catalog(conn)
+
+    if not teams_users:
+        logger.warning("No Teams users found for workflow access sync")
+        return summary
+
+    ae_users = _fetch_ae_users(ae_client)
+    logger.info(
+        "Starting workflow access sync for %d Teams users against %d AE users",
+        len(teams_users),
+        len(ae_users),
+    )
 
     with get_conn() as conn:
         for teams_user in teams_users:
             try:
                 result = sync_single_user(
-                    teams_user, ae_users, ae_client, workflow_catalog_ids,
-                    dry_run=dry_run, conn=conn,
+                    teams_user,
+                    ae_users,
+                    ae_client,
+                    workflow_catalog,
+                    dry_run=dry_run,
+                    conn=conn,
                 )
+                summary["details"].append(result)
+                summary["grants_upserted"] += int(result.get("grants_upserted", 0) or 0)
+                summary["grants_removed"] += int(result.get("grants_removed", 0) or 0)
                 if result.get("match_found"):
                     summary["users_synced"] += 1
-                    summary["grants_upserted"] += result.get("grants_upserted", 0)
                 else:
                     summary["users_skipped"] += 1
-                summary["details"].append(result)
             except Exception as exc:
-                logger.error(
-                    "Error syncing user '%s': %s",
-                    teams_user.get("user_name", "?"), exc,
-                )
+                logger.error("Error syncing user_id=%s: %s", teams_user.get("user_id"), exc)
                 summary["errors"] += 1
 
     logger.info(
-        "Sync complete: %d users synced, %d skipped, %d grants, %d errors",
-        summary["users_synced"], summary["users_skipped"],
-        summary["grants_upserted"], summary["errors"],
+        "Workflow access sync complete: users_synced=%d users_skipped=%d grants_upserted=%d grants_removed=%d errors=%d",
+        summary["users_synced"],
+        summary["users_skipped"],
+        summary["grants_upserted"],
+        summary["grants_removed"],
+        summary["errors"],
     )
     return summary
 
 
-def sync_user_by_id(user_id: str, user_name: str, *, conn=None) -> dict:
-    """
-    Lightweight sync for a single user by their user_id.
-    Called from conversation_state on first interaction.
-    """
+def sync_user_by_id(
+    user_id: str,
+    user_name: str = "",
+    user_email: str = "",
+    *,
+    conn=None,
+) -> dict[str, Any]:
     from config.db import get_conn
     from mcp_server.ae_client import get_ae_client
 
-    ae_client = get_ae_client()
-    own_conn = conn is None
-    if own_conn:
-        conn = get_conn().__enter__()
+    own_context = conn is None
+    if own_context:
+        conn_manager = get_conn()
+        conn = conn_manager.__enter__()
+    else:
+        conn_manager = None
 
     try:
-        workflow_catalog_ids = _get_all_workflow_ids(conn)
+        teams_users = _get_teams_users(conn, user_id=user_id)
+        if not teams_users:
+            fallback_email = str(user_email or "").strip()
+            fallback_name = str(user_name or "").strip()
+            if not fallback_email and "@" in fallback_name:
+                fallback_email = fallback_name
+            teams_users = [{
+                "user_id": user_id,
+                "user_name": fallback_name,
+                "user_email": fallback_email,
+                "metadata": {},
+            }]
 
-        # Fetch AE users
-        try:
-            raw = ae_client.post(
-                "/users",
-                params={"admin": "false", "offset": 0, "size": 500, "order": "desc"},
-                json_body={},
-            )
-            if isinstance(raw, dict) and isinstance(raw.get("data"), list):
-                ae_users = [item for item in raw["data"] if isinstance(item, dict)]
-            else:
-                ae_users = _extract_list(raw)
-        except Exception as exc:
-            logger.warning("sync_user_by_id: cannot fetch AE users: %s", exc)
-            return {"match_found": False, "error": str(exc)}
-
-        # Get user metadata from registry for teams_id
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT metadata FROM user_registry WHERE user_id = %s",
-                (user_id,),
-            )
-            row = cur.fetchone()
-            metadata = row[0] if row else {}
-
-        teams_user = {
-            "user_id": user_id,
-            "user_name": user_name,
-            "metadata": metadata or {},
-        }
+        workflow_catalog = _build_catalog(conn)
+        ae_client = get_ae_client()
+        ae_users = _fetch_ae_users(ae_client)
         return sync_single_user(
-            teams_user, ae_users, ae_client, workflow_catalog_ids,
+            teams_users[0],
+            ae_users,
+            ae_client,
+            workflow_catalog,
+            dry_run=False,
             conn=conn,
         )
     except Exception as exc:
-        logger.error("sync_user_by_id failed for %s: %s", user_id, exc)
+        logger.error("sync_user_by_id failed for user_id=%s: %s", user_id, exc)
         return {"match_found": False, "error": str(exc)}
     finally:
-        if own_conn:
-            try:
-                conn.__exit__(None, None, None)
-            except Exception:
-                pass
+        if conn_manager is not None:
+            conn_manager.__exit__(None, None, None)
 
-
-# ── CLI ──
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -502,27 +825,28 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="Sync user workflow access from AE")
-    parser.add_argument("--user", help="Filter by user name (partial match)")
+    parser = argparse.ArgumentParser(description="Sync user workflow access from AutomationEdge")
+    parser.add_argument("--user", help="Filter by exact user_name (case-sensitive)")
+    parser.add_argument("--user-id", help="Sync a single user_id")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing to DB")
     args = parser.parse_args()
 
-    import json
-    result = sync_all_users(dry_run=args.dry_run, user_filter=args.user or "")
-    # Print summary without details for brevity
-    summary = {k: v for k, v in result.items() if k != "details"}
-    print(f"\n{'='*60}")
-    print(f"  Sync Summary")
-    print(f"{'='*60}")
-    print(json.dumps(summary, indent=2, default=str))
+    result = sync_all_users(
+        dry_run=args.dry_run,
+        user_filter=args.user or "",
+        user_id=args.user_id or "",
+    )
 
+    import json
+
+    summary = {key: value for key, value in result.items() if key != "details"}
+    print(json.dumps(summary, indent=2, default=str))
     if result.get("details"):
-        print(f"\n  Details ({len(result['details'])} users):")
-        for d in result["details"]:
-            status = "✓" if d.get("match_found") else "✗"
+        print("\nDetails:")
+        for detail in result["details"]:
+            status = "matched" if detail.get("match_found") else f"skipped:{detail.get('skipped_reason', 'unknown')}"
             print(
-                f"    {status} {d.get('user_name', '?'):30s} → "
-                f"AE:{d.get('ae_username', 'N/A'):20s} "
-                f"score={d.get('match_confidence', 0):.2f} "
-                f"grants={d.get('grants_upserted', 0)}"
+                f"  - user_id={detail.get('user_id')} status={status} "
+                f"method={detail.get('match_method')} confidence={detail.get('match_confidence', 0):.2f} "
+                f"grants_upserted={detail.get('grants_upserted', 0)} grants_removed={detail.get('grants_removed', 0)}"
             )

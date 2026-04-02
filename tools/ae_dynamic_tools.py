@@ -145,6 +145,8 @@ def _infer_tier(default_tier: str, config_block: dict) -> str:
 class DynamicToolMapping:
     tool_name: str
     workflow_name: str
+    workflow_id: str
+    org_code: str
     description: str
     category: str
     tier: str
@@ -169,6 +171,8 @@ class DynamicToolMapping:
                 "source": "automationedge",
                 "dynamic": True,
                 "workflow_name": self.workflow_name,
+                "workflow_id": self.workflow_id,
+                "org_code": self.org_code,
                 "active": self.active,
                 "tags": self.tags,
                 "parameter_meta": self.parameter_meta,
@@ -228,6 +232,21 @@ def extract_dynamic_tool_mapping(
     ).strip()
     if not workflow_name:
         workflow_name = tool_name
+
+    workflow_id = str(
+        workflow_summary.get("workflowId")
+        or workflow_summary.get("id")
+        or details.get("workflowId")
+        or details.get("id")
+        or ""
+    ).strip()
+    org_code = str(
+        workflow_summary.get("orgCode")
+        or workflow_summary.get("org_code")
+        or details.get("orgCode")
+        or details.get("org_code")
+        or ""
+    ).strip()
 
     category = str(
         _get_first_value(cfg, ("category", "group"), "automationedge")
@@ -351,6 +370,8 @@ def extract_dynamic_tool_mapping(
     return DynamicToolMapping(
         tool_name=tool_name,
         workflow_name=workflow_name,
+        workflow_id=workflow_id,
+        org_code=org_code,
         description=description,
         category=category,
         tier=_infer_tier(default_tier, cfg),

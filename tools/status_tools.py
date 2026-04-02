@@ -5,13 +5,93 @@ Status & health monitoring tools.
 import logging
 from datetime import datetime, timedelta, timezone
 
+from security.workflow_access import (
+    can_execute_workflow,
+    can_view_workflow,
+    default_org_code,
+    is_execute_enforced,
+    is_read_enforced,
+)
 from tools.base import ToolDefinition, get_ae_client
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.tools.status")
 
 
-def check_workflow_status(workflow_name: str = "", status: str = "") -> dict:
+def _workflow_access_denied_message(workflow_name: str = "") -> str:
+    target = f"workflow '{workflow_name}'" if workflow_name else "workflow"
+    return f"You are not authorized to access {target}, or it is not available in your scope."
+
+
+def _is_visible_workflow_record(client, record: dict, user_id: str, org_code: str) -> bool:
+    if not user_id:
+        return False
+    wf_id = (
+        record.get("workflowId")
+        or record.get("workflow_id")
+        or (record.get("workflowConfiguration") or {}).get("id")
+    )
+    wf_name = (
+        record.get("workflowName")
+        or record.get("workflow_name")
+        or (record.get("workflowConfiguration") or {}).get("name")
+    )
+    resolved_org = str(
+        record.get("orgCode")
+        or record.get("org_code")
+        or org_code
+        or default_org_code()
+    ).strip()
+    if not wf_id and wf_name:
+        getter = getattr(client, "get_cached_workflow_id", None)
+        if callable(getter):
+            try:
+                wf_id = getter(str(wf_name), user_id=user_id, org_code=resolved_org)
+            except TypeError:
+                wf_id = getter(str(wf_name))
+    return bool(wf_id and can_view_workflow(user_id, str(wf_id), resolved_org))
+
+
+def _resolve_cached_workflow_name_for_user(client, workflow_name: str, user_id: str = "", org_code: str = "") -> str:
+    if is_read_enforced() and not str(user_id or "").strip():
+        return ""
+    resolver = getattr(client, "resolve_cached_workflow_name", None)
+    if not callable(resolver):
+        return str(workflow_name or "").strip()
+    try:
+        return resolver(workflow_name, user_id=user_id, org_code=org_code)
+    except TypeError:
+        return resolver(workflow_name)
+
+
+def _resolve_workflow_via_rag_for_user(client, query: str, user_id: str = "", org_code: str = "") -> str:
+    if is_read_enforced() and not str(user_id or "").strip():
+        return ""
+    resolver = getattr(client, "resolve_workflow_via_rag", None)
+    if not callable(resolver):
+        return ""
+    try:
+        return resolver(query, user_id=user_id, org_code=org_code)
+    except TypeError:
+        return resolver(query)
+
+
+def _get_workflow_instances_compat(client, workflow_name: str, limit: int, status_filter: str | None = None):
+    getter = getattr(client, "get_workflow_instances")
+    try:
+        if status_filter:
+            return getter(workflow_name, limit=limit, status_filter=status_filter)
+        return getter(workflow_name, limit=limit)
+    except TypeError:
+        return getter(workflow_name, limit)
+
+
+def check_workflow_status(
+    workflow_name: str = "",
+    status: str = "",
+    user_id: str = "",
+    org_code: str = "",
+) -> dict:
     """Check the status of bots/workflows, including a 24h summary and filtering.
     
     If workflow_name is provided, checks that specific bot using semantic resolution if needed.
@@ -25,8 +105,18 @@ def check_workflow_status(workflow_name: str = "", status: str = "") -> dict:
     if query_name.isdigit() and len(query_name) > 4:  # Likely a request ID, not a short workflow ID
         try:
             instance = client.get_workflow_instance_by_id(query_name)
-            if instance:
+            if instance and (
+                not user_id
+                or not is_read_enforced()
+                or _is_visible_workflow_record(client, instance, user_id, org_code)
+            ):
                 return _format_single_instance_response(instance)
+            if instance and (user_id or is_read_enforced()):
+                return {
+                    "workflow_name": query_name,
+                    "status": "UNAUTHORIZED",
+                    "message": _workflow_access_denied_message(),
+                }
         except Exception as exc:
             logger.warning(f"Direct request ID lookup failed for {query_name}: {exc}")
 
@@ -34,22 +124,45 @@ def check_workflow_status(workflow_name: str = "", status: str = "") -> dict:
     resolved_name = ""
     if query_name:
         # Try local cache first (exact/WF_ prefix variants)
-        resolved_name = client.resolve_cached_workflow_name(query_name)
+        resolved_name = _resolve_cached_workflow_name_for_user(
+            client,
+            query_name,
+            user_id=user_id,
+            org_code=org_code,
+        )
         
         # If not found, try RAG/Semantic resolution for fuzzy/partial names
         if not resolved_name:
             logger.info(f"Fuzzy match not found for '{query_name}', trying RAG resolution...")
-            resolved_name = client.resolve_workflow_via_rag(query_name)
+            resolved_name = _resolve_workflow_via_rag_for_user(
+                client,
+                query_name,
+                user_id=user_id,
+                org_code=org_code,
+            )
+
+        if (user_id or is_read_enforced()) and not resolved_name:
+            return {
+                "workflow_name": query_name,
+                "status": "UNAUTHORIZED",
+                "message": _workflow_access_denied_message(query_name),
+            }
             
     name_to_check = resolved_name or query_name
     
     try:
         # Increase limit to 300 to find older executions
-        instances = client.get_workflow_instances(
-            name_to_check, 
+        instances = _get_workflow_instances_compat(
+            client,
+            name_to_check,
             limit=300,
-            status_filter=status_filter if status_filter else None
+            status_filter=status_filter if status_filter else None,
         )
+        if user_id or is_read_enforced():
+            instances = [
+                item for item in instances
+                if isinstance(item, dict) and _is_visible_workflow_record(client, item, user_id, org_code)
+            ]
     except Exception as exc:
         msg = f"Failed to fetch status for '{name_to_check or 'All Bots'}': {exc}"
         logger.warning(msg)
@@ -210,6 +323,8 @@ def list_recent_failures(
     hours: int = 24,
     limit: int = 300,  # Increased default for deep search
     workflow_name: str = "",
+    user_id: str = "",
+    org_code: str = "",
 ) -> dict:
     client = get_ae_client()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(hours, 1))
@@ -218,23 +333,44 @@ def list_recent_failures(
     # 1. Resolve technical name if query_name provided
     resolved_name = ""
     if query_name:
-        resolved_name = client.resolve_cached_workflow_name(query_name)
+        resolved_name = _resolve_cached_workflow_name_for_user(
+            client,
+            query_name,
+            user_id=user_id,
+            org_code=org_code,
+        )
         if not resolved_name:
             logger.info(f"Fuzzy match not found for '{query_name}' in failures check, trying RAG...")
-            resolved_name = client.resolve_workflow_via_rag(query_name)
+            resolved_name = _resolve_workflow_via_rag_for_user(
+                client,
+                query_name,
+                user_id=user_id,
+                org_code=org_code,
+            )
+        if (user_id or is_read_enforced()) and not resolved_name:
+            return {
+                "failures": [],
+                "total_count": 0,
+                "time_window_hours": hours,
+                "warning": _workflow_access_denied_message(query_name),
+            }
             
     name_to_check = resolved_name or query_name
     data = []
     last_error = ""
+    used_recent_endpoint = False
+    skip_cutoff_filter = False
 
     if name_to_check:
         try:
             # Benefiting from the new paging logic in AutomationEdgeClient
-            data = client.get_workflow_instances(
+            data = _get_workflow_instances_compat(
+                client,
                 name_to_check,
-                limit=limit,
-                status_filter="Failure"
+                limit=max(limit, 20),
+                status_filter="Failure",
             )
+            skip_cutoff_filter = True
             last_error = ""
         except Exception as exc:
             last_error = str(exc)
@@ -253,6 +389,7 @@ def list_recent_failures(
                     data = resp.get("failures") or resp.get("executions") or resp.get("data") or []
                 elif isinstance(resp, list):
                     data = resp
+                used_recent_endpoint = True
                 last_error = ""
             except Exception as exc:
                 last_error = str(exc)
@@ -261,10 +398,11 @@ def list_recent_failures(
         if not data:
             try:
                 # get_workflow_instances("") handles global listing with paging
-                data = client.get_workflow_instances(
-                    workflow_name="",
+                data = _get_workflow_instances_compat(
+                    client,
+                    "",
                     limit=limit,
-                    status_filter="Failure"
+                    status_filter="Failure",
                 )
                 last_error = ""
             except Exception as exc:
@@ -273,6 +411,12 @@ def list_recent_failures(
 
     if not isinstance(data, list):
         data = []
+
+    if user_id or is_read_enforced():
+        data = [
+            item for item in data
+            if isinstance(item, dict) and _is_visible_workflow_record(client, item, user_id, org_code)
+        ]
 
     failures = []
     for item in data:
@@ -289,7 +433,7 @@ def list_recent_failures(
             or item.get("started_at")
             or item.get("completed_at")
         )
-        if ts and ts < cutoff:
+        if ts and ts < cutoff and not used_recent_endpoint and not skip_cutoff_filter:
             continue
 
         failures.append(
@@ -480,6 +624,8 @@ def t4_execute_and_poll(
     params: dict = None,
     poll_interval_sec: int = 5,
     max_poll_attempts: int = 60,
+    user_id: str = "",
+    org_code: str = "",
 ) -> dict:
     """T4 Execution Agent — execute a workflow and poll until complete.
 
@@ -488,7 +634,32 @@ def t4_execute_and_poll(
     """
     client = get_ae_client()
     # Resolve the name first for accurate schema lookup
-    resolved_name = client.resolve_cached_workflow_name(workflow_name) or workflow_name
+    resolved_name = _resolve_cached_workflow_name_for_user(
+        client,
+        workflow_name,
+        user_id=user_id,
+        org_code=org_code,
+    ) or workflow_name
+    resolved_org = str(org_code or default_org_code()).strip()
+    resolved_workflow_id = workflow_id
+    if not resolved_workflow_id:
+        getter = getattr(client, "get_cached_workflow_id", None)
+        if callable(getter):
+            try:
+                resolved_workflow_id = getter(
+                    resolved_name,
+                    user_id=user_id,
+                    org_code=resolved_org,
+                )
+            except TypeError:
+                resolved_workflow_id = getter(resolved_name)
+
+    if bool(user_id) or is_execute_enforced():
+        if not user_id or not resolved_workflow_id or not can_execute_workflow(user_id, resolved_workflow_id, resolved_org):
+            return {
+                "success": False,
+                "error": _workflow_access_denied_message(resolved_name or workflow_name),
+            }
     
     # AE-77: Check for "File" type parameters. File upload is not supported in agentic chat yet.
     schema = client.get_cached_workflow_parameters(resolved_name)
@@ -535,8 +706,10 @@ def t4_execute_and_poll(
     try:
         execute_resp = client.execute_workflow(
             workflow_name=resolved_name,
-            workflow_id=workflow_id,
+            workflow_id=resolved_workflow_id,
             params=params,
+            org_code=resolved_org,
+            user_id=user_id,
             source="ae-agentic-support-status-check"
         )
     except Exception as exc:
@@ -601,13 +774,23 @@ def t4_execute_and_poll(
     }
 
 
-def get_execution_status(execution_id: str) -> dict:
+def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "") -> dict:
     """Get status of a specific workflow execution by ID.
     
     Use this when you have a numeric request_id or execution_id.
     Returns status, bot name, agent, timings, and any error message.
     """
-    resp = get_ae_client().get_execution_status(execution_id)
+    client = get_ae_client()
+    resp = client.get_execution_status(execution_id)
+    if (user_id or is_read_enforced()) and (
+        not isinstance(resp, dict) or not _is_visible_workflow_record(client, resp, user_id, org_code)
+    ):
+        return {
+            "execution_id": execution_id,
+            "status": "UNAUTHORIZED",
+            "error_message": _workflow_access_denied_message(),
+            "message": _workflow_access_denied_message(),
+        }
     status = resp.get("status", "UNKNOWN")
     
     # Enrich the response for LLM decision making
@@ -822,12 +1005,16 @@ tool_registry.register(
 
 
 
-def list_workflows(limit: int = 100) -> dict:
+def list_workflows(limit: int = 100, user_id: str = "", org_code: str = "") -> dict:
     """List all available AutomationEdge workflows."""
     try:
-        from tools.base import get_ae_client
         client = get_ae_client()
         workflows = client.list_workflows(page_size=limit)
+        if user_id or is_read_enforced():
+            workflows = [
+                item for item in workflows
+                if isinstance(item, dict) and _is_visible_workflow_record(client, item, user_id, org_code)
+            ]
         items = []
         for w in workflows:
             items.append({

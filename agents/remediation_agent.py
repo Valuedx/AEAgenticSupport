@@ -93,11 +93,20 @@ class RemediationAgent(BaseAgent):
         # remediation actions that need independent outcome verification (e.g. restart,
         # resubmit).
         _SKIP_VERIFICATION_TOOLS = {"trigger_workflow", "t4_execute_and_poll"}
+
+        def _is_successful_remediation_tool(tool_call: dict[str, Any]) -> bool:
+            tool_name = str(tool_call.get("tool", "") or "").strip()
+            if (
+                tool_call.get("success") is not True
+                or tool_call.get("needs_user_input")
+                or tool_name in _SKIP_VERIFICATION_TOOLS
+            ):
+                return False
+            tool_def = tool_registry.get_tool(tool_name)
+            return bool(tool_def and tool_def.category == "remediation")
+
         remedial_success = any(
-            t.get("success") is True and 
-            not t.get("needs_user_input") and
-            t.get("tool", "") not in _SKIP_VERIFICATION_TOOLS and
-            tool_registry.get_tool(t.get("tool", "") or "").category == "remediation"
+            _is_successful_remediation_tool(t)
             for t in state.tool_call_log[-2:]
         )
         

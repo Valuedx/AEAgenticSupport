@@ -9,7 +9,7 @@
  CREATE TABLE custom_case (owner_type character varying(32), workflows_involved jsonb, resolved_at timestamp with time zone, case_id character varying(64), latest_plan_json jsonb, error_signatures jsonb, updated_at timestamp with time zone, created_at timestamp with time zone, plan_version integer, user_type character varying(32), planner_state_json jsonb, recurrence_count integer, thread_id character varying(256), id bigint, state character varying(64), resolution_summary text, owner_team character varying(64), ticket_id character varying(128));
  CREATE TABLE tool_execution_log (tool_name character varying(256), id bigint, agent_id character varying(128), duration_ms integer, success boolean, error_message text, result jsonb, params jsonb, created_at timestamp with time zone, conversation_id character varying(256));
  CREATE TABLE custom_approval (requested_to jsonb, case_id character varying(64), reason text, decided_at timestamp with time zone, plan_version integer, id bigint, status character varying(32), decided_by character varying(256), created_at timestamp with time zone);
- CREATE TABLE user_registry (metadata jsonb, updated_at timestamp with time zone, created_at timestamp with time zone, user_name character varying(256), user_id character varying(256), user_email character varying(256), user_role character varying(32), user_team character varying(128));
+ CREATE TABLE user_registry (metadata jsonb, updated_at timestamp with time zone, created_at timestamp with time zone, user_name character varying(256), user_id character varying(256), user_email character varying(256), user_role character varying(32), user_team character varying(128), ae_user_id integer, ae_username character varying(256), ae_is_admin boolean DEFAULT false NOT NULL);
  CREATE TABLE user_feedback (rating integer, id integer, user_id character varying(256), created_at timestamp with time zone, metadata jsonb, comments text, conversation_id character varying(256));
  CREATE TABLE chat_messages (metadata jsonb, conversation_id character varying(256), content text, id integer, role character varying(32), created_at timestamp with time zone);
  CREATE TABLE rag_documents (embedding USER-DEFINED, content text, tsv tsvector, metadata jsonb, id text, collection text, created_at timestamp with time zone);
@@ -43,8 +43,12 @@ CREATE TABLE IF NOT EXISTS user_workflow_access (
     ae_user_id        INTEGER,
     ae_username       VARCHAR(256),
     match_confidence  REAL         DEFAULT 0.0,
+    match_method      VARCHAR(32)  DEFAULT 'unknown',
     synced_at         TIMESTAMPTZ  DEFAULT NOW(),
+    last_seen_at      TIMESTAMPTZ  DEFAULT NOW(),
     CONSTRAINT uq_user_workflow UNIQUE (user_id, workflow_id, org_code)
 );
 CREATE INDEX IF NOT EXISTS idx_uwa_user ON user_workflow_access(user_id);
 CREATE INDEX IF NOT EXISTS idx_uwa_workflow ON user_workflow_access(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_uwa_user_org ON user_workflow_access(user_id, org_code);
+CREATE INDEX IF NOT EXISTS idx_uwa_user_wf_org ON user_workflow_access(user_id, workflow_id, org_code);

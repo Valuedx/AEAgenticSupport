@@ -310,6 +310,8 @@ class ToolRegistry:
             metadata={
                 "source": metadata.get("source", "automationedge"),
                 "workflow_name": workflow_name,
+                "workflow_id": metadata.get("workflow_id", ""),
+                "org_code": metadata.get("org_code", ""),
                 "tags": list(metadata.get("tags", []) or []),
             },
             use_when=str(metadata.get("use_when", "") or ""),
@@ -549,6 +551,8 @@ class ToolRegistry:
             "name": tool_def.name,
             "title": md.get("title", ""),
             "workflow_name": md.get("workflow_name", ""),
+            "workflow_id": md.get("workflow_id", ""),
+            "org_code": md.get("org_code", ""),
             "description": tool_def.description,
             "category": tool_def.category,
             "tier": tool_def.tier,
@@ -829,6 +833,43 @@ class ToolRegistry:
         client = ae_client or get_automationedge_client()
 
         def _handler(**kwargs):
+            from security.workflow_access import (
+                can_execute_workflow,
+                default_org_code,
+                is_execute_enforced,
+            )
+
+            org_code = str(
+                kwargs.get("orgCode", "")
+                or kwargs.get("org_code", "")
+                or mapping.org_code
+                or default_org_code()
+            )
+            user_id = str(kwargs.get("userId", "") or kwargs.get("user_id", ""))
+            workflow_id = str(mapping.workflow_id or "").strip()
+            should_enforce = bool(user_id) or is_execute_enforced()
+
+            if should_enforce:
+                if not workflow_id:
+                    workflow_id, _ = client.get_cached_workflow_info(
+                        mapping.workflow_name,
+                        user_id=user_id,
+                        org_code=org_code,
+                    )
+                if not user_id or not workflow_id or not can_execute_workflow(user_id, workflow_id, org_code):
+                    logger.warning(
+                        "workflow execution denied for dynamic tool=%s workflow=%s user_id=%r org_code=%r",
+                        mapping.tool_name,
+                        mapping.workflow_name,
+                        user_id,
+                        org_code,
+                    )
+                    return {
+                        "success": False,
+                        "error": "You are not authorized to execute this workflow.",
+                        "tool_name": mapping.tool_name,
+                        "workflow_name": mapping.workflow_name,
+                    }
             # ── "Ask Again" pattern from code_ref.py remediation_agent_ask_params ──
             # If required params are missing, return a structured request for them
             # instead of a silent failure. The orchestrator will see needs_user_input=True
@@ -874,12 +915,18 @@ class ToolRegistry:
                 }
 
             payload_args = dict(kwargs)
-            org_code = str(payload_args.pop("orgCode", "") or payload_args.pop("org_code", ""))
+            org_code = str(
+                payload_args.pop("orgCode", "")
+                or payload_args.pop("org_code", "")
+                or mapping.org_code
+                or default_org_code()
+            )
             user_id = str(payload_args.pop("userId", "") or payload_args.pop("user_id", ""))
             source = str(payload_args.pop("source", "ae-dynamic-tool"))
 
             raw = client.execute_workflow(
                 workflow_name=mapping.workflow_name,
+                workflow_id=workflow_id,
                 org_code=org_code,
                 user_id=user_id,
                 source=source,
@@ -942,8 +989,16 @@ class ToolRegistry:
             return
         self._meta_registered = True
 
-        def _discover_tools(query: str, category: str = "", top_k: int = 8, _agent_id: str = "") -> dict:
+        def _discover_tools(
+            query: str,
+            category: str = "",
+            top_k: int = 8,
+            _agent_id: str = "",
+            user_id: str = "",
+            org_code: str = "",
+        ) -> dict:
             from rag.engine import get_rag_engine
+            from security.workflow_access import filter_tool_hits_for_user, is_read_enforced
 
             results: list[dict] = []
             rag_hits = []
@@ -954,7 +1009,20 @@ class ToolRegistry:
             )
 
             if query and query.strip():
-                rag_hits = get_rag_engine().search_tools(query, top_k=max(top_k * 3, top_k))
+                if user_id:
+                    rag_hits = get_rag_engine().search_tools_for_user(
+                        query,
+                        user_id=user_id,
+                        org_code=org_code,
+                        top_k=max(top_k * 3, top_k),
+                    )
+                elif is_read_enforced():
+                    logger.info(
+                        "discover_tools blocked unscoped workflow search because read enforcement is enabled."
+                    )
+                    rag_hits = []
+                else:
+                    rag_hits = get_rag_engine().search_tools(query, top_k=max(top_k * 3, top_k))
                 logger.info(
                     "discover_tools RAG search returned %d hits for query=%r",
                     len(rag_hits), query,
@@ -987,6 +1055,9 @@ class ToolRegistry:
                 include_category_fallback=bool(category),
                 feedback_agent_id=_agent_id,
             )
+
+            if user_id or is_read_enforced():
+                results = filter_tool_hits_for_user(user_id, org_code, results)
 
             if not results:
                 cats = sorted({entry.definition.category for entry in self._catalog.values()})

@@ -190,6 +190,37 @@ class TestAgentEnhancements:
         names = [tool["name"] for tool in result.data["tools"]]
         assert "ae.agent.analyze_logs" in names
 
+    @patch("security.workflow_access.is_read_enforced", return_value=True)
+    @patch("rag.engine.get_rag_engine")
+    def test_discover_tools_fails_closed_without_user_id_when_read_enforced(self, mock_get_rag, _mock_read_enforced, mock_conn):
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(
+                name="run_claims_workflow",
+                description="Run the claims workflow.",
+                category="automationedge",
+                tier="medium_risk",
+                metadata={
+                    "source": "automationedge",
+                    "workflow_name": "WF_Claims",
+                    "workflow_id": "wf-claims",
+                    "org_code": "ORG-A",
+                },
+            ),
+            lambda **_: {"success": True},
+            hydrate=False,
+        )
+
+        mock_rag = MagicMock()
+        mock_get_rag.return_value = mock_rag
+
+        reg._ensure_meta_tools()
+        result = reg.execute("discover_tools", query="run claims", top_k=3)
+
+        assert result.success
+        assert result.data["tools"] == []
+        mock_rag.search_tools.assert_not_called()
+
     def test_agent_catalog_summarizes_tool_feedback(self, mock_conn):
         from state.agent_catalog import AgentCatalog
 

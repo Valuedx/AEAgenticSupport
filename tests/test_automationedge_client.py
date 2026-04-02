@@ -35,6 +35,7 @@ class TestAutomationEdgeClient(unittest.TestCase):
         CONFIG["AE_ORG_CODE"] = "ORG1"
         CONFIG["AE_DEFAULT_USERID"] = "ops_user"
         CONFIG["AE_TIMEOUT_SECONDS"] = 10
+        CONFIG["WF_ACCESS_EXECUTE_AUTH_MODE"] = "service_account"
         self._runtime_value_patch = patch(
             "tools.automationedge_client.get_runtime_value",
             side_effect=lambda key, default=None: CONFIG.get(key, default),
@@ -187,6 +188,31 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertEqual(typed["count"], "Number")
         self.assertEqual(typed["dryRun"], "Boolean")
         self.assertEqual(typed["path"], "String")
+        client.close()
+
+    def test_execute_workflow_uses_service_account_user_id_even_when_chat_user_is_passed(self):
+        captured = {"payload": None}
+
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+            if request.url.path.endswith("/execute"):
+                captured["payload"] = json.loads(request.content.decode("utf-8"))
+                return httpx.Response(
+                    200,
+                    json={"status": "QUEUED", "requestId": "REQ-202"},
+                )
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+        out = client.execute_workflow(
+            workflow_name="WF_Updated3_Diskcleanup",
+            workflow_id="8942",
+            user_id="webchat:kirtibala.gujar@valuedx.com",
+        )
+
+        self.assertEqual(out.get("requestId"), "REQ-202")
+        self.assertEqual(captured["payload"]["userId"], "ops_user")
         client.close()
 
     def test_list_workflows_falls_back_to_post_when_get_fails(self):
@@ -371,6 +397,73 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertTrue(any(p.endswith("/download/1248.zip") for p in method_paths))
         client.close()
 
+    def test_get_execution_logs_recovers_from_ae1603_via_list_poll(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            path = request.url.path
+            calls.append((request.method, path))
+
+            if path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+
+            if "/logs" in path and not ("debuglogs" in path or "download" in path):
+                return httpx.Response(400, json={"error": "Not supported on T4 directly"})
+
+            if path.endswith("/workflowinstances/2585726"):
+                return httpx.Response(
+                    200,
+                    json={"status": "Complete", "startTime": 1000, "endTime": 2000},
+                )
+
+            if path.endswith("/agent/debuglogs") and request.method == "GET":
+                list_count = sum(
+                    1
+                    for method, seen_path in calls
+                    if method == "GET" and seen_path.endswith("/agent/debuglogs")
+                )
+                if list_count < 2:
+                    return httpx.Response(200, json={"data": []})
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {
+                                "id": 1537,
+                                "workflowInstanceId": 2585726,
+                                "status": "COMPLETE",
+                                "logFileLink": "/download/1537.zip",
+                            }
+                        ]
+                    },
+                )
+
+            if path.endswith("/agent/debuglogs") and request.method == "POST":
+                return httpx.Response(200, json={"id": 1537})
+
+            if path.endswith("/agent/debuglogs/1537"):
+                return httpx.Response(
+                    500,
+                    json={"message": "Invalid log request id", "errorCode": "AE-1603", "success": False},
+                )
+
+            if path.endswith("/download/1537.zip"):
+                return httpx.Response(200, content=b"ZIP_DATA", headers={"Content-Type": "application/zip"})
+
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+
+        with patch("time.sleep"):
+            result = client.get_execution_logs("2585726")
+
+        self.assertTrue(result.get("is_zip"))
+        self.assertEqual(result.get("log_zip_content"), b"ZIP_DATA")
+        self.assertTrue(any(path.endswith("/agent/debuglogs/1537") for _, path in calls))
+        self.assertTrue(any(path.endswith("/agent/debuglogs") for _, path in calls))
+        self.assertTrue(any(path.endswith("/download/1537.zip") for _, path in calls))
+        client.close()
+
     def test_get_required_parameters_fallback(self):
         """Verify that get_required_parameters falls back to all parameters if none are marked required."""
         client = AutomationEdgeClient()
@@ -413,6 +506,19 @@ class TestAutomationEdgeClient(unittest.TestCase):
             with patch.object(client, "get_cached_workflow_parameters", return_value=schema_catalogue):
                 required_cat = client.get_required_parameters("WF_Cat")
                 self.assertEqual(required_cat, ["param1"])
+
+    @patch("tools.automationedge_client.is_read_enforced", return_value=True)
+    @patch("rag.engine.get_rag_engine")
+    def test_resolve_workflow_via_rag_fails_closed_without_user_when_read_enforced(self, mock_get_rag, _mock_read_enforced):
+        client = self._client_with_transport(lambda request: httpx.Response(404, json={}))
+        mock_rag = unittest.mock.MagicMock()
+        mock_get_rag.return_value = mock_rag
+
+        result = client.resolve_workflow_via_rag("claims status")
+
+        self.assertEqual(result, "")
+        mock_rag.search_tools.assert_not_called()
+        client.close()
 
 
 if __name__ == "__main__":

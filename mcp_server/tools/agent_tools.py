@@ -602,6 +602,107 @@ async def agent_analyze_logs(
     from datetime import datetime, timedelta
 
     client = get_ae_client()
+    error_tokens = ("ERROR", "FATAL", "EXCEPTION")
+    bracket_token_re = re.compile(r"\[([^\]]+)\]")
+
+    def _extract_error_message(line: str) -> str:
+        text = str(line or "").strip()
+        if " - " in text:
+            return text.split(" - ", 1)[1].strip() or text
+        match_msg = re.search(r"\b(?:ERROR|FATAL|EXCEPTION)\b[:\s-]*(.+)$", text, re.IGNORECASE)
+        if match_msg:
+            return match_msg.group(1).strip() or text
+        return text
+
+    def _extract_thread_name(line: str) -> str:
+        matches = bracket_token_re.findall(str(line or ""))
+        for token in matches:
+            candidate = str(token or "").strip()
+            if candidate and "request::" not in candidate.lower():
+                return candidate
+        return str(matches[0]).strip() if matches else ""
+
+    def _normalize_error_signature(line: str) -> str:
+        msg = _extract_error_message(line).lower()
+        msg = re.sub(r"https?://\S+", "<url>", msg)
+        msg = re.sub(r"\b[a-f0-9-]{8,}\b", "<id>", msg, flags=re.IGNORECASE)
+        msg = re.sub(r"\d+", "N", msg)
+        return msg[:180].strip()
+
+    def _build_error_patterns(lines: list[str], *, max_patterns: int = 10) -> list[dict[str, Any]]:
+        patterns: dict[str, dict[str, Any]] = {}
+        for idx, raw_line in enumerate(lines):
+            if not any(token in raw_line.upper() for token in error_tokens):
+                continue
+            signature = _normalize_error_signature(raw_line)
+            bucket = patterns.setdefault(
+                signature,
+                {
+                    "signature": signature,
+                    "message": _extract_error_message(raw_line),
+                    "count": 0,
+                    "threads": set(),
+                    "snippet": "\n".join(lines[idx : idx + 3]).strip(),
+                },
+            )
+            bucket["count"] += 1
+            thread_name = _extract_thread_name(raw_line)
+            if thread_name:
+                bucket["threads"].add(thread_name)
+            if not bucket.get("snippet"):
+                bucket["snippet"] = "\n".join(lines[idx : idx + 3]).strip()
+
+        ranked = sorted(
+            patterns.values(),
+            key=lambda item: (-int(item.get("count", 0)), str(item.get("message", "")).lower()),
+        )
+        return [
+            {
+                "signature": item["signature"],
+                "message": item["message"],
+                "count": int(item["count"]),
+                "threads": sorted(item["threads"]),
+                "snippet": item.get("snippet", ""),
+            }
+            for item in ranked[:max_patterns]
+        ]
+
+    def _merge_error_patterns(patterns: list[dict[str, Any]], *, max_patterns: int = 5) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for pattern in patterns:
+            signature = str(pattern.get("signature") or pattern.get("message") or "").strip()
+            if not signature:
+                continue
+            bucket = merged.setdefault(
+                signature,
+                {
+                    "signature": signature,
+                    "message": str(pattern.get("message") or "").strip(),
+                    "count": 0,
+                    "threads": set(),
+                    "snippet": str(pattern.get("snippet") or "").strip(),
+                },
+            )
+            bucket["count"] += int(pattern.get("count") or 0)
+            bucket["threads"].update(pattern.get("threads") or [])
+            incoming_snippet = str(pattern.get("snippet") or "").strip()
+            if incoming_snippet and len(incoming_snippet) > len(str(bucket.get("snippet") or "")):
+                bucket["snippet"] = incoming_snippet
+
+        ranked = sorted(
+            merged.values(),
+            key=lambda item: (-int(item.get("count", 0)), str(item.get("message", "")).lower()),
+        )
+        return [
+            {
+                "signature": item["signature"],
+                "message": item["message"],
+                "count": int(item["count"]),
+                "threads": sorted(item["threads"]),
+                "snippet": str(item.get("snippet") or ""),
+            }
+            for item in ranked[:max_patterns]
+        ]
     
     # 0. Resolve Agent — list_agents() only returns CONNECTED agents.
     # Stopped/offline agents won't appear, so we fall back to get_agent() by ID or name.
@@ -805,6 +906,12 @@ async def agent_analyze_logs(
     # Date regex for filenames like agent.log.2026-03-16 or agent.log.20260316,
     # and for timestamps embedded in log lines.
     date_pattern = re.compile(r"(\d{4}-?\d{2}-?\d{2})")
+    timestamp_pattern = re.compile(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+\-]\d{2}:\d{2})?)"
+    )
+    timestamp_pattern = re.compile(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+\-]\d{2}:\d{2})?)"
+    )
 
     def _normalize_date_token(raw_date: str) -> str:
         compact = raw_date.replace("-", "")
@@ -829,11 +936,29 @@ async def agent_analyze_logs(
         base = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
         return base in {"aeagent", "agent", "aeagent.txt", "agent.txt"}
 
+    def _extract_error_occurrences(lines: list[str]) -> list[dict[str, Any]]:
+        occurrences = []
+        for idx, raw_line in enumerate(lines):
+            if not any(token in raw_line.upper() for token in error_tokens):
+                continue
+            ts_match = timestamp_pattern.search(raw_line)
+            occurrences.append(
+                {
+                    "index": len(occurrences) + 1,
+                    "line_number": idx + 1,
+                    "timestamp": ts_match.group(1) if ts_match else "",
+                    "thread": _extract_thread_name(raw_line),
+                    "message": _extract_error_message(raw_line),
+                    "raw_line": str(raw_line).strip(),
+                }
+            )
+        return occurrences
+
     def _extract_entry_date(entry: dict[str, Any]) -> str:
         raw_lines = entry.get("full_lines", [])
         error_lines = [
             line for line in raw_lines
-            if any(token in line.upper() for token in ("ERROR", "FATAL", "EXCEPTION"))
+            if any(token in line.upper() for token in error_tokens)
         ]
 
         for candidate_line in error_lines + raw_lines:
@@ -907,7 +1032,9 @@ async def agent_analyze_logs(
                     tail = lines[-tail_lines:]
                     content = "\n".join(tail)
                     
-                    errors = [l for l in tail if any(x in l.upper() for x in ("ERROR", "FATAL", "EXCEPTION"))]
+                    occurrences = _extract_error_occurrences(tail)
+                    errors = [item["raw_line"] for item in occurrences]
+                    patterns = _build_error_patterns(tail)
                     if errors:
                         error_found = True
                         all_errors.extend(errors)
@@ -917,7 +1044,9 @@ async def agent_analyze_logs(
                         "entries_analyzed": len(tail),
                         "errors_found": len(errors),
                         "content": content,
-                        "full_lines": tail # Store full lines for context extraction
+                        "full_lines": tail, # Store full lines for context extraction
+                        "error_occurrences": occurrences,
+                        "error_patterns": patterns,
                     })
     except Exception as e:
         return {"success": False, "error": f"Failed to process log ZIP: {e}"}
@@ -959,34 +1088,82 @@ async def agent_analyze_logs(
         by_date[dt_str]["files_analyzed"] += 1
         by_date[dt_str]["total_errors"] += int(entry.get("errors_found", 0))
 
-        # Extract unique snippets (first 3 unique) with 2 lines of context
-        unique_snippets = []
-        seen_snippets = set()
         raw_lines = entry.get("full_lines", [])
-        for idx, line in enumerate(raw_lines):
-            if any(x in line.upper() for x in ("ERROR", "FATAL", "EXCEPTION")):
-                # Capture ERROR + next 2 lines for context
-                snippet = "\n".join(raw_lines[idx : idx + 3])
-                
-                # Basic normalization for deduplication
-                norm = re.sub(r"\d", "X", line[:100])
-                if norm not in seen_snippets:
-                    unique_snippets.append(snippet.strip())
-                    seen_snippets.add(norm)
-                if len(unique_snippets) >= 3: break
+        raw_patterns = list(entry.get("error_patterns") or [])
+        unique_snippets = [
+            {
+                "message": str(pattern.get("message") or "").strip(),
+                "count": int(pattern.get("count") or 0),
+                "threads": list(pattern.get("threads") or []),
+                "snippet": str(pattern.get("snippet") or "").strip(),
+            }
+            for pattern in raw_patterns[:3]
+        ]
 
         by_date[dt_str]["items"].append({
             "file": entry["filename"],
             "count": entry["errors_found"],
+            "occurrences": list(entry.get("error_occurrences") or []),
             "snippets": unique_snippets,
+            "patterns": raw_patterns,
             "tail_preview": raw_lines[-10:],
         })
+
+    flat_patterns = _merge_error_patterns(
+        [
+            pattern
+            for date_info in by_date.values()
+            for item in date_info.get("items", [])
+            for pattern in item.get("patterns", [])
+        ],
+        max_patterns=5,
+    )
+    error_file_count = len([item for item in log_summary if int(item.get("errors_found", 0)) > 0])
+    error_date_count = len([info for info in by_date.values() if int(info.get("total_errors", 0)) > 0])
+    top_pattern_summary = "; ".join(
+        f"{int(pattern.get('count', 0))}x {str(pattern.get('message') or '').strip()}"
+        for pattern in flat_patterns[:3]
+        if str(pattern.get("message") or "").strip()
+    )
+    error_text_upper = "\n".join(all_errors).upper()
+    fallback_issue_explanation = ""
+    if flat_patterns:
+        lead_pattern = flat_patterns[0]
+        fallback_issue_explanation = (
+            f"The dominant failure pattern is '{str(lead_pattern.get('message') or '').strip()}', "
+            f"which appears {int(lead_pattern.get('count', 0))} time(s). "
+            f"This indicates a recurring operational issue rather than a one-time error."
+        )
+    elif error_found:
+        fallback_issue_explanation = (
+            f"The logs show {len(all_errors)} error line(s) across {error_file_count} file(s), "
+            "which indicates repeated failures during the analyzed period."
+        )
+
+    fallback_actions = []
+    if "FAILED TO UPLOAD A FILE" in error_text_upper or "FILE UPLOAD" in error_text_upper:
+        fallback_actions.append("Check the workflow upload step and confirm the target file is present and readable before the upload action runs.")
+    if "EXTENSION" in error_text_upper or "NOT ALLOWED FOR UPLOAD" in error_text_upper:
+        fallback_actions.append("Validate the allowed file-extension policy in AutomationEdge and confirm the workflow is sending the expected file type.")
+    if not fallback_actions and error_found:
+        fallback_actions.append("Review the earliest error occurrence in the list below and compare it with the workflow input/state at that exact time.")
+        fallback_actions.append("Use the recurring pattern summary to focus on the repeated failure first, then verify downstream errors after that root issue is addressed.")
+
+    for date_info in by_date.values():
+        date_info["top_patterns"] = _merge_error_patterns(
+            [
+                pattern
+                for item in date_info.get("items", [])
+                for pattern in item.get("patterns", [])
+            ],
+            max_patterns=3,
+        )
 
     # Generate AI Diagnostic Summary
     # Keep this opt-in so external LLM latency or credential issues never block
     # the core log extraction/reporting flow.
     ai_diagnostic = ""
-    ai_summary_enabled = str(os.getenv("AE_AGENT_LOG_AI_SUMMARY_ENABLED", "false")).strip().lower() in {
+    ai_summary_enabled = str(os.getenv("AE_AGENT_LOG_AI_SUMMARY_ENABLED", "true")).strip().lower() in {
         "1", "true", "yes", "on"
     }
     clean_tail_summary_enabled = str(
@@ -1032,23 +1209,80 @@ async def agent_analyze_logs(
         item["tail_summary"] = "The latest 10 log lines look healthy and do not show any immediate issues."
         return str(item["tail_summary"])
 
+    def _summarize_error_file(item: dict[str, Any]) -> str:
+        if item.get("error_file_summary"):
+            return str(item["error_file_summary"])
+
+        patterns = list(item.get("patterns") or [])
+        occurrences = list(item.get("occurrences") or [])
+        total_errors = int(item.get("count") or len(occurrences) or 0)
+
+        if not total_errors:
+            item["error_file_summary"] = "No error summary is available for this log."
+            return str(item["error_file_summary"])
+
+        if not patterns:
+            item["error_file_summary"] = (
+                f"This log contains {total_errors} error line(s), but no recurring pattern summary could be derived."
+            )
+            return str(item["error_file_summary"])
+
+        lead_pattern = patterns[0]
+        lead_message = str(lead_pattern.get("message") or "").strip() or "unknown issue"
+        lead_count = int(lead_pattern.get("count") or 0)
+        summary_parts = [
+            f"This log contains {total_errors} error line(s).",
+            f"The dominant issue is '{lead_message}' ({lead_count} occurrence(s)).",
+        ]
+
+        lower_messages = " ".join(str(p.get("message") or "") for p in patterns).lower()
+        if "upload" in lower_messages:
+            summary_parts.append("The failure is centered on the upload step.")
+        if "extension" in lower_messages or "not allowed" in lower_messages:
+            summary_parts.append("The log also points to a file-extension or upload-policy validation problem.")
+
+        if occurrences:
+            first_ts = str(occurrences[0].get("timestamp") or "").strip()
+            last_ts = str(occurrences[-1].get("timestamp") or "").strip()
+            if first_ts and last_ts and first_ts != last_ts:
+                summary_parts.append(f"It repeats from {first_ts} through {last_ts}.")
+            elif first_ts:
+                summary_parts.append(f"It is visible at {first_ts}.")
+
+        item["error_file_summary"] = " ".join(summary_parts)
+        return str(item["error_file_summary"])
+
     if error_found and ai_summary_enabled:
         all_snippets_for_ai = []
         for dt_group in by_date.values():
-            for f_info in dt_group:
-                all_snippets_for_ai.extend(f_info["snippets"])
+            for f_info in dt_group.get("items", []):
+                for occurrence in f_info.get("occurrences", []):
+                    raw_line = str(occurrence.get("raw_line") or "").strip()
+                    if raw_line:
+                        all_snippets_for_ai.append(raw_line)
+                for snippet_info in f_info.get("snippets", []):
+                    snippet_text = str(snippet_info.get("snippet") or "").strip()
+                    if snippet_text:
+                        all_snippets_for_ai.append(snippet_text)
         
         if all_snippets_for_ai:
             try:
                 logger.info("Generating AI diagnostic for %d snippets...", len(all_snippets_for_ai))
-                snippets_text = "\n---\n".join(all_snippets_for_ai[:5])
+                snippets_text = "\n---\n".join(all_snippets_for_ai[:12])
                 prompt = (
                     "Analyze these AutomationEdge agent log snippets. "
-                    "Provide a 1-2 sentence plain-English summary of the issue "
-                    "and a direct recommendation.\n\n"
+                    "Return markdown with exactly these sections:\n"
+                    "Summary:\n"
+                    "1-2 short plain-English sentences.\n\n"
+                    "Suggested Actions:\n"
+                    "- exactly 2 concise, actionable bullets.\n\n"
                     f"Snippets:\n{snippets_text}"
                 )
-                ai_diagnostic = llm_client.chat(prompt, system="You are an expert technical support engineer. Be extremely concise.", max_tokens=200)
+                ai_diagnostic = llm_client.chat(
+                    prompt,
+                    system="You are an expert technical support engineer. Be concise, practical, and specific.",
+                    max_tokens=260,
+                )
                 logger.info("AI Diagnostic generated: %s", ai_diagnostic[:50])
             except Exception as llm_err:
                 logger.error("Failed to generate AI diagnostic: %s", llm_err, exc_info=True)
@@ -1075,9 +1309,30 @@ async def agent_analyze_logs(
                 )
         status_msg = f"Log analysis for {agent_name} completed. Status: HEALTHY."
     else:
+        report_lines.append("\n### Agent Error Summary")
+        report_lines.append(f"- Total error lines detected: {len(all_errors)}")
+        report_lines.append(f"- Files with errors: {error_file_count}")
+        report_lines.append(f"- Dates with errors: {error_date_count}")
+        if flat_patterns:
+            report_lines.append("Top recurring error patterns:")
+            for pattern in flat_patterns:
+                threads = ", ".join(pattern.get("threads") or [])
+                thread_note = f" | Thread(s): `{threads}`" if threads else ""
+                report_lines.append(
+                    f"- {int(pattern.get('count', 0))}x {str(pattern.get('message') or '').strip()}{thread_note}"
+                )
+
         if ai_diagnostic:
             report_lines.append("\n### 🤖 AI Diagnostic Summary")
             report_lines.append(ai_diagnostic)
+        elif fallback_issue_explanation:
+            report_lines.append("\n### Issue Explanation")
+            report_lines.append(fallback_issue_explanation)
+
+        if not ai_diagnostic and fallback_actions:
+            report_lines.append("\n### Suggested Actions")
+            for action in fallback_actions:
+                report_lines.append(f"- {action}")
 
         report_lines.append("\n### 📅 Date-wise Log Review")
         for dt_str in sorted(by_date.keys(), reverse=True):
@@ -1088,6 +1343,15 @@ async def agent_analyze_logs(
                     f"- ⚠️ Issues detected in {date_info['files_analyzed']} file(s) for this date "
                     f"({date_info['total_errors']} errors total)."
                 )
+                top_patterns = date_info.get("top_patterns") or []
+                if top_patterns:
+                    report_lines.append("Top recurring issues for this date:")
+                    for pattern in top_patterns:
+                        threads = ", ".join(pattern.get("threads") or [])
+                        thread_note = f" | Thread(s): `{threads}`" if threads else ""
+                        report_lines.append(
+                            f"- {int(pattern.get('count', 0))}x {str(pattern.get('message') or '').strip()}{thread_note}"
+                        )
             else:
                 report_lines.append(f"- ✅ No issues detected in {date_info['files_analyzed']} file(s) checked for this date.")
                 report_lines.append("- Good health summary from the last 10 log lines:")
@@ -1100,18 +1364,55 @@ async def agent_analyze_logs(
             for item in date_info["items"]:
                 if not item["count"]:
                     continue
-                report_lines.append(f"- **{item['file']}** ({item['count']} errors):")
-                for snip in item["snippets"]:
-                    # Use code block for snippets
-                    report_lines.append(f"```log\n{snip}\n```")
-        
-        status_msg = f"Found {len(all_errors)} errors across {len([l for l in log_summary if l['errors_found'] > 0])} files."
+                patterns = item.get("patterns") or []
+                occurrences = item.get("occurrences") or []
+                report_lines.append(
+                    f"- **{item['file']}** ({item['count']} errors across {len(patterns)} recurring pattern(s)):"
+                )
+                report_lines.append(f"Summary: {_summarize_error_file(item)}")
+                for pattern in patterns[:3]:
+                    threads = ", ".join(pattern.get("threads") or [])
+                    thread_note = f" | Thread(s): `{threads}`" if threads else ""
+                    report_lines.append(
+                        f"Pattern: {int(pattern.get('count', 0))}x {str(pattern.get('message') or '').strip()}{thread_note}"
+                    )
+                hidden_pattern_occurrences = sum(
+                    int(pattern.get("count", 0)) for pattern in patterns[3:]
+                )
+                if hidden_pattern_occurrences:
+                    report_lines.append(
+                        f"Additional recurring error lines not shown separately: {hidden_pattern_occurrences}"
+                    )
+                if occurrences:
+                    report_lines.append(f"Chronological error occurrences ({len(occurrences)}):")
+                    for occurrence in occurrences:
+                        ts = str(occurrence.get("timestamp") or "timestamp-unavailable").strip()
+                        thread_name = str(occurrence.get("thread") or "").strip()
+                        thread_note = f" | Thread: `{thread_name}`" if thread_name else ""
+                        report_lines.append(
+                            f"- `{ts}`{thread_note} | {str(occurrence.get('raw_line') or '').strip()}"
+                        )
+                else:
+                    for snip in item["snippets"]:
+                        report_lines.append(f"```log\n{snip['snippet']}\n```")
+
+        status_msg = (
+            f"Found {len(all_errors)} error lines across {error_file_count} file(s). "
+            f"{('Top issues: ' + top_pattern_summary) if top_pattern_summary else ''}".strip()
+        )
 
     # Generate suggested actions based on log keywords
     suggested_solutions = []
     if error_found:
-        error_text = "\n".join(all_errors).upper()
-        if "MEMORY" in error_text or "HEAP" in error_text:
+        if "FAILED TO UPLOAD A FILE" in error_text_upper or "FILE UPLOAD" in error_text_upper:
+            suggested_solutions.append(
+                "File Upload: Verify the upload step is receiving the correct file path and that the file exists before the workflow reaches the upload action."
+            )
+        if "EXTENSION" in error_text_upper or "NOT ALLOWED FOR UPLOAD" in error_text_upper:
+            suggested_solutions.append(
+                "File Extension Policy: The upload appears to be blocked by an extension rule. Check the allowed extension list and align the workflow input file type with that policy."
+            )
+        if "MEMORY" in error_text_upper or "HEAP" in error_text_upper:
             suggested_solutions.append("Memory: Increase the Java Heap Size (-Xmx) in AEAgent.bat / AEAgent.conf.")
         
         if suggested_solutions:
@@ -1133,9 +1434,21 @@ async def agent_analyze_logs(
         "zip_members": zip_member_names,
         "period": f"{f_dt.date()} to {t_dt.date()}",
         "error_found": error_found,
+        "total_error_lines": len(all_errors),
+        "error_files": error_file_count,
+        "error_dates": error_date_count,
+        "top_error_patterns": flat_patterns,
         "logs": log_summary,
         "report": full_report,
-        "summary": f"Analyzed {len(log_summary)} files. {'Issues detected.' if error_found else 'No issues found.'}",
+        "summary": (
+            f"Analyzed {len(log_summary)} file(s). "
+            + (
+                f"Found {len(all_errors)} error line(s) across {error_file_count} file(s)"
+                + (f"; top issues: {top_pattern_summary}." if top_pattern_summary else ".")
+                if error_found
+                else "No issues found."
+            )
+        ),
         "suggested_solutions": suggested_solutions,
         "message": status_msg
     }

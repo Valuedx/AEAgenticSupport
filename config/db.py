@@ -178,6 +178,59 @@ _RUNTIME_SCHEMA_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_user_registry_email
         ON user_registry(user_email)
     """,
+    """
+    ALTER TABLE user_registry
+        ADD COLUMN IF NOT EXISTS ae_user_id INTEGER
+    """,
+    """
+    ALTER TABLE user_registry
+        ADD COLUMN IF NOT EXISTS ae_username VARCHAR(256)
+    """,
+    """
+    ALTER TABLE user_registry
+        ADD COLUMN IF NOT EXISTS ae_is_admin BOOLEAN NOT NULL DEFAULT FALSE
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_workflow_access (
+        id                BIGSERIAL    PRIMARY KEY,
+        user_id           VARCHAR(256) NOT NULL,
+        teams_id          VARCHAR(256),
+        workflow_id       VARCHAR(64)  NOT NULL,
+        org_code          VARCHAR(64)  NOT NULL DEFAULT '',
+        permission        VARCHAR(32)  NOT NULL DEFAULT 'execute',
+        ae_user_id        INTEGER,
+        ae_username       VARCHAR(256),
+        match_confidence  REAL         DEFAULT 0.0,
+        match_method      VARCHAR(32)  DEFAULT 'unknown',
+        synced_at         TIMESTAMPTZ  DEFAULT NOW(),
+        last_seen_at      TIMESTAMPTZ  DEFAULT NOW(),
+        CONSTRAINT uq_user_workflow UNIQUE (user_id, workflow_id, org_code)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_uwa_user
+        ON user_workflow_access(user_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_uwa_workflow
+        ON user_workflow_access(workflow_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_uwa_user_org
+        ON user_workflow_access(user_id, org_code)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_uwa_user_wf_org
+        ON user_workflow_access(user_id, workflow_id, org_code)
+    """,
+    """
+    ALTER TABLE user_workflow_access
+        ADD COLUMN IF NOT EXISTS match_method VARCHAR(32) DEFAULT 'unknown'
+    """,
+    """
+    ALTER TABLE user_workflow_access
+        ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW()
+    """,
     # --- Self-Healing Migrations (Enforce PKs and Columns on existing tables) ---
     "ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS active_issue_id VARCHAR(64)",
     "ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS summary TEXT",
@@ -206,6 +259,14 @@ _RUNTIME_SCHEMA_STATEMENTS = (
     BEGIN 
         IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_name = 'user_registry' AND constraint_type = 'PRIMARY KEY') THEN 
             ALTER TABLE user_registry ADD PRIMARY KEY (user_id); 
+        END IF; 
+    END $$;
+    """,
+    """
+    DO $$ 
+    BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_name = 'user_workflow_access' AND constraint_type = 'PRIMARY KEY') THEN 
+            ALTER TABLE user_workflow_access ADD PRIMARY KEY (id); 
         END IF; 
     END $$;
     """,

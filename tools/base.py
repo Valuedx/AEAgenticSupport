@@ -48,8 +48,14 @@ class ToolDefinition:
         if title and title.lower() != self.name.lower():
             parts.insert(0, f"{title}.")
         workflow_name = str(self.metadata.get("workflow_name", "") or "").strip()
+        workflow_id = str(self.metadata.get("workflow_id", "") or "").strip()
+        org_code = str(self.metadata.get("org_code", "") or "").strip()
         if workflow_name:
             parts.append(f"Backed by workflow: {workflow_name}.")
+        if workflow_id:
+            parts.append(f"Workflow ID: {workflow_id}.")
+        if org_code:
+            parts.append(f"Org code: {org_code}.")
         safety = str(self.metadata.get("safety", "") or "").strip()
         if safety:
             parts.append(f"Safety: {safety}.")
@@ -164,6 +170,8 @@ class ToolDefinition:
                 "tier": self.tier,
                 "source": meta.get("source", "static"),
                 "workflow_name": meta.get("workflow_name", ""),
+                "workflow_id": meta.get("workflow_id", ""),
+                "org_code": meta.get("org_code", ""),
                 "always_available": self.always_available,
                 "dynamic": bool(meta.get("dynamic", False)),
                 "tags": unique_tags,

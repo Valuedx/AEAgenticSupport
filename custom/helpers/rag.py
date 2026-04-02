@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Dict, List
 
+from security.workflow_access import is_read_enforced
+
 logger = logging.getLogger("support_agent.rag")
 
 try:
@@ -26,11 +28,22 @@ def rag_search_sop(client, query: str, top_k: int = 6) -> List[Dict]:
     ).get("results", [])
 
 
-def rag_search_tools(client, query: str, top_k: int = 8) -> List[Dict]:
+def rag_search_tools(client, query: str, top_k: int = 8, user_id: str = "", org_code: str = "") -> List[Dict]:
+    if is_read_enforced() and not str(user_id or "").strip():
+        logger.info("Blocking unscoped tool RAG search because read enforcement is enabled.")
+        return []
     if _USE_DIRECT:
+        if user_id:
+            return get_rag_engine().search_tools_for_user(
+                query,
+                user_id=user_id,
+                org_code=org_code,
+                top_k=top_k,
+            )
         return get_rag_engine().search_tools(query, top_k=top_k)
     return client.call(
-        "/rag/tools/search", {"query": query, "top_k": top_k}
+        "/rag/tools/search",
+        {"query": query, "top_k": top_k, "user_id": user_id, "org_code": org_code},
     ).get("results", [])
 
 

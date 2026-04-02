@@ -1,5 +1,6 @@
 import asyncio
 import io
+import os
 import zipfile
 from unittest.mock import MagicMock, patch
 
@@ -87,6 +88,25 @@ def _build_zip_with_out_of_range_today_txt_log() -> bytes:
     return buf.getvalue()
 
 
+def _build_zip_with_repeated_errors_same_day() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        lines = []
+        for attempt in range(1, 7):
+            lines.extend(
+                [
+                    f"2026-03-30T23:57:{attempt:02d}.986+00:00 [WorkflowHandler-9][Request::2580887] ERROR c.a.a.u.WorkflowUtil:192 - Failed to upload a file on AE server",
+                    f"2026-03-30T23:57:{attempt:02d}.986+00:00 [WorkflowHandler-9][Request::2580887] ERROR c.a.a.u.WorkflowUtil:196 - Error details: {{\"message\":\"File with extension [.txt] is not allowed\"}}",
+                    f"2026-03-30T23:57:{attempt:02d}.987+00:00 [WorkflowHandler-9][Request::2580887] INFO  c.a.a.u.WorkflowUtil:147 - FileId: null, File upload attempt: {attempt}",
+                ]
+            )
+        zf.writestr(
+            "adarsh@GPSR61UB-00105_20260325_20260330_log/aeagent.log.20260330",
+            "\n".join(lines),
+        )
+    return buf.getvalue()
+
+
 def test_agent_analyze_logs_includes_current_aeagent_file_without_log_extension():
     mock_client = MagicMock()
     mock_client.list_agents.return_value = [
@@ -104,9 +124,10 @@ def test_agent_analyze_logs_includes_current_aeagent_file_without_log_extension(
     }
     mock_client.get.return_value = _build_zip_with_current_aeagent_file()
 
-    with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
-        with patch("time.sleep", return_value=None):
-            result = asyncio.run(agent_analyze_logs(agent_id="2963"))
+    with patch.dict(os.environ, {"AE_AGENT_LOG_AI_SUMMARY_ENABLED": "false"}):
+        with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
+            with patch("time.sleep", return_value=None):
+                result = asyncio.run(agent_analyze_logs(agent_id="2963"))
 
     assert result["success"] is True
     assert any(entry["filename"].endswith("aeagent") for entry in result["logs"])
@@ -130,10 +151,11 @@ def test_agent_analyze_logs_does_not_block_on_ai_summary_by_default():
     }
     mock_client.get.return_value = _build_zip_with_current_aeagent_file()
 
-    with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
-        with patch("mcp_server.tools.agent_tools.llm_client.chat") as mock_llm_chat:
-            with patch("time.sleep", return_value=None):
-                result = asyncio.run(agent_analyze_logs(agent_id="2963"))
+    with patch.dict(os.environ, {"AE_AGENT_LOG_AI_SUMMARY_ENABLED": "false"}):
+        with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
+            with patch("mcp_server.tools.agent_tools.llm_client.chat") as mock_llm_chat:
+                with patch("time.sleep", return_value=None):
+                    result = asyncio.run(agent_analyze_logs(agent_id="2963"))
 
     assert result["success"] is True
     assert result["error_found"] is True
@@ -157,9 +179,10 @@ def test_agent_analyze_logs_prefers_direct_request_id_download_endpoint():
     }
     mock_client.get.return_value = _build_zip_with_current_aeagent_file()
 
-    with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
-        with patch("time.sleep", return_value=None):
-            result = asyncio.run(agent_analyze_logs(agent_id="2963"))
+    with patch.dict(os.environ, {"AE_AGENT_LOG_AI_SUMMARY_ENABLED": "false"}):
+        with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
+            with patch("time.sleep", return_value=None):
+                result = asyncio.run(agent_analyze_logs(agent_id="2963"))
 
     assert result["success"] is True
     mock_client.get.assert_called_once_with("/agent/debuglogs/1514", use_rest=True)
@@ -182,9 +205,10 @@ def test_agent_analyze_logs_groups_current_file_errors_by_log_line_date_and_uses
     }
     mock_client.get.return_value = _build_zip_with_timestamped_current_aeagent_file()
 
-    with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
-        with patch("time.sleep", return_value=None):
-            result = asyncio.run(agent_analyze_logs(agent_id="2963"))
+    with patch.dict(os.environ, {"AE_AGENT_LOG_AI_SUMMARY_ENABLED": "false"}):
+        with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
+            with patch("time.sleep", return_value=None):
+                result = asyncio.run(agent_analyze_logs(agent_id="2963"))
 
     assert result["success"] is True
     assert "Unknown Date" not in result["report"]
@@ -210,10 +234,17 @@ def test_agent_analyze_logs_mentions_dates_with_no_issues_detected():
     }
     mock_client.get.return_value = _build_zip_with_mixed_date_results()
 
-    with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
-        with patch("mcp_server.tools.agent_tools.llm_client.chat", return_value="Healthy tail summary for this file.") as mock_llm:
-            with patch("time.sleep", return_value=None):
-                result = asyncio.run(agent_analyze_logs(agent_id="2963"))
+    with patch.dict(os.environ, {"AE_AGENT_LOG_AI_SUMMARY_ENABLED": "false"}):
+        with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
+            with patch("mcp_server.tools.agent_tools.llm_client.chat", return_value="Healthy tail summary for this file.") as mock_llm:
+                with patch("time.sleep", return_value=None):
+                    result = asyncio.run(
+                        agent_analyze_logs(
+                            agent_id="2963",
+                            from_date="2026-03-29T00:00:00",
+                            to_date="2026-03-30T23:59:59",
+                        )
+                    )
 
     assert result["success"] is True
     assert "#### 📅 2026-03-30" in result["report"]
@@ -293,3 +324,49 @@ def test_agent_analyze_logs_ignores_live_txt_lines_outside_requested_date_range(
     assert result["error_found"] is False
     assert "2026-03-31" not in result["report"]
     assert "No log files were found" in result["report"]
+
+
+def test_agent_analyze_logs_surfaces_recurring_error_summary_when_many_error_lines_exist():
+    mock_client = MagicMock()
+    mock_client.list_agents.return_value = [
+        {
+            "agentId": "2963",
+            "uuid": "385f365f-deb0-4a02-ba81-e01936816786",
+            "agentName": "adarsh@GPSR61UB-00105",
+            "agentState": "RUNNING",
+        }
+    ]
+    mock_client.request_agent_debug_logs.return_value = {"id": 1519}
+    mock_client.get_agent_debug_logs.return_value = {
+        "status": "COMPLETE",
+        "logFileLink": "1519_ag_logdownload.zip",
+    }
+    mock_client.get.return_value = _build_zip_with_repeated_errors_same_day()
+
+    ai_markdown = (
+        "Summary:\nRepeated file upload failures were detected across multiple attempts.\n\n"
+        "Suggested Actions:\n"
+        "- Validate the workflow file extension mapping in AutomationEdge.\n"
+        "- Review the upload configuration and allowed file-type policy."
+    )
+
+    with patch.dict(os.environ, {"AE_AGENT_LOG_AI_SUMMARY_ENABLED": "true"}):
+        with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
+            with patch("mcp_server.tools.agent_tools.llm_client.chat", return_value=ai_markdown) as mock_llm:
+                with patch("time.sleep", return_value=None):
+                    result = asyncio.run(agent_analyze_logs(agent_id="2963"))
+
+    assert result["success"] is True
+    assert result["total_error_lines"] == 12
+    assert "### Agent Error Summary" in result["report"]
+    assert "### 🤖 AI Diagnostic Summary" in result["report"]
+    assert "Suggested Actions:" in result["report"]
+    assert "Total error lines detected: 12" in result["report"]
+    assert "Summary: This log contains 12 error line(s)." in result["report"]
+    assert "6x Failed to upload a file on AE server" in result["report"]
+    assert "6x Error details: {\"message\":\"File with extension [.txt] is not allowed\"}" in result["report"]
+    assert "Chronological error occurrences (12):" in result["report"]
+    assert result["report"].count("`2026-03-30T23:57:") == 12
+    assert result["message"].startswith("Found 12 error lines across 1 file(s).")
+    assert "Top issues:" in result["message"]
+    mock_llm.assert_called_once()

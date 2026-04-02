@@ -10,7 +10,7 @@ import concurrent.futures
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import cast, Any, List, Optional
 
 
@@ -42,6 +42,248 @@ class Orchestrator:
         self.approval_gate = ApprovalGate()
         self.escalation = EscalationAgent()
         self.issue_trackers: dict[str, IssueTracker] = {}
+
+    @staticmethod
+    def _state_org_code(state: ConversationState) -> str:
+        metadata = state.user_metadata if isinstance(state.user_metadata, dict) else {}
+        for key in ("org_code", "orgCode", "tenant_org_code", "tenantOrgCode"):
+            value = metadata.get(key)
+            if value:
+                return str(value).strip()
+        return str(get_ae_client().default_org_code or "").strip()
+
+    @staticmethod
+    def _build_pending_action_summary(tool_name: str, tool_args: dict) -> str:
+        args = tool_args or {}
+        target = (
+            args.get("process_name")
+            or args.get("title")
+            or args.get("workflow_name")
+            or args.get("agent_name")
+            or args.get("agent_id")
+            or args.get("execution_id")
+            or args.get("request_id")
+            or args.get("workflow_id")
+            or "unknown"
+        )
+        return f"{tool_name} on {target}"
+
+    def _log_pending_action_decision(
+        self,
+        state: ConversationState,
+        status: str,
+        approver_id: str = "",
+    ) -> None:
+        action = state.pending_action or {}
+        self.approval_gate.log_decision(
+            state.conversation_id,
+            str(action.get("request_id") or ""),
+            status,
+            approver_id,
+        )
+
+    @staticmethod
+    def _extract_named_date_phrase(message: str, labels: tuple[str, ...]) -> str:
+        text = " ".join(str(message or "").strip().split())
+        if not text:
+            return ""
+        pattern = r"\b(?:" + "|".join(re.escape(label) for label in labels) + r")\b"
+        match = re.search(
+            pattern + r"(?:\s+(?:use|set|as|is|be|to|for))?\s+(.+?)$",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip(" .,:;")
+
+    @staticmethod
+    def _coerce_existing_datetime(value: Any) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if getattr(parsed, "tzinfo", None) is not None:
+                return parsed.replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_human_date_phrase(
+        raw_text: str,
+        *,
+        default_year: int,
+        end_of_day: bool,
+    ) -> Optional[str]:
+        text = str(raw_text or "").strip()
+        if not text:
+            return None
+
+        text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text, flags=re.IGNORECASE)
+        text = text.replace(",", " ")
+        text = " ".join(text.split())
+
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if getattr(parsed, "tzinfo", None) is not None:
+                parsed = parsed.replace(tzinfo=None)
+            return parsed.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            pass
+
+        has_time = bool(
+            re.search(r"\b\d{1,2}:\d{2}(?::\d{2})?\b|\b\d{1,2}\s*(?:am|pm)\b", text, re.IGNORECASE)
+        )
+        candidates = [text]
+        if not re.search(r"\b\d{4}\b", text):
+            candidates.insert(0, f"{text} {default_year}")
+
+        formats = [
+            "%d %B %Y %H:%M:%S",
+            "%d %B %Y %H:%M",
+            "%d %B %Y %I:%M %p",
+            "%d %B %Y %I %p",
+            "%d %B %Y",
+            "%d %b %Y %H:%M:%S",
+            "%d %b %Y %H:%M",
+            "%d %b %Y %I:%M %p",
+            "%d %b %Y %I %p",
+            "%d %b %Y",
+            "%B %d %Y %H:%M:%S",
+            "%B %d %Y %H:%M",
+            "%B %d %Y %I:%M %p",
+            "%B %d %Y %I %p",
+            "%B %d %Y",
+            "%b %d %Y %H:%M:%S",
+            "%b %d %Y %H:%M",
+            "%b %d %Y %I:%M %p",
+            "%b %d %Y %I %p",
+            "%b %d %Y",
+        ]
+        for candidate in candidates:
+            for fmt in formats:
+                try:
+                    parsed = datetime.strptime(candidate, fmt)
+                except ValueError:
+                    continue
+                if not has_time:
+                    parsed = parsed.replace(
+                        hour=23 if end_of_day else 0,
+                        minute=59 if end_of_day else 0,
+                        second=59 if end_of_day else 0,
+                    )
+                return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+        return None
+
+    def _extract_pending_action_updates(
+        self,
+        user_message: str,
+        pending_action: dict,
+    ) -> dict[str, str]:
+        args = dict((pending_action or {}).get("args") or {})
+        if not args:
+            return {}
+
+        existing_from = self._coerce_existing_datetime(args.get("from_date"))
+        existing_to = self._coerce_existing_datetime(args.get("to_date"))
+        default_year = (
+            (existing_from or existing_to or datetime.now()).year
+        )
+
+        updates: dict[str, str] = {}
+        if "from_date" in args:
+            raw_from = self._extract_named_date_phrase(
+                user_message,
+                ("from date", "from_date", "start date", "start_date", "from"),
+            )
+            parsed_from = self._parse_human_date_phrase(
+                raw_from,
+                default_year=default_year,
+                end_of_day=False,
+            ) if raw_from else None
+            if parsed_from:
+                updates["from_date"] = parsed_from
+
+        if "to_date" in args:
+            raw_to = self._extract_named_date_phrase(
+                user_message,
+                ("to date", "to_date", "end date", "end_date", "till", "until", "to"),
+            )
+            parsed_to = self._parse_human_date_phrase(
+                raw_to,
+                default_year=default_year,
+                end_of_day=True,
+            ) if raw_to else None
+            if parsed_to:
+                updates["to_date"] = parsed_to
+
+        return updates
+
+    def _refresh_pending_approval_prompt(
+        self,
+        state: ConversationState,
+        updated_args: dict,
+        *,
+        note: str,
+    ) -> str:
+        action = dict(state.pending_action or {})
+        tool_name = str(action.get("tool") or "unknown")
+        actual_tier = str(action.get("tier") or "medium_risk")
+        authorized_users = list(action.get("authorized_users") or [])
+
+        self._log_pending_action_decision(
+            state,
+            "CANCELLED",
+            state.user_id or "user",
+        )
+
+        summary = self._build_pending_action_summary(tool_name, updated_args)
+        approval_request = self.approval_gate.create_approval_request(
+            state.conversation_id,
+            tool_name,
+            actual_tier,
+            updated_args,
+            summary,
+        )
+        state.pending_action = {
+            "tool": tool_name,
+            "args": dict(updated_args),
+            "tier": actual_tier,
+            "authorized_users": authorized_users,
+            "request_id": approval_request.request_id,
+        }
+        state.pending_action_summary = summary
+        state.phase = ConversationPhase.AWAITING_APPROVAL
+        return (
+            f"{note}\n\n"
+            + self.approval_gate.format_approval_prompt(approval_request)
+        )
+
+    def _inject_user_scope(self, tool_name: str, tool_args: dict, tool_def, state: ConversationState) -> dict:
+        args = dict(tool_args or {})
+        metadata = getattr(tool_def, "metadata", {}) or {}
+        needs_scope = (
+            tool_name in {
+                "discover_tools",
+                "check_workflow_status",
+                "list_recent_failures",
+                "trigger_workflow",
+                "t4_execute_and_poll",
+                "ae.workflow.list",
+            }
+            or bool(metadata.get("workflow_name"))
+            or bool(metadata.get("workflow_id"))
+        )
+        if not needs_scope:
+            return args
+        if state.user_id and "user_id" not in args and "userId" not in args:
+            args["user_id"] = state.user_id
+        org_code = self._state_org_code(state)
+        if org_code and "org_code" not in args and "orgCode" not in args:
+            args["org_code"] = org_code
+        return args
 
     def _get_issue_tracker(self, conversation_id: str) -> IssueTracker:
         if conversation_id not in self.issue_trackers:
@@ -150,7 +392,12 @@ class Orchestrator:
                     state.pending_action = None
                     state.pending_action_summary = ""
                     state.phase = ConversationPhase.IDLE
-                    self.approval_gate.log_decision(state.conversation_id, "CANCELLED")
+                    self.approval_gate.log_decision(
+                        state.conversation_id,
+                        str(state.suspended_flow.get("pending_action", {}).get("request_id") or ""),
+                        "CANCELLED",
+                        state.user_id or "user",
+                    )
                     logger.info(
                         "approval_suspended conversation_id=%s intent=%s",
                         state.conversation_id, intent_result.reason,
@@ -181,7 +428,7 @@ class Orchestrator:
             # Skip for specialists (allowed_categories != None) or ongoing investigations.
             conv_route = "OPS"
             if allowed_categories is None and state.phase == ConversationPhase.IDLE:
-                conv_route = self._classify_conversational_route(user_message, tracker)
+                conv_route = self._classify_conversational_route(user_message, state, tracker)
             
             if conv_route in {"ACK", "SMALLTALK", "GENERAL"}:
                 response = self._build_conversational_response(
@@ -354,6 +601,7 @@ class Orchestrator:
     def _classify_conversational_route(
         self,
         user_message: str,
+        state: ConversationState,
         tracker: IssueTracker | None = None,
     ) -> str:
         """LLM router for conversational turns. Returns: ACK, SMALLTALK, GENERAL, or OPS."""
@@ -385,7 +633,20 @@ class Orchestrator:
         try:
             rag = get_rag_engine()
             query_vec = rag.embed_query(text)
-            tool_hits = rag.search_tools(text, top_k=5, query_embedding=query_vec)
+            from security.workflow_access import is_read_enforced
+
+            if state.user_id:
+                tool_hits = rag.search_tools_for_user(
+                    text,
+                    user_id=state.user_id,
+                    org_code=self._state_org_code(state),
+                    top_k=5,
+                    query_embedding=query_vec,
+                )
+            elif is_read_enforced():
+                tool_hits = []
+            else:
+                tool_hits = rag.search_tools(text, top_k=5, query_embedding=query_vec)
             for hit in tool_hits or []:
                 if not isinstance(hit, dict):
                     continue
@@ -651,6 +912,7 @@ class Orchestrator:
                             tool_def = turn_tools.get_tool(tool_name) or tool_registry.get_tool(tool_name)
 
                         if tool_def:
+                            tool_args = self._inject_user_scope(tool_name, tool_args, tool_def, state)
                             # Check for missing required parameters first. 
                             # If params are missing, we don't ask for approval yet.
                             # We let the tool run (dynamic tools return a friendly prompt)
@@ -669,6 +931,19 @@ class Orchestrator:
                             if not missing and self.approval_gate.needs_approval(
                                 tool_name, tool_def.tier, tool_args
                             ):
+                                summary = self._build_pending_action_summary(
+                                    tool_name,
+                                    tool_args,
+                                )
+                                # Clean summary too for ticketing actions
+                                if tool_name in ("create_hdfc_ticket", "create_incident_ticket"):
+                                    summary = summary.replace("_", " ").replace(":", " ")
+
+                                approval_request = self.approval_gate.create_approval_request(
+                                    state.conversation_id,
+                                    tool_name, tool_def.tier,
+                                    tool_args, summary,
+                                )
                                 state.pending_action = {
                                     "tool": tool_name,
                                     "args": tool_args,
@@ -676,27 +951,13 @@ class Orchestrator:
                                     "authorized_users": tool_args.get(
                                         "authorized_users", []
                                     ),
+                                    "request_id": approval_request.request_id,
                                 }
-                                summary_target = (
-                                    tool_args.get("process_name")
-                                    or tool_args.get("title")
-                                    or tool_args.get("workflow_name")
-                                    or "unknown"
-                                )
-                                summary = f"{tool_name} on {summary_target}"
-                                # Clean summary too for ticketing actions
-                                if tool_name in ("create_hdfc_ticket", "create_incident_ticket"):
-                                    summary = summary.replace("_", " ").replace(":", " ")
-
                                 state.pending_action_summary = summary
                                 state.phase = ConversationPhase.AWAITING_APPROVAL
                                 state.is_agent_working = False
                                 return self.approval_gate.format_approval_prompt(
-                                    self.approval_gate.create_approval_request(
-                                        state.conversation_id,
-                                        tool_name, tool_def.tier,
-                                        tool_args, summary,
-                                    )
+                                    approval_request
                                 )
 
                     messages.append(candidate.content)
@@ -737,6 +998,7 @@ class Orchestrator:
                             )
                             continue
 
+                        tool_args = self._inject_user_scope(tool_name, tool_args, tool_def, state)
                         progress.on_tool_start(tool_name, tool_args)
                         
                         import time
@@ -1000,13 +1262,29 @@ class Orchestrator:
         intent = classification.intent
 
         if intent == ApprovalIntent.CLARIFY:
+            updates = self._extract_pending_action_updates(
+                user_message,
+                state.pending_action or {},
+            )
+            if updates:
+                refreshed_args = dict((state.pending_action or {}).get("args") or {})
+                refreshed_args.update(updates)
+                return self._refresh_pending_approval_prompt(
+                    state,
+                    refreshed_args,
+                    note="Updated the pending action with your requested parameter changes.",
+                )
             return self.approval_gate.format_clarification_prompt(
                 state.pending_action,
                 state.pending_action_summary,
             )
 
         if intent == ApprovalIntent.CANCEL:
-            self.approval_gate.log_decision(state.conversation_id, "CANCELLED")
+            self._log_pending_action_decision(
+                state,
+                "CANCELLED",
+                state.user_id or "user",
+            )
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
             state.pending_action_summary = ""
@@ -1014,7 +1292,11 @@ class Orchestrator:
             return "Understood. I cancelled the pending action. What should I do next?"
 
         if intent in (ApprovalIntent.REJECT, ApprovalIntent.NEW_REQUEST):
-            self.approval_gate.log_decision(state.conversation_id, "REJECTED")
+            self._log_pending_action_decision(
+                state,
+                "REJECTED",
+                state.user_id or "user",
+            )
             state.phase = ConversationPhase.IDLE
             state.pending_action = None
             state.pending_action_summary = ""
@@ -1025,6 +1307,19 @@ class Orchestrator:
                     + self._process_message(user_message, state, tracker)
                 )
             return "Action rejected. What would you like me to do instead?"
+
+        updates = self._extract_pending_action_updates(
+            user_message,
+            state.pending_action or {},
+        )
+        if updates:
+            refreshed_args = dict((state.pending_action or {}).get("args") or {})
+            refreshed_args.update(updates)
+            return self._refresh_pending_approval_prompt(
+                state,
+                refreshed_args,
+                note="Updated the pending action with your requested parameter changes.",
+            )
 
         if intent != ApprovalIntent.APPROVE:
             return (
@@ -1051,11 +1346,22 @@ class Orchestrator:
         if not rbac_ok:
             return rbac_err
 
-        self.approval_gate.log_decision(state.conversation_id, "APPROVED", state.user_id or "user")
+        self._log_pending_action_decision(
+            state,
+            "APPROVED",
+            state.user_id or "user",
+        )
         state.phase = ConversationPhase.EXECUTING
-        result = tool_registry.execute(action["tool"], **action["args"])
+        approval_tool_def = tool_registry.get_tool(action["tool"])
+        action_args = self._inject_user_scope(
+            action["tool"],
+            action["args"],
+            approval_tool_def,
+            state,
+        )
+        result = tool_registry.execute(action["tool"], **action_args)
         state.log_tool_call(
-            action["tool"], action["args"], result.data, result.success
+            action["tool"], action_args, result.data, result.success
         )
         # Cleanup param collection on success (Loop Fix)
         if result.success and action["tool"] in ("trigger_workflow", "t4_execute_and_poll"):
@@ -1639,8 +1945,21 @@ CRITICAL RULES:
             category="automationedge",
             top_k=5,
             _agent_id=feedback_agent_id,
+            user_id=state.user_id,
+            org_code=self._state_org_code(state),
         )
-        state.log_tool_call("discover_tools", {"query": msg, "category": "automationedge", "top_k": 5}, discover.data, discover.success)
+        state.log_tool_call(
+            "discover_tools",
+            {
+                "query": msg,
+                "category": "automationedge",
+                "top_k": 5,
+                "user_id": state.user_id,
+                "org_code": self._state_org_code(state),
+            },
+            discover.data,
+            discover.success,
+        )
         if not discover.success:
             return None
 
@@ -2126,7 +2445,7 @@ CRITICAL RULES:
             )
 
         tool_name = str(pc.get("execution_tool") or "trigger_workflow")
-        action_args = self._build_action_args_for_collection(pc, workflow_name, collected)
+        action_args = self._build_action_args_for_collection(pc, workflow_name, collected, state)
 
         # If this param collection was created after an already-approved action,
         # execute automatically once all params are available.
@@ -2167,23 +2486,24 @@ CRITICAL RULES:
         # Otherwise move to approval flow.
         tool_def = tool_registry.get_tool(tool_name)
         actual_tier = tool_def.tier if tool_def else "medium_risk"
+        summary = self._build_pending_action_summary(tool_name, action_args)
+        approval_request = self.approval_gate.create_approval_request(
+            state.conversation_id,
+            tool_name,
+            actual_tier,
+            action_args,
+            summary,
+        )
         state.pending_action = {
             "tool": tool_name,
             "args": action_args,
             "tier": actual_tier,
             "authorized_users": [],
+            "request_id": approval_request.request_id,
         }
-        state.pending_action_summary = f"{tool_name} on {workflow_name}"
+        state.pending_action_summary = summary
         state.phase = ConversationPhase.AWAITING_APPROVAL
-        return self.approval_gate.format_approval_prompt(
-            self.approval_gate.create_approval_request(
-                state.conversation_id,
-                tool_name,
-                actual_tier,
-                action_args,
-                state.pending_action_summary,
-            )
-        )
+        return self.approval_gate.format_approval_prompt(approval_request)
 
     def _extract_params_from_user_message(self, user_message: str, param_names: list[str], messages: list[dict] | None = None) -> dict[str, str | None]:
         """LLM-based param extractor inspired by code_ref remediation_agent_extract_params."""
@@ -2316,19 +2636,38 @@ CRITICAL RULES:
             "auto_execute": bool(auto_execute),
         }
 
-    def _build_action_args_for_collection(self, pc: dict, workflow_name: str, collected: dict) -> dict:
+    def _build_action_args_for_collection(
+        self,
+        pc: dict,
+        workflow_name: str,
+        collected: dict,
+        state: ConversationState,
+    ) -> dict:
         tool_name = str(pc.get("execution_tool") or "trigger_workflow")
         template = dict(pc.get("execution_template") or {})
+        org_code = self._state_org_code(state)
 
         if tool_name == "t4_execute_and_poll":
             args = {
                 "workflow_name": workflow_name,
-                "workflow_id": template.get("workflow_id") or get_ae_client().get_cached_workflow_id(workflow_name) or workflow_name,
+                "workflow_id": (
+                    template.get("workflow_id")
+                    or get_ae_client().get_cached_workflow_id(
+                        workflow_name,
+                        user_id=state.user_id,
+                        org_code=org_code,
+                    )
+                    or workflow_name
+                ),
                 "params": {},
             }
             if isinstance(template.get("params"), dict):
                 args["params"].update(template.get("params"))
             args["params"].update(collected)
+            if state.user_id:
+                args["user_id"] = state.user_id
+            if org_code:
+                args["org_code"] = org_code
             return args
 
         # Default path for trigger_workflow and most execution tools.
@@ -2339,6 +2678,10 @@ CRITICAL RULES:
         if isinstance(template.get("parameters"), dict):
             args["parameters"].update(template.get("parameters"))
         args["parameters"].update(collected)
+        if state.user_id:
+            args["user_id"] = state.user_id
+        if org_code:
+            args["org_code"] = org_code
         return args
 
     def _format_rag_context(self, tool_hits, kb_hits, sop_hits, incident_hits=None) -> str:

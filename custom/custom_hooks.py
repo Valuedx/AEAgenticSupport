@@ -37,6 +37,7 @@ from custom.helpers.issue_classifier import (
     link_cases,
     should_escalate_recurrence,
 )
+from custom.helpers.custom_bot_helper import Custom_Bot_Helper
 
 
 # ── Activity normalisation ──
@@ -352,3 +353,19 @@ class CustomChatbotHooks(ChatbotHooks):
         return await sync_to_async(
             _process_message_sync, thread_sensitive=False
         )(activity_dict)
+
+     async def root_dialog_hook(conv_state, user_state, turn_context) -> Dialog:
+        """This method will be invoked before matching triggers from our chatbot.
+        Can be used to invoke custom dialogs by return a dialog object that is also available in global var export_dialogs
+
+        Args:
+            conv_state (botbuilder.core.ConversationState)
+            user_state (botbuilder.core.UserState)
+            turn_context (botbuilder.core.TurnContext)
+
+        Returns:
+            botbuilder.dialogs.Dialog : Dialog to be invoked, return None if not invoking dialogs.
+        """
+        logger.info("Root dialog hook called")
+        await Custom_Bot_Helper.teams_email(turn_context,conv_state)
+        return None   

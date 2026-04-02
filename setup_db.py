@@ -233,6 +233,9 @@ CREATE TABLE IF NOT EXISTS user_registry (
     user_name   VARCHAR(256),
     user_email  VARCHAR(256),
     user_team   VARCHAR(256),
+    ae_user_id  INTEGER,
+    ae_username VARCHAR(256),
+    ae_is_admin BOOLEAN DEFAULT FALSE NOT NULL,
     metadata    JSONB DEFAULT '{}'::jsonb,
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
@@ -248,12 +251,16 @@ CREATE TABLE IF NOT EXISTS user_workflow_access (
     ae_user_id        INTEGER,
     ae_username       VARCHAR(256),
     match_confidence  REAL         DEFAULT 0.0,
+    match_method      VARCHAR(32)  DEFAULT 'unknown',
     synced_at         TIMESTAMPTZ  DEFAULT NOW(),
+    last_seen_at      TIMESTAMPTZ  DEFAULT NOW(),
     CONSTRAINT uq_user_workflow UNIQUE (user_id, workflow_id, org_code)
 );
 
 CREATE INDEX IF NOT EXISTS idx_uwa_user ON user_workflow_access(user_id);
 CREATE INDEX IF NOT EXISTS idx_uwa_workflow ON user_workflow_access(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_uwa_user_org ON user_workflow_access(user_id, org_code);
+CREATE INDEX IF NOT EXISTS idx_uwa_user_wf_org ON user_workflow_access(user_id, workflow_id, org_code);
 """
 
 
@@ -323,6 +330,13 @@ def setup_database():
         # Ensure critical columns in conversation_state
         cur.execute("ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS summary TEXT")
         cur.execute("ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS is_human_handoff BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE user_registry ADD COLUMN IF NOT EXISTS ae_user_id INTEGER")
+        cur.execute("ALTER TABLE user_registry ADD COLUMN IF NOT EXISTS ae_username VARCHAR(256)")
+        cur.execute("ALTER TABLE user_registry ADD COLUMN IF NOT EXISTS ae_is_admin BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE user_workflow_access ADD COLUMN IF NOT EXISTS match_method VARCHAR(32) DEFAULT 'unknown'")
+        cur.execute("ALTER TABLE user_workflow_access ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW()")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_uwa_user_org ON user_workflow_access(user_id, org_code)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_uwa_user_wf_org ON user_workflow_access(user_id, workflow_id, org_code)")
         cur.execute("ALTER TABLE conversation_state ADD COLUMN IF NOT EXISTS active_issue_id VARCHAR(64)")
 
         # Ensure tsv in rag_documents

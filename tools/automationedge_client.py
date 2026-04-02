@@ -18,6 +18,7 @@ import httpx
 import urllib3
 
 from config.settings import CONFIG
+from security.workflow_access import can_view_workflow, execute_auth_mode, is_read_enforced
 from state.app_config import get_runtime_value
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -563,10 +564,21 @@ class AutomationEdgeClient:
         if not workflow_name:
             raise ValueError("workflow_name is required")
 
+        caller_user_id = str(user_id or "").strip()
+        mode = execute_auth_mode()
+        if mode == "service_account":
+            effective_user_id = (
+                str(self.default_user_id or "").strip()
+                or str(self.username or "").strip()
+                or "ops_agent"
+            )
+        else:
+            effective_user_id = caller_user_id or self.default_user_id
+
         payload = {
             "orgCode": org_code or self.default_org_code,
             "workflowName": workflow_name,
-            "userId": user_id or self.default_user_id,
+            "userId": effective_user_id,
             "source": source,
             "responseMailSubject": mail_subject or "null",
             "params": self._build_param_array(params or {}),
@@ -698,7 +710,13 @@ class AutomationEdgeClient:
             current_offset = int(current_offset) + int(page_size)
         return all_workflows
 
-    def resolve_cached_workflow_name(self, workflow_name: str) -> str:
+    def resolve_cached_workflow_name(
+        self,
+        workflow_name: str,
+        *,
+        user_id: str = "",
+        org_code: str = "",
+    ) -> str:
         """Resolve workflow name from local catalog using safe exact-match variants."""
         name = str(workflow_name or "").strip()
         if not name:
@@ -727,19 +745,37 @@ class AutomationEdgeClient:
             from config.db import get_conn
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # Single query for all variants; pick first match in preferred order
-                    placeholders = ",".join(["lower(%s)"] * len(ordered))
-                    cur.execute(
-                        f"SELECT workflow_name FROM workflow_catalog WHERE lower(workflow_name) IN ({placeholders})",
-                        tuple(ordered),
+                    placeholders = ",".join(["%s"] * len(ordered))
+                    sql = (
+                        "SELECT workflow_id, workflow_name, org_code "
+                        f"FROM workflow_catalog WHERE lower(workflow_name) IN ({placeholders})"
                     )
-                    rows = {str(r[0]).lower(): str(r[0]) for r in cur.fetchall() if r and r[0]}
+                    params: list[Any] = [value.lower() for value in ordered]
+                    target_org = str(org_code or "").strip()
+                    if target_org:
+                        sql += " AND org_code = %s"
+                        params.append(target_org)
+                    sql += " ORDER BY active DESC, fetched_at DESC"
+                    cur.execute(sql, tuple(params))
+                    rows = [
+                        (
+                            str(row[0]).strip() if row and row[0] else "",
+                            str(row[1]).strip() if row and row[1] else "",
+                            str(row[2]).strip() if row and len(row) > 2 and row[2] else "",
+                        )
+                        for row in cur.fetchall()
+                    ]
                     for candidate in ordered:
-                        if candidate.lower() in rows:
-                            return rows[candidate.lower()]
+                        for workflow_id, resolved_name, resolved_org in rows:
+                            if resolved_name.lower() != candidate.lower():
+                                continue
+                            if user_id and not can_view_workflow(user_id, workflow_id, resolved_org or target_org):
+                                continue
+                            return resolved_name
             return ""
         except Exception as exc:
             logger.debug("T4: cached workflow name resolution failed for %s: %s", workflow_name, exc)
+            return ""
 
     def get_cached_workflow_id(self, workflow_name: str) -> Optional[str]:
         """Resolve numeric workflow_id from local catalog for a given technical name."""
@@ -763,12 +799,29 @@ class AutomationEdgeClient:
         except Exception as exc:
             logger.debug("T4: cached workflow ID resolution failed for %s: %s", name, exc)
             return None
-    def resolve_workflow_via_rag(self, query: str, top_k: int = 3) -> str:
+    def resolve_workflow_via_rag(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        user_id: str = "",
+        org_code: str = "",
+    ) -> str:
         """Use RAG semantic search to resolve a bot name from a user query."""
         try:
             from rag.engine import get_rag_engine
             rag = get_rag_engine()
-            results = rag.search_tools(query, top_k=top_k)
+            if user_id:
+                results = rag.search_tools_for_user(
+                    query,
+                    user_id=user_id,
+                    org_code=org_code,
+                    top_k=top_k,
+                )
+            elif is_read_enforced():
+                results = []
+            else:
+                results = rag.search_tools(query, top_k=top_k)
             if results:
                 # Pick the best match that has a workflow name in metadata
                 for res in results:
@@ -1052,13 +1105,22 @@ class AutomationEdgeClient:
                     if isinstance(items, list) and items:
                         if candidate_names:
                             norm_candidates = {c.lower() for c in candidate_names}
+                            any_named_items = any(
+                                (
+                                    it.get("workflowName")
+                                    or (it.get("workflowConfiguration") or {}).get("name")
+                                )
+                                for it in items
+                                if isinstance(it, dict)
+                            )
                             filtered = [
                                 it for it in items 
                                 if (it.get("workflowName") or (it.get("workflowConfiguration") or {}).get("name") or "").lower() in norm_candidates
                             ]
-                            if filtered:
+                            if filtered or not any_named_items:
                                 limit_val = max(limit, 1)
-                                return [filtered[i] for i in range(min(len(filtered), limit_val))]
+                                source_items = filtered if filtered else items
+                                return [source_items[i] for i in range(min(len(source_items), limit_val))]
                         else:
                             limit_val = max(limit, 1)
                             return [items[i] for i in range(min(len(items), limit_val))]
@@ -1429,22 +1491,15 @@ class AutomationEdgeClient:
         try:
             # 1. Check if a COMPLETE debug log request already exists for this execution_id
             # This avoids creating redundant "NEW" requests which the server might pick first.
-            existing_requests = self.get_agent_debug_logs()
-            best_existing_id = None
-            if existing_requests and isinstance(existing_requests, list):
-                # Sort by id descending to get the most recent one first
-                sorted_reqs = sorted(
-                    [r for r in existing_requests if isinstance(r, dict)], 
-                    key=lambda x: x.get("id") or 0, 
-                    reverse=True
+            existing_requests = self._list_debug_log_requests()
+            best_existing = self._find_debug_log_request_for_execution(existing_requests, execution_id)
+            best_existing_id = best_existing.get("id") if best_existing else None
+            if best_existing_id and best_existing.get("logFileLink"):
+                logger.info(
+                    "Found existing COMPLETE debug log request %s for execution %s",
+                    best_existing_id,
+                    execution_id,
                 )
-                for r in sorted_reqs:
-                    req_wf_id = str(r.get("workflowInstanceId") or "")
-                    if req_wf_id == str(execution_id) and (r.get("status") or "").upper() == "COMPLETE":
-                        if r.get("logFileLink"):
-                            best_existing_id = r.get("id")
-                            logger.info(f"Found existing COMPLETE debug log request {best_existing_id} for execution {execution_id}")
-                            break
             
             req_id = best_existing_id
             if not req_id:
@@ -1470,12 +1525,12 @@ class AutomationEdgeClient:
 
             # 4. Poll for logFileLink (or download immediately if we found an existing one)
             import time
-            for poll_attempt in range(10): # Max ~90s
+            for poll_attempt in range(12): # Max ~95s with first longer wait
                 # T4 can take several seconds to register a debug log request
                 # 10s initial wait avoids AE-1603 (Invalid log request id) on first poll
                 wait = 10 if poll_attempt == 0 else 5
                 time.sleep(wait)
-                 # T4 SUCCESS PATH: /agent/debuglogs/{id} returns the ZIP bytes directly.
+                # T4 SUCCESS PATH: /agent/debuglogs/{id} returns the ZIP bytes directly.
                 # _json_or_text encodes this as {"is_zip": True, "log_zip_content": <bytes>}
                 updated = self.get_debug_log_request(str(req_id))
                 if updated.get("is_zip") or updated.get("log_zip_content"):
@@ -1498,8 +1553,40 @@ class AutomationEdgeClient:
                 
                 # AE-1603: server hasn't registered the request yet - treat as retryable
                 error_code = str(updated.get("errorCode") or "").strip() if isinstance(updated, dict) else ""
-                if error_code == "AE-1603" and poll_attempt < 5:
-                    logger.info(f"Poll {poll_attempt+1}: AE-1603 received, T4 hasn't registered request yet. Retrying...")
+                if error_code == "AE-1603":
+                    logger.info(
+                        "Poll %d: AE-1603 received for request %s. Checking debug log list for execution %s.",
+                        poll_attempt + 1,
+                        req_id,
+                        execution_id,
+                    )
+
+                listed_requests = self._list_debug_log_requests()
+                listed_match = self._find_debug_log_request_for_execution(listed_requests, execution_id)
+                if listed_match:
+                    listed_id = str(listed_match.get("id") or "").strip()
+                    if listed_id and listed_id != str(req_id):
+                        logger.info(
+                            "Switching debug log request id from %s to %s for execution %s based on list polling.",
+                            req_id,
+                            listed_id,
+                            execution_id,
+                        )
+                        req_id = listed_id
+
+                    listed_link = str(listed_match.get("logFileLink") or "").strip()
+                    if listed_link:
+                        logger.info("T4 debug log ready via list poll link: %s", listed_link)
+                        res = self._authorized_request("GET", listed_link, use_rest_prefix=False)
+                        if isinstance(res, dict):
+                            res["source_info"] = f"T4 debug log request {req_id} (ready via list poll)"
+                        return res
+
+                    listed_status = str(listed_match.get("status") or "").upper()
+                    if listed_status in {"FAILED", "ERROR"}:
+                        raise RuntimeError(f"T4 debug log request {req_id} failed on server.")
+
+                if error_code == "AE-1603" and poll_attempt < 8:
                     continue
                 
                 logger.debug(f"T4 debug log request {req_id} still not ready (attempt {poll_attempt+1}), polling again...")
@@ -1580,6 +1667,46 @@ class AutomationEdgeClient:
                 except Exception:
                     pass
             raise
+
+    @staticmethod
+    def _debug_log_request_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        raw_id = str(item.get("id") or "").strip()
+        try:
+            return (int(raw_id), raw_id)
+        except (TypeError, ValueError):
+            return (-1, raw_id)
+
+    def _list_debug_log_requests(self) -> list[dict]:
+        try:
+            raw = self.get_agent_debug_logs()
+        except Exception as exc:
+            logger.info("Could not list existing debug log requests: %s", exc)
+            return []
+        return self._extract_list(raw, keys=("data", "items", "results"))
+
+    def _find_debug_log_request_for_execution(self, entries: list[dict], execution_id: str) -> dict[str, Any]:
+        target = str(execution_id or "").strip()
+        if not target:
+            return {}
+        matches = [
+            item
+            for item in entries
+            if isinstance(item, dict)
+            and str(item.get("workflowInstanceId") or item.get("workflow_instance_id") or "").strip() == target
+        ]
+        if not matches:
+            return {}
+        matches.sort(key=self._debug_log_request_sort_key, reverse=True)
+
+        for status in ("COMPLETE", "COMPLETED"):
+            for item in matches:
+                if str(item.get("status") or "").upper() == status and str(item.get("logFileLink") or "").strip():
+                    return item
+
+        for item in matches:
+            if str(item.get("id") or "").strip():
+                return item
+        return {}
 
     def poll_execution_status(
         self,
@@ -1780,11 +1907,16 @@ class AutomationEdgeClient:
             if not workflows:
                 return 0
 
-            org = self.default_org_code
             rows = []
             for wf in workflows:
                 wf_id = str(wf.get("workflowId") or wf.get("id") or "").strip()
                 wf_name = str(wf.get("workflowName") or wf.get("name") or "").strip()
+                org = str(
+                    wf.get("orgCode")
+                    or wf.get("org_code")
+                    or self.default_org_code
+                    or ""
+                ).strip()
                 if not wf_id or not wf_name:
                     continue
                 rows.append((
@@ -1863,6 +1995,12 @@ class AutomationEdgeClient:
             for wf in workflows:
                 wf_id = str(wf.get("workflowId") or wf.get("id") or "").strip()
                 wf_name = str(wf.get("workflowName") or wf.get("name") or "").strip()
+                org = str(
+                    wf.get("orgCode")
+                    or wf.get("org_code")
+                    or self.default_org_code
+                    or ""
+                ).strip()
                 if not wf_name:
                     continue
 
@@ -1928,6 +2066,7 @@ class AutomationEdgeClient:
                         "tool_name": display_name,
                         "workflow_id": wf_id,
                         "workflow_name": wf_name,
+                        "org_code": org,
                         "category": category,
                         "source": "automationedge",
                         "dynamic": True,
@@ -1992,34 +2131,68 @@ class AutomationEdgeClient:
             
         return required
 
-    def get_cached_workflow_id(self, workflow_name: str) -> str:
+    def get_cached_workflow_id(
+        self,
+        workflow_name: str,
+        *,
+        user_id: str = "",
+        org_code: str = "",
+    ) -> str:
         """Fetch workflow_id from local workflow_catalog for a workflow name."""
-        wf_id, _ = self.get_cached_workflow_info(workflow_name)
+        wf_id, _ = self.get_cached_workflow_info(
+            workflow_name,
+            user_id=user_id,
+            org_code=org_code,
+        )
         return wf_id
 
-    def get_cached_workflow_info(self, workflow_name: str) -> tuple[str, list[dict]]:
+    def get_cached_workflow_info(
+        self,
+        workflow_name: str,
+        *,
+        user_id: str = "",
+        org_code: str = "",
+    ) -> tuple[str, list[dict]]:
         """Fetch workflow_id and parameters in one query. Returns (workflow_id, parameters)."""
         name = str(workflow_name or "").strip()
         if not name:
             return ("", [])
 
         # Step 1: Resolve to the actual technical name in the catalog (WF_ prefix, case-insensitive, etc.)
-        resolved = self.resolve_cached_workflow_name(name)
+        try:
+            resolved = self.resolve_cached_workflow_name(
+                name,
+                user_id=user_id,
+                org_code=org_code,
+            )
+        except TypeError:
+            resolved = self.resolve_cached_workflow_name(name)
+        if user_id and not resolved:
+            return ("", [])
         lookup_name = resolved if resolved else name
 
         try:
             from config.db import get_conn
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT workflow_id, parameters FROM workflow_catalog WHERE workflow_name = %s",
-                        (lookup_name,),
+                    sql = (
+                        "SELECT workflow_id, parameters, org_code "
+                        "FROM workflow_catalog WHERE workflow_name = %s"
                     )
-                    row = cur.fetchone()
-                    if row:
-                        wf_id = str(row[0]) if row[0] else ""
-                        params = list(row[1]) if row[1] else []
-                        return (wf_id, params)
+                    params: list[Any] = [lookup_name]
+                    target_org = str(org_code or "").strip()
+                    if target_org:
+                        sql += " AND org_code = %s"
+                        params.append(target_org)
+                    sql += " ORDER BY active DESC, fetched_at DESC"
+                    cur.execute(sql, tuple(params))
+                    for row in cur.fetchall():
+                        wf_id = str(row[0]) if row and row[0] else ""
+                        wf_org = str(row[2]) if row and len(row) > 2 and row[2] else target_org
+                        if user_id and not can_view_workflow(user_id, wf_id, wf_org):
+                            continue
+                        wf_params = list(row[1]) if row and row[1] else []
+                        return (wf_id, wf_params)
             return ("", [])
         except Exception as exc:
             logger.debug("T4: cached workflow info lookup failed for %s: %s", workflow_name, exc)

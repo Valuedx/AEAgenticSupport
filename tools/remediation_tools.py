@@ -21,10 +21,40 @@ import logging
 import json
 
 from config.settings import CONFIG
+from security.workflow_access import (
+    can_execute_workflow,
+    default_org_code,
+    is_execute_enforced,
+)
 from tools.base import ToolDefinition, get_ae_client
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.tools.remediation")
+
+
+def _resolve_cached_workflow_name_for_user(client, workflow_name: str, user_id: str = "", org_code: str = "") -> str:
+    if is_execute_enforced() and not str(user_id or "").strip():
+        return ""
+    resolver = getattr(client, "resolve_cached_workflow_name")
+    try:
+        return resolver(workflow_name, user_id=user_id, org_code=org_code)
+    except TypeError:
+        return resolver(workflow_name)
+
+
+def _get_cached_workflow_info_for_user(client, workflow_name: str, user_id: str = "", org_code: str = "") -> tuple[str, list[dict]]:
+    if is_execute_enforced() and not str(user_id or "").strip():
+        return ("", [])
+    getter = getattr(client, "get_cached_workflow_info", None)
+    if not callable(getter):
+        return ("", [])
+    try:
+        value = getter(workflow_name, user_id=user_id, org_code=org_code)
+    except TypeError:
+        value = getter(workflow_name)
+    if isinstance(value, tuple) and len(value) >= 2:
+        return (str(value[0] or ""), list(value[1] or []))
+    return ("", [])
 
 
 def _normalize_execution_status(raw_status: str) -> str:
@@ -340,7 +370,12 @@ def resubmit_execution(execution_id: str,
         }
 
 
-def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
+def trigger_workflow(
+    workflow_name: str,
+    parameters: dict = None,
+    user_id: str = "",
+    org_code: str = "",
+) -> dict:
     """
     Trigger a new execution of a bot (workflow) with required parameters.
 
@@ -360,9 +395,20 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
     client = get_ae_client()
 
     # ── IMPROVEMENT 2: Smarter workflow name resolution ───────────────────────
-    resolved_name = client.resolve_cached_workflow_name(workflow_name)
+    resolved_name = _resolve_cached_workflow_name_for_user(
+        client,
+        workflow_name,
+        user_id=user_id,
+        org_code=org_code,
+    )
 
     if not resolved_name:
+        if user_id or is_execute_enforced():
+            return {
+                "success": False,
+                "error": "You are not authorized to execute this workflow.",
+                "workflow_name": workflow_name,
+            }
         # Try to surface similar workflow names so the user can correct themselves
         try:
             all_workflows = client.list_workflow_names()  # returns list[str]
@@ -388,6 +434,27 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
             ),
             "workflow_name": workflow_name,
         }
+
+    resolved_org = str(org_code or default_org_code()).strip()
+    workflow_id, _ = _get_cached_workflow_info_for_user(
+        client,
+        resolved_name,
+        user_id=user_id,
+        org_code=resolved_org,
+    )
+    if bool(user_id) or is_execute_enforced():
+        if not user_id or not workflow_id or not can_execute_workflow(user_id, workflow_id, resolved_org):
+            logger.warning(
+                "workflow execution denied for workflow=%s user_id=%r org_code=%r",
+                resolved_name,
+                user_id,
+                resolved_org,
+            )
+            return {
+                "success": False,
+                "error": "You are not authorized to execute this workflow.",
+                "workflow_name": resolved_name,
+            }
 
     # Protected-workflow guard (unchanged)
     if resolved_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
@@ -533,7 +600,6 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
 
     # ── Execute ───────────────────────────────────────────────────────────────
     try:
-        workflow_id, _ = client.get_cached_workflow_info(resolved_name)
         if not workflow_id:
             workflow_id = resolved_name
 
@@ -541,6 +607,8 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
             workflow_name=resolved_name,
             workflow_id=workflow_id,
             params=parameters,
+            org_code=resolved_org,
+            user_id=user_id,
             source="ops-agent-remediation",
         )
 
@@ -553,7 +621,14 @@ def trigger_workflow(workflow_name: str, parameters: dict = None) -> dict:
 
         # If we got a 200/201 but the body says success=False or has no ID, it's a failure
         if not req_id and not raw.get("success", True):
-            error_msg = raw.get("errorMessage") or raw.get("message") or "T4 returned failure without details."
+            error_msg = (
+                raw.get("errorMessage")
+                or raw.get("errorDetails")
+                or raw.get("error")
+                or raw.get("message")
+                or raw.get("raw")
+                or "T4 returned failure without details."
+            )
             return {
                 "success": False,
                 "error": f"Trigger failed: {error_msg}",

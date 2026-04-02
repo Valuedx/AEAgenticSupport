@@ -108,6 +108,7 @@ class MessageGateway:
                 if user_email: state.user_email = user_email
                 if user_team: state.user_team = user_team
                 if user_metadata: state.user_metadata.update(user_metadata)
+                state.ensure_workflow_access_sync()
                 
                 self._sessions[conversation_id] = state
                 self._locks[conversation_id] = threading.Lock()

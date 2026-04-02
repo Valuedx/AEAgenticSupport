@@ -163,6 +163,9 @@ CONFIG = {
         os.environ.get("AGENT_INTERACTION_LOG_LIMIT", "500")
     ),
     "SESSION_TTL_DAYS": int(os.environ.get("SESSION_TTL_DAYS", "30")),
+    "WEBCHAT_AUTH_ENABLED": os.environ.get("WEBCHAT_AUTH_ENABLED", "true").lower() == "true",
+    "WEBCHAT_LOGIN_PASSWORD": os.environ.get("WEBCHAT_LOGIN_PASSWORD", "Edge@1234"),
+    "WEBCHAT_SESSION_SECRET": os.environ.get("WEBCHAT_SESSION_SECRET", "ae-agentic-support-webchat-secret"),
 
     # RBAC & Security (Feature 2.6)
     "RBAC_ENABLED": os.environ.get("RBAC_ENABLED", "true").lower() == "true",
@@ -188,4 +191,10 @@ CONFIG = {
     "MONITORED_WORKFLOWS": [
         w.strip() for w in os.environ.get("MONITORED_WORKFLOWS", "").split(",") if w.strip()
     ],
+    "WF_ACCESS_ENFORCE_READ": os.environ.get("WF_ACCESS_ENFORCE_READ", "false").lower() == "true",
+    "WF_ACCESS_ENFORCE_EXECUTE": os.environ.get("WF_ACCESS_ENFORCE_EXECUTE", "false").lower() == "true",
+    "WF_ACCESS_EXECUTE_AUTH_MODE": os.environ.get("WF_ACCESS_EXECUTE_AUTH_MODE", "service_account").strip().lower(),
+    "WF_ACCESS_ENABLE_TARGETED_SYNC": os.environ.get("WF_ACCESS_ENABLE_TARGETED_SYNC", "true").lower() == "true",
+    "WF_ACCESS_ENABLE_SCHEDULED_SYNC": os.environ.get("WF_ACCESS_ENABLE_SCHEDULED_SYNC", "false").lower() == "true",
+    "WF_ACCESS_SYNC_INTERVAL_SECONDS": int(os.environ.get("WF_ACCESS_SYNC_INTERVAL_SECONDS", "3600")),
 }

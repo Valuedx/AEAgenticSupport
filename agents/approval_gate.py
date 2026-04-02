@@ -214,8 +214,8 @@ class ApprovalGate:
     def log_decision(
         self,
         conversation_id: str,
-        request_id: str,
-        status: str,
+        request_id: str = "",
+        status: str = "",
         approver_id: str = "",
     ) -> None:
         """
@@ -229,22 +229,48 @@ class ApprovalGate:
         Also constrains to rows created in the last 24 hours as an extra
         safeguard against accidentally touching archived audit records.
         """
+        if not status:
+            # Backward compatibility for older callers that passed
+            # (conversation_id, status, approver_id).
+            status = request_id
+            request_id = ""
+
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE approval_audit_log
-                        SET    status      = %s,
-                               approver_id = %s,
-                               decided_at  = NOW()
-                        WHERE  conversation_id = %s
-                          AND  request_id      = %s
-                          AND  status          = 'PENDING'
-                          AND  created_at      > NOW() - INTERVAL '24 hours'
-                        """,
-                        (status, approver_id, conversation_id, request_id),
-                    )
+                    if request_id:
+                        cur.execute(
+                            """
+                            UPDATE approval_audit_log
+                            SET    status      = %s,
+                                   approver_id = %s,
+                                   decided_at  = NOW()
+                            WHERE  conversation_id = %s
+                              AND  request_id      = %s
+                              AND  status          = 'PENDING'
+                              AND  created_at      > NOW() - INTERVAL '24 hours'
+                            """,
+                            (status, approver_id, conversation_id, request_id),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            UPDATE approval_audit_log
+                            SET    status      = %s,
+                                   approver_id = %s,
+                                   decided_at  = NOW()
+                            WHERE  id = (
+                                SELECT id
+                                FROM approval_audit_log
+                                WHERE conversation_id = %s
+                                  AND status = 'PENDING'
+                                  AND created_at > NOW() - INTERVAL '24 hours'
+                                ORDER BY created_at DESC
+                                LIMIT 1
+                            )
+                            """,
+                            (status, approver_id, conversation_id),
+                        )
                 conn.commit()
         except Exception as e:
             logger.warning("Failed to log approval decision: %s", e)
@@ -371,6 +397,7 @@ class ApprovalGate:
                 "Reply in natural language:",
                 "- approve (for example: 'yes, proceed')",
                 "- reject (for example: 'no, don't do this')",
+                "- update a parameter (for example: 'from date use 29 march')",
                 "- or ask another question.",
             ]
         )

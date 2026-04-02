@@ -291,7 +291,9 @@ def _build_execution_log_report(
     return "\n".join(lines)
 
 
-def get_execution_logs(execution_id: str, tail: int = 0) -> dict:
+def get_execution_logs(execution_id: str, tail: int = 0, user_id: str = "", org_code: str = "") -> dict:
+    # Logs intentionally use the admin/service-account side so investigations
+    # can still fetch technical details even when read views are user-scoped.
     # Guard: check if the assigned agent is running before extracting logs
     try:
         from mcp_server.ae_client import get_ae_client as get_mcp_client

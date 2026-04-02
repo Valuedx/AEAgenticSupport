@@ -69,7 +69,7 @@ def _is_trigger_line(line: str) -> bool:
 
 def _extract_errors_from_file_lines(
     lines: list[str],
-    max_errors: int = 10,
+    max_errors: int = 50,
     context_lines: int = 50,
     tail_fallback: int = 100,
 ) -> dict:
@@ -531,7 +531,7 @@ def analyze_agent_logs(
                 # Extract errors (backward scan, timestamp-gated triggers)
                 extraction = _extract_errors_from_file_lines(
                     file_lines,
-                    max_errors=10,
+                    max_errors=50,
                     context_lines=50,
                     tail_fallback=tail_lines,
                 )
@@ -552,10 +552,77 @@ def analyze_agent_logs(
 
                 results_by_date.setdefault(file_date_str, []).append(file_result)
 
+        def _summarize_file_result(file_res: dict) -> str:
+            cached = file_res.get("summary_text")
+            if cached:
+                return str(cached)
+
+            if not file_res.get("had_errors"):
+                tail_lines = [
+                    str(line).strip()
+                    for line in (file_res.get("tail_lines") or [])
+                    if str(line).strip()
+                ]
+                if tail_lines:
+                    last_line = tail_lines[-1][:180]
+                    summary = (
+                        "No errors were detected in this log. "
+                        f"The latest observed activity ends with: {last_line}"
+                    )
+                else:
+                    summary = "No errors were detected in this log."
+                file_res["summary_text"] = summary
+                return summary
+
+            blocks = list(file_res.get("error_blocks") or [])
+            total_blocks = int(file_res.get("error_block_count") or len(blocks) or 0)
+            if not blocks:
+                summary = (
+                    f"This log contains {total_blocks} error block(s), "
+                    "but no detailed block summary is available."
+                )
+                file_res["summary_text"] = summary
+                return summary
+
+            unique_messages: list[str] = []
+            seen_messages: set[str] = set()
+            for block in blocks:
+                message = str(block.get("error_message") or "").strip()
+                message_key = message.lower()
+                if not message or message_key in seen_messages:
+                    continue
+                unique_messages.append(message)
+                seen_messages.add(message_key)
+                if len(unique_messages) >= 2:
+                    break
+
+            summary_parts = [f"This log contains {total_blocks} error block(s)."]
+            if unique_messages:
+                summary_parts.append(f"The primary issue is '{unique_messages[0]}'.")
+            if len(unique_messages) > 1:
+                summary_parts.append(f"It also includes '{unique_messages[1]}'.")
+
+            timestamps = [
+                str(block.get("timestamp") or "").strip()
+                for block in blocks
+                if str(block.get("timestamp") or "").strip()
+            ]
+            if timestamps:
+                first_ts = timestamps[0]
+                last_ts = timestamps[-1]
+                if first_ts != last_ts:
+                    summary_parts.append(f"It repeats from {first_ts} through {last_ts}.")
+                else:
+                    summary_parts.append(f"It is visible at {first_ts}.")
+
+            summary = " ".join(summary_parts)
+            file_res["summary_text"] = summary
+            return summary
+
         # ── 6. Group errors & run AI Diagnostic ──
         error_groups: list[dict] = []
         ai_diagnostic = ""
-        ai_summary_enabled = str(os.getenv("AE_AGENT_LOG_AI_SUMMARY_ENABLED", "false")).strip().lower() in {
+        ai_summary_enabled = str(os.getenv("AE_AGENT_LOG_AI_SUMMARY_ENABLED", "true")).strip().lower() in {
             "1", "true", "yes", "on"
         }
 
@@ -607,9 +674,24 @@ def analyze_agent_logs(
                     f"> Period capped to 5 days ({f_dt.strftime('%Y-%m-%d')} → {t_dt.strftime('%Y-%m-%d')})."
                 )
 
+        total_error_occurrences = sum(
+            int(g.get("occurrence_count", 0)) for g in error_groups
+        )
+        top_group_summary = "; ".join(
+            f"{int(g.get('occurrence_count', 0))}x {str(g.get('signature') or '').strip()[:80]}"
+            for g in error_groups[:3]
+            if str(g.get("signature") or "").strip()
+        )
+
         # ── AI Diagnostic at TOP for immediate visibility ──
         if ai_diagnostic:
             report_lines.append(f"\n### 🤖 AI Diagnostic & Summary\n{ai_diagnostic}")
+
+        if error_groups:
+            report_lines.append("\n### Agent Error Summary")
+            report_lines.append(f"- Total error blocks detected: {total_error_occurrences}")
+            report_lines.append(f"- Files with errors: {total_error_files}")
+            report_lines.append(f"- Unique error types: {len(error_groups)}")
 
         # ── Error group overview ──
         if error_groups:
@@ -643,14 +725,16 @@ def analyze_agent_logs(
                             f"({file_res['total_lines']} lines). "
                             f"Last {len(tail_preview)} lines:"
                         )
+                        report_lines.append(f"Summary: {_summarize_file_result(file_res)}")
                         report_lines.append(
                             f"```log\n{chr(10).join(tail_preview[-10:])}\n```"
                         )
                     else:
                         report_lines.append(
                             f"\n⚠️ **{fname}** — {n_blocks} error block(s) "
-                            f"(max 10 per file, 50 lines of context each):"
+                            f"(up to 50 per file, 50 lines of context each):"
                         )
+                        report_lines.append(f"Summary: {_summarize_file_result(file_res)}")
                         for block in file_res["error_blocks"]:
                             report_lines.append(
                                 f"\n> **{block['error_label']}** | "
@@ -715,11 +799,7 @@ def analyze_agent_logs(
                     "total_lines": file_res["total_lines"],
                     "had_errors": file_res["had_errors"],
                     "error_block_count": file_res["error_block_count"],
-                    "summary": (
-                        f"{file_res['error_block_count']} error block(s) detected"
-                        if file_res["had_errors"]
-                        else f"No errors detected; tail preview captured from {file_res['total_lines']} line(s)"
-                    ),
+                    "summary": _summarize_file_result(file_res),
                 })
 
         return {
@@ -729,6 +809,7 @@ def analyze_agent_logs(
             "files_analyzed":   total_files_read,
             "error_files":      total_error_files,
             "error_found":      error_found,
+            "total_error_blocks": total_error_occurrences,
             "unique_error_types": len(error_groups),
             "error_groups":     [                           # structured group data
                 {
@@ -748,6 +829,12 @@ def analyze_agent_logs(
             "summary": (
                 f"Analyzed {total_files_read} file(s). "
                 f"{str(total_error_files) + ' file(s) had errors across ' + str(len(error_groups)) + ' unique error type(s).' if error_found else 'No errors detected.'}"
+            ),
+            "message": (
+                f"Found {total_error_occurrences} error block(s) across {total_error_files} file(s). "
+                f"{('Top issues: ' + top_group_summary) if top_group_summary else ''}".strip()
+                if error_found
+                else f"Analyzed {total_files_read} file(s) and found no errors."
             ),
         }
 

@@ -35,5 +35,15 @@ class TestApprovalGate:
         assert any("UPDATE approval_audit_log" in str(call) for call in cur.execute.call_args_list)
         assert "APPROVED" in str(cur.execute.call_args_list[0])
 
+    def test_log_decision_accepts_explicit_request_id(self, mock_db):
+        gate = ApprovalGate()
+        gate.log_decision("test-conv-1", "apprv-123", "REJECTED", "admin-user")
+
+        conn = mock_db.return_value.__enter__.return_value
+        cur = conn.cursor.return_value.__enter__.return_value
+        assert any("UPDATE approval_audit_log" in str(call) for call in cur.execute.call_args_list)
+        assert "apprv-123" in str(cur.execute.call_args_list[0])
+        assert "REJECTED" in str(cur.execute.call_args_list[0])
+
 if __name__ == "__main__":
     pytest.main([__file__])

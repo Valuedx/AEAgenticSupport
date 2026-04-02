@@ -68,6 +68,36 @@
       opacity: .6;
     }
 
+    .header .userbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-left: 14px;
+    }
+
+    .header .userpill {
+      display: none;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .18);
+      font-size: 12px;
+    }
+
+    .header .logout {
+      display: none;
+      border: 1px solid rgba(255, 255, 255, .45);
+      background: transparent;
+      color: #fff;
+      border-radius: 14px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .header .logout:hover {
+      background: rgba(255, 255, 255, .15);
+    }
+
     .chat-area {
       flex: 1;
       overflow-y: auto;
@@ -307,6 +337,94 @@
       color: white;
     }
 
+    .auth-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, .48);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 10;
+    }
+
+    .auth-card {
+      width: min(100%, 420px);
+      background: #fff;
+      border-radius: 22px;
+      box-shadow: 0 24px 48px rgba(15, 23, 42, .24);
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .auth-card h2 {
+      font-size: 22px;
+      color: #0f172a;
+    }
+
+    .auth-card p {
+      font-size: 14px;
+      color: #475569;
+      line-height: 1.5;
+    }
+
+    .auth-card label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #334155;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+
+    .auth-card input {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1.5px solid #cbd5e1;
+      border-radius: 14px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+
+    .auth-card input:focus {
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 3px rgba(26, 115, 232, .15);
+    }
+
+    .auth-card button {
+      padding: 12px 16px;
+      background: #1a73e8;
+      color: #fff;
+      border: none;
+      border-radius: 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .auth-card button:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+    }
+
+    .auth-hint {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      color: #1d4ed8;
+      border-radius: 14px;
+      padding: 12px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .auth-error {
+      min-height: 18px;
+      color: #b91c1c;
+      font-size: 13px;
+    }
+
     @keyframes fadeIn {
       from {
         opacity: 0;
@@ -342,7 +460,30 @@
       <div class="session" id="sessionInfo">Session: checking...</div>
     </div>
     <span class="status" id="statusText">Checking agent...</span>
+    <div class="userbar">
+      <span class="userpill" id="userPill"></span>
+      <button class="logout" id="logoutBtn" type="button">Logout</button>
+    </div>
     <a class="navlink" href="/admin">Control Center</a>
+  </div>
+  <div class="auth-overlay" id="authOverlay">
+    <div class="auth-card">
+      <h2>Web Chat Login</h2>
+      <p>Sign in with the exact AutomationEdge username. Workflow access in chat will use this username only.</p>
+      <div class="auth-hint">
+        Use the exact AE username with the configured default password. Username matching is case-sensitive.
+      </div>
+      <div>
+        <label for="loginUsername">Username</label>
+        <input id="loginUsername" type="text" autocomplete="username" placeholder="example: claims.user">
+      </div>
+      <div>
+        <label for="loginPassword">Password</label>
+        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Enter password">
+      </div>
+      <div class="auth-error" id="authError"></div>
+      <button id="loginBtn" type="button">Login</button>
+    </div>
   </div>
   <div class="chat-area" id="chatArea"></div>
   <div class="typing" id="typing"><span></span><span></span><span></span></div>
@@ -358,7 +499,6 @@
 
   <script>
     const AGENT_URL = '';
-    const SESSION_ID = 'webchat-' + Date.now().toString(36);
     const DEFAULT_UI = {
       assistantName: 'AutomationEdge Ops Agent',
       technicalRoleLabel: 'Technical',
@@ -385,8 +525,18 @@
     const sessionEl = document.getElementById('sessionInfo');
     const titleEl = document.getElementById('chatTitle');
     const quickActionsEl = document.getElementById('quickActions');
+    const authOverlay = document.getElementById('authOverlay');
+    const loginUsernameEl = document.getElementById('loginUsername');
+    const loginPasswordEl = document.getElementById('loginPassword');
+    const loginBtn = document.getElementById('loginBtn');
+    const authErrorEl = document.getElementById('authError');
+    const userPill = document.getElementById('userPill');
+    const logoutBtn = document.getElementById('logoutBtn');
 
-    sessionEl.textContent = 'Session: ' + SESSION_ID;
+    let webchatUser = null;
+    let sessionId = '';
+    let serverHealthy = false;
+    let welcomeShown = false;
 
     // Configure marked.js
     marked.setOptions({
@@ -501,14 +651,40 @@
       applyChatUi();
     }
 
+    function updateComposerState() {
+      const ready = serverHealthy && !!webchatUser;
+      msgInput.disabled = !ready;
+      sendBtn.disabled = !ready;
+      roleSel.disabled = !webchatUser;
+    }
+
     function setStatus(state) {
       const colors = { ok: '#4caf50', warn: '#ffc107', err: '#f44336' };
       const labels = { ok: 'Connected', warn: 'Checking...', err: 'Disconnected' };
       statusDot.style.background = colors[state];
       statusTxt.textContent = labels[state];
-      const ready = state === 'ok';
-      msgInput.disabled = !ready;
-      sendBtn.disabled = !ready;
+      serverHealthy = state === 'ok';
+      updateComposerState();
+    }
+
+    function updateAuthUi() {
+      const loggedIn = !!webchatUser;
+      authOverlay.style.display = loggedIn ? 'none' : 'flex';
+      userPill.style.display = loggedIn ? 'inline-flex' : 'none';
+      logoutBtn.style.display = loggedIn ? 'inline-flex' : 'none';
+      userPill.textContent = loggedIn ? 'User: ' + webchatUser : '';
+      sessionEl.textContent = loggedIn && sessionId ? ('Session: ' + sessionId) : 'Session: login required';
+      updateComposerState();
+    }
+
+    function showWelcomeIfNeeded() {
+      if (!serverHealthy || !webchatUser || welcomeShown) return;
+      welcomeShown = true;
+      addMsg('Signed in as ' + webchatUser + '.', 'system');
+      const welcome = roleSel.value === 'business'
+        ? (chatUi.businessWelcomeMessage || DEFAULT_UI.businessWelcomeMessage)
+        : (chatUi.technicalWelcomeMessage || DEFAULT_UI.technicalWelcomeMessage);
+      addMsg(welcome, 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
     }
 
     async function checkHealth() {
@@ -516,21 +692,94 @@
         const r = await fetch(AGENT_URL + '/health', { signal: AbortSignal.timeout(5000) });
         if (r.ok) {
           setStatus('ok');
-          const welcome = roleSel.value === 'business'
-            ? (chatUi.businessWelcomeMessage || DEFAULT_UI.businessWelcomeMessage)
-            : (chatUi.technicalWelcomeMessage || DEFAULT_UI.technicalWelcomeMessage);
-          addMsg(welcome, 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
+          showWelcomeIfNeeded();
           return;
         }
       } catch (e) { }
       setStatus('err');
-      addMsg('Agent server not reachable at ' + AGENT_URL + '. Make sure agent_server.py is running.', 'error');
+      if (!chatArea.querySelector('.msg.error')) {
+        addMsg('Agent server not reachable at ' + AGENT_URL + '. Make sure agent_server.py is running.', 'error');
+      }
       setTimeout(checkHealth, 5000);
+    }
+
+    async function restoreAuth() {
+      try {
+        const r = await fetch('/api/webchat/auth/me', { signal: AbortSignal.timeout(5000) });
+        const payload = await r.json();
+        if (payload && payload.authenticated) {
+          webchatUser = payload.username || '';
+          sessionId = payload.chat_session_id || '';
+        } else {
+          webchatUser = null;
+          sessionId = '';
+        }
+      } catch (e) {
+        webchatUser = null;
+        sessionId = '';
+      }
+      updateAuthUi();
+    }
+
+    async function login() {
+      const username = loginUsernameEl.value.trim();
+      const password = loginPasswordEl.value;
+      authErrorEl.textContent = '';
+
+      if (!username) {
+        authErrorEl.textContent = 'Enter the exact AE username.';
+        loginUsernameEl.focus();
+        return;
+      }
+
+      loginBtn.disabled = true;
+      try {
+        const r = await fetch('/api/webchat/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const payload = await r.json();
+        if (!r.ok || !payload.success) {
+          authErrorEl.textContent = (payload && payload.error) || ('Login failed with HTTP ' + r.status);
+          return;
+        }
+        webchatUser = payload.username || username;
+        sessionId = payload.chat_session_id || '';
+        welcomeShown = false;
+        chatArea.innerHTML = '';
+        updateAuthUi();
+        await checkHealth();
+        msgInput.focus();
+      } catch (e) {
+        authErrorEl.textContent = 'Login failed: ' + e.message;
+      } finally {
+        loginBtn.disabled = false;
+      }
+    }
+
+    async function logout() {
+      try {
+        await fetch('/api/webchat/auth/logout', { method: 'POST' });
+      } catch (e) { }
+      webchatUser = null;
+      sessionId = '';
+      welcomeShown = false;
+      chatArea.innerHTML = '';
+      authErrorEl.textContent = '';
+      loginPasswordEl.value = '';
+      updateAuthUi();
+      loginUsernameEl.focus();
     }
 
     async function sendMessage() {
       const text = msgInput.value.trim();
       if (!text) return;
+      if (!webchatUser) {
+        authErrorEl.textContent = 'Please log in first.';
+        updateAuthUi();
+        return;
+      }
       addMsg(text, 'user', 'You');
       msgInput.value = '';
       sendBtn.disabled = true;
@@ -541,20 +790,23 @@
       let progressEl = null;
 
       try {
-        const r = await fetch(AGENT_URL + '/chat/stream', {
+        const r = await fetch('/api/webchat/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: text,
-            session_id: SESSION_ID,
-            user_id: 'webchat_user',
             user_role: roleSel.value || 'technical'
           })
         });
 
         if (!r.ok) {
           typingEl.style.display = 'none';
-          addMsg('Agent returned HTTP ' + r.status, 'error');
+          if (r.status === 401) {
+            await logout();
+            authErrorEl.textContent = 'Your login session expired. Please log in again.';
+          } else {
+            addMsg('Agent returned HTTP ' + r.status, 'error');
+          }
           sendBtn.disabled = false;
           msgInput.disabled = false;
           msgInput.focus();
@@ -564,40 +816,59 @@
         const reader = r.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let sawDoneEvent = false;
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+          if (done) {
+            buffer += decoder.decode();
+          } else {
+            buffer += decoder.decode(value, { stream: true });
+          }
 
-          const lines = buffer.split('\n');
-          buffer = lines.pop();
+          const frames = buffer.split(/\r?\n\r?\n/);
+          buffer = frames.pop() || '';
 
-          let eventType = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              const raw = line.slice(6);
-              let parsed;
-              try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+          for (const frame of frames) {
+            if (!frame.trim()) continue;
 
-              if (eventType === 'progress') {
-                typingEl.style.display = 'none';
-                if (progressEl) progressEl.remove();
-                progressEl = document.createElement('div');
-                progressEl.className = 'msg progress';
-                progressEl.textContent = parsed;
-                chatArea.appendChild(progressEl);
-                chatArea.scrollTop = chatArea.scrollHeight;
-              } else if (eventType === 'done') {
-                if (progressEl) { progressEl.remove(); progressEl = null; }
-                typingEl.style.display = 'none';
-                addMsg(parsed || 'No response.', 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
+            let eventType = '';
+            const dataLines = [];
+            for (const line of frame.split(/\r?\n/)) {
+              if (line.startsWith('event: ')) {
+                eventType = line.slice(7).trim();
+              } else if (line.startsWith('data: ')) {
+                dataLines.push(line.slice(6));
               }
-              eventType = '';
+            }
+
+            const raw = dataLines.join('\n');
+            let parsed = raw;
+            try { parsed = JSON.parse(raw); } catch { }
+
+            if (eventType === 'progress') {
+              typingEl.style.display = 'none';
+              if (progressEl) progressEl.remove();
+              progressEl = document.createElement('div');
+              progressEl.className = 'msg progress';
+              progressEl.textContent = parsed;
+              chatArea.appendChild(progressEl);
+              chatArea.scrollTop = chatArea.scrollHeight;
+            } else if (eventType === 'done') {
+              sawDoneEvent = true;
+              if (progressEl) { progressEl.remove(); progressEl = null; }
+              typingEl.style.display = 'none';
+              addMsg(parsed || 'No response.', 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
             }
           }
+
+          if (done) break;
+        }
+
+        if (!sawDoneEvent) {
+          if (progressEl) progressEl.remove();
+          typingEl.style.display = 'none';
+          addMsg('The request finished but the final stream message was not received. Please try again.', 'error');
         }
       } catch (e) {
         if (progressEl) progressEl.remove();
@@ -612,8 +883,22 @@
     function sendQuick(text) { msgInput.value = text; sendMessage(); }
 
     msgInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !sendBtn.disabled) sendMessage(); });
+    loginBtn.addEventListener('click', login);
+    logoutBtn.addEventListener('click', logout);
+    loginPasswordEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !loginBtn.disabled) login(); });
+    loginUsernameEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !loginBtn.disabled) login(); });
+    roleSel.addEventListener('change', () => {
+      if (chatArea.children.length === 0 && serverHealthy && webchatUser) {
+        showWelcomeIfNeeded();
+      }
+    });
 
-    loadChatUi().finally(checkHealth);
+    loadChatUi().finally(async () => {
+      updateAuthUi();
+      await restoreAuth();
+      await checkHealth();
+      if (!webchatUser) loginUsernameEl.focus();
+    });
   </script>
 </body>
 

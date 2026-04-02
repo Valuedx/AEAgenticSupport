@@ -432,6 +432,32 @@ class PgVectorRAGEngine:
         return self.search(query, collection="tools", top_k=top_k,
                            query_embedding=query_embedding)
 
+    def search_tools_for_user(
+        self,
+        query: str,
+        user_id: str,
+        org_code: str = "",
+        top_k: int = 5,
+        query_embedding: list[float] | None = None,
+    ) -> list[dict]:
+        hits = self.search_tools(
+            query,
+            top_k=top_k,
+            query_embedding=query_embedding,
+        )
+        try:
+            from security.workflow_access import filter_tool_hits_for_user
+
+            return filter_tool_hits_for_user(user_id, org_code, hits)
+        except Exception as exc:
+            logger.warning(
+                "user-scoped tool search failed for user_id=%r org_code=%r: %s",
+                user_id,
+                org_code,
+                exc,
+            )
+            return []
+
     def search_kb(self, query: str, top_k: int = 5,
                   query_embedding: list[float] | None = None) -> list[dict]:
         return self.search(query, collection="kb_articles", top_k=top_k,
