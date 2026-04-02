@@ -285,10 +285,135 @@ class Orchestrator:
             args["org_code"] = org_code
         return args
 
-    def _get_issue_tracker(self, conversation_id: str) -> IssueTracker:
-        if conversation_id not in self.issue_trackers:
-            self.issue_trackers[conversation_id] = IssueTracker(conversation_id)
-        return self.issue_trackers[conversation_id]
+    @staticmethod
+    def _issue_tracker_key(conversation_id: str, user_id: str = "") -> str:
+        user = str(user_id or "").strip()
+        return f"{conversation_id}::{user}" if user else conversation_id
+
+    @staticmethod
+    def _looks_like_greeting(text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().lower()).strip(" .,!?\t")
+        if not normalized:
+            return False
+
+        simple_greetings = {
+            "hi",
+            "hello",
+            "hi there",
+            "hello there",
+            "hey",
+            "hey there",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "good night",
+        }
+        if normalized in simple_greetings:
+            return True
+
+        if normalized.startswith(("good morning", "good afternoon", "good evening", "good night")):
+            operational_terms = (
+                "workflow",
+                "bot",
+                "status",
+                "issue",
+                "error",
+                "fail",
+                "request",
+                "execution",
+                "agent",
+                "check",
+                "show",
+                "run",
+                "trigger",
+                "timesheet",
+            )
+            return len(normalized.split()) <= 5 and not any(term in normalized for term in operational_terms)
+
+        return False
+
+    def _get_visible_workflows_for_issue(
+        self,
+        issue,
+        state: ConversationState,
+    ) -> list[str]:
+        workflows = [
+            str(wf or "").strip()
+            for wf in getattr(issue, "workflows_involved", []) or []
+            if str(wf or "").strip()
+        ]
+        if not workflows:
+            return []
+        if not state.user_id:
+            return workflows
+
+        visible: list[str] = []
+        client = get_ae_client()
+        org_code = self._state_org_code(state)
+        for workflow_name in workflows:
+            try:
+                workflow_id, _ = client.get_cached_workflow_info(
+                    workflow_name,
+                    user_id=state.user_id,
+                    org_code=org_code,
+                )
+            except TypeError:
+                workflow_id, _ = client.get_cached_workflow_info(workflow_name)
+            except Exception:
+                workflow_id = ""
+            if workflow_id:
+                visible.append(workflow_name)
+        return visible
+
+    def _is_issue_visible(self, issue, state: ConversationState) -> bool:
+        if not issue:
+            return False
+        workflows = getattr(issue, "workflows_involved", []) or []
+        if not workflows:
+            return True
+        return bool(self._get_visible_workflows_for_issue(issue, state))
+
+    def _get_visible_active_issue(
+        self,
+        tracker: IssueTracker | None,
+        state: ConversationState,
+    ):
+        active = tracker.get_active_issue() if tracker else None
+        if active and self._is_issue_visible(active, state):
+            return active
+        return None
+
+    def _get_visible_issue_summary(
+        self,
+        tracker: IssueTracker | None,
+        state: ConversationState,
+    ) -> str:
+        if not tracker or not tracker.issues:
+            return "No active issues."
+
+        visible_lines: list[str] = []
+        for issue in tracker.issues.values():
+            if issue.status in (IssueStatus.RESOLVED, IssueStatus.STALE):
+                continue
+            if not self._is_issue_visible(issue, state):
+                continue
+            visible_workflows = self._get_visible_workflows_for_issue(issue, state)
+            workflow_info = (
+                f" | Workflows: {', '.join(visible_workflows)}"
+                if visible_workflows
+                else ""
+            )
+            visible_lines.append(
+                f"[{issue.issue_id}] {issue.title} | Status: {issue.status.value}{workflow_info}"
+            )
+
+        return "\n".join(visible_lines) if visible_lines else "No active issues."
+
+    def _get_issue_tracker(self, conversation_id: str, user_id: str = "") -> IssueTracker:
+        tracker_key = self._issue_tracker_key(conversation_id, user_id)
+        if tracker_key not in self.issue_trackers:
+            self.issue_trackers[tracker_key] = IssueTracker(conversation_id)
+        return self.issue_trackers[tracker_key]
 
     @staticmethod
     def _is_ticket_like_endpoint(endpoint: str) -> bool:
@@ -365,7 +490,7 @@ class Orchestrator:
         
         try:
             state.add_message("user", user_message)
-            tracker = self._get_issue_tracker(state.conversation_id)
+            tracker = self._get_issue_tracker(state.conversation_id, state.user_id)
 
             # ── Approval flow ──
             if state.phase == ConversationPhase.AWAITING_APPROVAL:
@@ -446,6 +571,27 @@ class Orchestrator:
             classification, issue_id = tracker.classify_message(
                 user_message, state.messages
             )
+            target_issue = (
+                tracker.issues.get(issue_id) if issue_id else tracker.get_active_issue()
+            )
+            if (
+                classification in {
+                    MessageClassification.CONTINUE_EXISTING,
+                    MessageClassification.RELATED_NEW,
+                    MessageClassification.RECURRENCE,
+                    MessageClassification.FOLLOWUP,
+                }
+                and target_issue
+                and not self._is_issue_visible(target_issue, state)
+            ):
+                logger.info(
+                    "Hidden issue context suppressed for conversation_id=%s issue_id=%s user_id=%s",
+                    state.conversation_id,
+                    target_issue.issue_id,
+                    state.user_id or "anonymous",
+                )
+                classification = MessageClassification.NEW_ISSUE
+                issue_id = None
 
             # ── Route based on classification ──
             if classification == MessageClassification.NEW_ISSUE:
@@ -565,7 +711,7 @@ class Orchestrator:
                     )
 
             elif classification == MessageClassification.STATUS_CHECK:
-                summary = tracker.get_all_issues_summary()
+                summary = self._get_visible_issue_summary(tracker, state)
                 response = (
                     f"Here's the current session status:\n\n{summary}\n\n"
                     + self._process_message(
@@ -608,6 +754,8 @@ class Orchestrator:
         text = str(user_message or "").strip()
         if not text:
             return "GENERAL"
+        if self._looks_like_greeting(text):
+            return "SMALLTALK"
 
         # Fast-path: if the message contains IDs, dates, or time ranges, it is OPS.
         import re
@@ -620,9 +768,9 @@ class Orchestrator:
         if re.search(r"\b\d{4,}\b", text):
             return "OPS"
 
-        active_issue = tracker.get_active_issue() if tracker else None
+        active_issue = self._get_visible_active_issue(tracker, state)
         # If there's an active investigation or pending action, bias towards OPS
-        if active_issue and text.lower() not in {"hi", "hello", "thanks", "ok", "yes", "no"}:
+        if active_issue and text.lower() not in {"thanks", "thank you", "ok", "okay", "yes", "no"}:
             # Check if it looks like a follow-up answer (containing names or specific values)
             if len(text) > 5:
                 return "OPS"
@@ -764,7 +912,7 @@ class Orchestrator:
                 state.save()
 
         try:
-            active_issue = tracker.get_active_issue()
+            active_issue = self._get_visible_active_issue(tracker, state)
             system_prompt = self._build_system_prompt(state, tracker)
             rag = get_rag_engine()
 
@@ -772,8 +920,9 @@ class Orchestrator:
             enriched_query = user_message
             if active_issue:
                 context_parts = []
-                if active_issue.workflows_involved:
-                    context_parts.append(f"Workflows: {', '.join(active_issue.workflows_involved)}")
+                visible_workflows = self._get_visible_workflows_for_issue(active_issue, state)
+                if visible_workflows:
+                    context_parts.append(f"Workflows: {', '.join(visible_workflows)}")
                 # Only include error signatures if the issue is NOT resolved (Loop Fix)
                 if active_issue.status != IssueStatus.RESOLVED and active_issue.error_signatures:
                     context_parts.append(f"Errors: {', '.join(active_issue.error_signatures)}")
@@ -837,7 +986,7 @@ class Orchestrator:
                 )
             ]
 
-            active_issue = tracker.get_active_issue()
+            active_issue = self._get_visible_active_issue(tracker, state)
             max_iterations = get_runtime_value("MAX_AGENT_ITERATIONS", 15)
 
             param_followup = self._continue_param_collection(user_message, state, tracker)
@@ -1787,10 +1936,11 @@ Provide full diagnostic information."""
 
         issue_context = ""
         if tracker and tracker.issues:
-            active = tracker.get_active_issue()
+            active = self._get_visible_active_issue(tracker, state)
+            visible_summary = self._get_visible_issue_summary(tracker, state)
             issue_context = f"""
 ## Active Issues in This Session
-{tracker.get_all_issues_summary()}
+{visible_summary}
 
 Currently focused issue: {active.issue_id if active else 'None'}
 
@@ -1892,7 +2042,7 @@ CRITICAL: If an `agent_id` is listed above and the user asks for logs, says "yes
 
         # ── Param Collection Persistence (Memory across turns) ──
         param_hint = ""
-        active_issue = tracker.get_active_issue()
+        active_issue = self._get_visible_active_issue(tracker, state)
         is_resolved = active_issue.status == IssueStatus.RESOLVED if active_issue else False
         
         if not is_resolved and state.param_collection and state.param_collection.get("workflow_name"):
@@ -2131,7 +2281,7 @@ CRITICAL RULES:
             state.affected_workflows.append(workflow_name)
         if active_issue:
             # keep issue tracking in sync with chosen workflow
-            self._get_issue_tracker(state.conversation_id).add_workflow_to_issue(
+            self._get_issue_tracker(state.conversation_id, state.user_id).add_workflow_to_issue(
                 active_issue.issue_id, workflow_name
             )
 
@@ -2713,22 +2863,84 @@ CRITICAL RULES:
                             state: ConversationState) -> str:
         if state.user_role != "business":
             return response
+        text = str(response or "").strip()
+        if not text:
+            return response
+
+        lowered = text.lower()
+        technical_markers = (
+            "workflow",
+            "request id",
+            "execution id",
+            "error code",
+            "stack trace",
+            "agent id",
+            "schedule id",
+            "exception",
+            "failed because",
+            "api",
+            "endpoint",
+        )
+        if not any(marker in lowered for marker in technical_markers):
+            return response
 
         try:
+            rewrite_prompt = (
+                "Rewrite this for a non-technical business user. "
+                "Remove workflow names, request IDs, error codes, and deep technical terms. "
+                "Focus on impact, timing, status, and next actions. "
+                "Do not shorten the response unnecessarily. "
+                "Keep the response complete and well-structured. "
+                "CRITICAL: This is a chatbot reply, not an email, memo, or letter. "
+                "Do NOT add a subject line, greeting line, salutation, sign-off, placeholder name, or email-style sections. "
+                "Write as a direct conversational chat response only. "
+                "CRITICAL: Keep the 'Next Steps' or 'What would you like to do next?' section, but ensure the suggestions themselves are also non-technical "
+                "(e.g., 'Should I check the overall system health?' instead of 'Check agent CPU logs').\n\n"
+                f"Original Response:\n{response}"
+            )
             filtered = llm_client.chat(
-                f"Rewrite this for a non-technical business user. "
-                f"Remove workflow names, request IDs, error codes. "
-                f"Focus on impact, timing, status, and next actions. "
-                f"Do not shorten the response unnecessarily. "
-                f"Keep the response complete and well-structured. "
-                f"CRITICAL: Keep the 'Next Steps' or 'What would you like to do next?' section, but ensure the suggestions themselves are also non-technical (e.g., 'Should I check the overall system health?' instead of 'Check agent CPU logs').\n\n"
-                f"Original Response:\n{response}",
-                system="Rewrite technical text for business audiences while preserving proactive calls to action.",
+                rewrite_prompt,
+                system=(
+                    "Rewrite technical text for business audiences while preserving proactive calls to action. "
+                    "Never format the answer as an email, memo, letter, or template unless the user explicitly asked for that."
+                ),
                 max_tokens=32000,
             )
+            filtered_text = str(filtered or "").strip()
+            if self._looks_like_email_or_memo(filtered_text):
+                filtered = llm_client.chat(
+                    "Convert the following into a normal chatbot reply. "
+                    "Remove any subject line, salutation, placeholder name, sign-off, and memo or email formatting. "
+                    "Keep it conversational, direct, and business-friendly.\n\n"
+                    f"Text:\n{filtered_text}",
+                    system="You convert drafted email-style text into natural chatbot responses.",
+                    max_tokens=32000,
+                )
             return filtered
         except Exception:
             return response
+
+    @staticmethod
+    def _looks_like_email_or_memo(text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            return False
+        markers = (
+            "subject:",
+            "dear ",
+            "hi [",
+            "hi team",
+            "hello team",
+            "regards,",
+            "best regards",
+            "sincerely,",
+            "action needed",
+        )
+        if any(marker in lowered for marker in markers):
+            return True
+        if "status & impact:" in lowered and "what happened:" in lowered:
+            return True
+        return False
 
     @staticmethod
     def _prettify_param_name(name: str) -> str:

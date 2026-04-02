@@ -97,22 +97,45 @@ class MessageGateway:
     ) -> ConversationState:
         with self._session_guard:
             if conversation_id not in self._sessions:
-                state = ConversationState.load(conversation_id)
-                if not state.user_id:
-                    state.user_id = user_id
+                self._sessions[conversation_id] = ConversationState.load(conversation_id)
+                self._locks[conversation_id] = threading.Lock()
+
+            state = self._sessions[conversation_id]
+            incoming_user_id = str(user_id or "").strip()
+            stored_user_id = str(state.user_id or "").strip()
+
+            if incoming_user_id and stored_user_id and stored_user_id != incoming_user_id:
+                logger.warning(
+                    "Conversation ownership changed for conversation_id=%s old_user_id=%s new_user_id=%s; resetting session context",
+                    conversation_id,
+                    stored_user_id,
+                    incoming_user_id,
+                )
+                ConversationState.clear_persisted_context(conversation_id)
+                state.reset_for_user(
+                    user_id=incoming_user_id,
+                    user_role=user_role,
+                    user_name=user_name,
+                    user_email=user_email,
+                    user_team=user_team,
+                    user_metadata=user_metadata,
+                )
+            else:
+                if incoming_user_id and not stored_user_id:
+                    state.user_id = incoming_user_id
                 if user_role:
                     state.user_role = user_role
-                
-                # Update with current details if provided
-                if user_name: state.user_name = user_name
-                if user_email: state.user_email = user_email
-                if user_team: state.user_team = user_team
-                if user_metadata: state.user_metadata.update(user_metadata)
-                state.ensure_workflow_access_sync()
-                
-                self._sessions[conversation_id] = state
-                self._locks[conversation_id] = threading.Lock()
-            return self._sessions[conversation_id]
+                if user_name:
+                    state.user_name = user_name
+                if user_email:
+                    state.user_email = user_email
+                if user_team:
+                    state.user_team = user_team
+                if user_metadata:
+                    state.user_metadata.update(user_metadata)
+
+            state.ensure_workflow_access_sync()
+            return state
 
     def process_message(
         self, conversation_id: str, user_message: str,
@@ -216,7 +239,19 @@ class MessageGateway:
                     state=state,
                     on_progress=progress,
                 )
-                return result.response
+                response = str(result.response or "")
+                if state.user_role == "business":
+                    try:
+                        response = self.orchestrator._filter_for_persona(
+                            response,
+                            state,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Business persona filtering failed for routed response: %s",
+                            exc,
+                        )
+                return response
             except Exception as exc:
                 logger.error(
                     "Multi-agent routing failed, falling back: %s",

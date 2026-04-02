@@ -159,6 +159,89 @@ class ConversationState:
         self.suspended_flow = {}
         logger.debug("Suspended flow cleared for conversation %s", self.conversation_id)
 
+    def reset_for_user(
+        self,
+        *,
+        user_id: str = "",
+        user_role: str = "technical",
+        user_name: str = "",
+        user_email: str = "",
+        user_team: str = "",
+        user_metadata: dict | None = None,
+    ) -> None:
+        """Reset volatile and persisted session fields when ownership changes."""
+        self.exists_in_store = False
+        self.user_id = str(user_id or "").strip()
+        self.user_role = str(user_role or "technical").strip() or "technical"
+        self.user_name = str(user_name or "").strip()
+        self.user_email = str(user_email or "").strip()
+        self.user_team = str(user_team or "").strip()
+        self.user_metadata = dict(user_metadata or {})
+
+        self.phase = ConversationPhase.IDLE
+        self.messages = []
+        self.findings = []
+        self.tool_call_log = []
+        self.affected_workflows = []
+        self.pending_action = None
+        self.pending_action_summary = ""
+        self.param_collection = {}
+        self.suspended_flow = {}
+        self.rca_data = None
+        self.summary = ""
+        self.is_human_handoff = False
+        self.tags = []
+        self.preferred_language = "en"
+        self.is_agent_working = False
+        self.interrupt_requested = False
+        self.last_agent_id = ""
+        self._workflow_access_sync_requested = False
+        self._pending_message_inserts = []
+        with self._queue_lock:
+            self._message_queue = []
+
+        logger.info(
+            "Conversation state reset for conversation_id=%s user_id=%s",
+            self.conversation_id,
+            self.user_id or "unknown",
+        )
+
+    @staticmethod
+    def clear_persisted_context(conversation_id: str) -> bool:
+        """Remove stored context so a reused conversation ID starts clean."""
+        conv_id = str(conversation_id or "").strip()
+        if not conv_id:
+            return False
+
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM issue_registry WHERE conversation_id = %s",
+                        (conv_id,),
+                    )
+                    cur.execute(
+                        "DELETE FROM chat_messages WHERE conversation_id = %s",
+                        (conv_id,),
+                    )
+                    cur.execute(
+                        "DELETE FROM conversation_state WHERE conversation_id = %s",
+                        (conv_id,),
+                    )
+                conn.commit()
+            logger.info(
+                "Cleared persisted conversation context for conversation_id=%s",
+                conv_id,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Could not clear persisted context for conversation_id=%s: %s",
+                conv_id,
+                exc,
+            )
+            return False
+
     def ensure_workflow_access_sync(self, force: bool = False) -> None:
         if not CONFIG.get("WF_ACCESS_ENABLE_TARGETED_SYNC", True):
             return

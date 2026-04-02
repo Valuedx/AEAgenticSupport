@@ -11,11 +11,34 @@ from tools.registry import tool_registry
 logger = logging.getLogger("ops_agent.tools.dependency")
 
 
+def _safe_workflow_details(workflow_name: str) -> dict:
+    """Return workflow details as a dict, even when the backend returns nothing."""
+    try:
+        resp = get_ae_client().get_workflow_details(workflow_name)
+    except Exception as exc:
+        logger.warning(
+            "Could not fetch workflow details for %s: %s",
+            workflow_name,
+            exc,
+        )
+        return {}
+
+    if isinstance(resp, dict):
+        return resp
+
+    logger.warning(
+        "Workflow details for %s returned unexpected payload type: %s",
+        workflow_name,
+        type(resp).__name__,
+    )
+    return {}
+
+
 def get_workflow_dependencies(workflow_name: str) -> dict:
     # Most AE versions wrap dependencies in the workflow config or a specific endpoint
     # For now, let's try to generalize or use the detail endpoint if appropriate
     # but the 404 was specifically on /config.
-    resp = get_ae_client().get_workflow_details(workflow_name)
+    resp = _safe_workflow_details(workflow_name)
     return {
         "workflow_name": workflow_name,
         "upstream": resp.get("upstream", []),
@@ -25,7 +48,7 @@ def get_workflow_dependencies(workflow_name: str) -> dict:
 
 
 def get_workflow_config(workflow_name: str) -> dict:
-    resp = get_ae_client().get_workflow_details(workflow_name)
+    resp = _safe_workflow_details(workflow_name)
     return {
         "workflow_name": workflow_name,
         "input_paths": resp.get("input_paths", []),
@@ -39,7 +62,7 @@ def get_workflow_config(workflow_name: str) -> dict:
 def get_schedule_info(workflow_name: str) -> dict:
     # Schedules are often part of the config or a sibling endpoint
     # We'll use the client's abstraction if available, or fetch config for now
-    resp = get_ae_client().get_workflow_details(workflow_name)
+    resp = _safe_workflow_details(workflow_name)
     return {
         "workflow_name": workflow_name,
         "cron_expression": resp.get("cronExpression") or resp.get("parameters", {}).get("cronExpression"),
