@@ -116,17 +116,17 @@ DEFAULT_SECTIONS: dict[str, dict[str, Any]] = {
         "businessRoleLabel": "Business user",
         "inputPlaceholder": "Describe what is blocked, delayed, or failing...",
         "technicalWelcomeMessage": (
-            "The assistant is ready. Share the workflow, symptom, or request ID "
-            "you want investigated."
+            "I'm ready to help. Share the workflow name, issue, or request ID "
+            "you want me to investigate."
         ),
         "businessWelcomeMessage": (
-            "The assistant is ready. Describe the business issue and it will "
-            "guide you in plain language."
+            "I'm ready to help. Tell me what is delayed, blocked, or not working, "
+            "and I'll explain the status in clear business language."
         ),
         "quickActions": [
-            "Check system health and agent status",
-            "Which workflows are having issues?",
-            "Analyze the latest workflow failure",
+            "Check process status",
+            "See current workflow issues",
+            "Review the latest workflow failure",
             "Create a support ticket",
         ],
     },

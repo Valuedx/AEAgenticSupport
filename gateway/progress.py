@@ -28,8 +28,8 @@ MIN_INTERVAL_SECONDS = 3.0
 # ── Tool name → (business message, technical message) ──
 _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
     "check_workflow_status": (
-        "Checking process status...",
-        "Checking workflow status...",
+        "Checking the latest process status...",
+        "Checking the latest workflow status...",
     ),
     "list_recent_failures": (
         "Looking for recent issues...",
@@ -40,8 +40,8 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
         "Pulling system health metrics...",
     ),
     "get_execution_logs": (
-        "Reviewing activity logs...",
-        "Pulling execution logs...",
+        "Reviewing the latest activity logs...",
+        "Pulling the latest execution logs...",
     ),
     "get_execution_history": (
         "Checking run history...",
@@ -60,8 +60,8 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
         "Tracing workflow dependencies...",
     ),
     "get_workflow_config": (
-        "Reviewing configuration...",
-        "Fetching workflow config...",
+        "Reviewing the process setup...",
+        "Fetching workflow configuration...",
     ),
     "get_schedule_info": (
         "Checking schedule...",
@@ -73,7 +73,7 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "get_agent_status": (
         "Checking agent availability...",
-        "Checking AE agent status...",
+        "Checking AutomationEdge agent status...",
     ),
     "check_agent_resources": (
         "Checking system resources...",
@@ -112,12 +112,12 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
         "Creating HDFC support ticket...",
     ),
     "discover_tools": (
-        "Looking for additional capabilities...",
-        "Searching tool catalog...",
+        "Looking for the best way to handle this...",
+        "Searching the tool catalog for the right next step...",
     ),
     "call_ae_api": (
-        "Querying the system...",
-        "Calling AE API directly...",
+        "Checking AutomationEdge directly...",
+        "Querying AutomationEdge directly...",
     ),
     "query_database": (
         "Looking up records...",
@@ -131,12 +131,12 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
 
 _PHASE_MESSAGES: dict[str, tuple[str, str]] = {
     "investigating": (
-        "Looking into this...",
-        "Starting investigation...",
+        "I'm looking into this now...",
+        "Investigation started...",
     ),
     "analyzing": (
-        "Analyzing what I found...",
-        "Analyzing findings...",
+        "I'm reviewing what I found...",
+        "Reviewing the findings...",
     ),
     "found_error": (
         "Found an issue — analyzing the cause...",
@@ -147,8 +147,8 @@ _PHASE_MESSAGES: dict[str, tuple[str, str]] = {
         "Multiple failures — tracing upstream dependency chain...",
     ),
     "preparing_fix": (
-        "I have a fix. Preparing details for your approval...",
-        "Remediation identified. Preparing approval request...",
+        "I found the next action. Preparing it for your approval...",
+        "Remediation identified. Preparing the approval request...",
     ),
     "executing_fix": (
         "Running the approved action now...",
@@ -161,6 +161,40 @@ _PHASE_MESSAGES: dict[str, tuple[str, str]] = {
     "almost_done": (
         "Almost done — putting together my response...",
         "Finalizing response...",
+    ),
+}
+_FRIENDLY_PHASE_MESSAGES: dict[str, tuple[str, str]] = {
+    "investigating": (
+        "I'm looking into this now...",
+        "Investigation started...",
+    ),
+    "analyzing": (
+        "I'm reviewing what I found...",
+        "Reviewing the findings...",
+    ),
+    "found_error": (
+        "I found an issue and I'm checking the cause...",
+        "I found an issue and I'm checking the root cause...",
+    ),
+    "multiple_failures": (
+        "I found multiple issues and I'm tracing the root cause...",
+        "Multiple failures detected. Tracing the upstream dependency chain...",
+    ),
+    "preparing_fix": (
+        "I found the next action. Preparing it for your approval...",
+        "Remediation identified. Preparing the approval request...",
+    ),
+    "executing_fix": (
+        "Running the approved action now...",
+        "Executing approved remediation...",
+    ),
+    "generating_rca": (
+        "Preparing a summary of what happened...",
+        "Generating root cause analysis...",
+    ),
+    "almost_done": (
+        "Almost done. I'm putting together the response...",
+        "Almost done. Finalizing the response...",
     ),
 }
 
@@ -191,7 +225,7 @@ class ProgressCallback:
 
     def on_phase(self, phase: str) -> None:
         """Emit a progress message for a high-level phase change."""
-        msgs = _PHASE_MESSAGES.get(phase)
+        msgs = _FRIENDLY_PHASE_MESSAGES.get(phase) or _PHASE_MESSAGES.get(phase)
         if msgs:
             text = msgs[0] if self._role == "business" else msgs[1]
             self._emit(text)
@@ -224,6 +258,15 @@ class ProgressCallback:
         """Optionally emit after a tool completes if there's a notable finding."""
         if not success and result_hint:
             text = (
+                f"I found an issue: {result_hint[:100]}"
+                if self._role == "business"
+                else f"I found an issue while running {tool_name}: {result_hint[:120]}"
+            )
+            self._emit(text, force=True)
+            return
+
+        if not success and result_hint:
+            text = (
                 f"Found an issue — {result_hint[:100]}"
                 if self._role == "business"
                 else f"Error from {tool_name}: {result_hint[:120]}"
@@ -233,11 +276,10 @@ class ProgressCallback:
     def on_iteration(self, iteration: int, max_iterations: int) -> None:
         """Emit a heartbeat on long investigations."""
         if iteration > 0 and iteration % 4 == 0:
-            remaining = max_iterations - iteration
             text = (
-                "Still investigating..."
+                "I'm still investigating this..."
                 if self._role == "business"
-                else f"Investigation step {iteration}/{max_iterations}..."
+                else f"Investigation step {iteration}/{max_iterations} in progress..."
             )
             self._emit(text)
 

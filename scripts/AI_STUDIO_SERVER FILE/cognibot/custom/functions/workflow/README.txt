@@ -1,0 +1,1 @@
+Functions of all the python files under this directory (workflow) will be accessible under Cognibot Project -> Skill -> Dialog Designer -> Action (Dialog element) -> AE Workflow -> Workflow Parameters -> Type: Function. The selected function will be executed before AutomationEdge Workflow invocation, and the return value will be set as the respective parameter value.

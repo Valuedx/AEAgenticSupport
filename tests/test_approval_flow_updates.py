@@ -66,8 +66,8 @@ def test_handle_approval_response_updates_pending_log_dates_from_natural_languag
             tracker,
         )
 
-    assert "Updated the pending action with your requested parameter changes." in response
-    assert "from_date: 2026-03-29T00:00:00" in response
+    assert "Updated the pending action with your requested changes." in response
+    assert "From date: `2026-03-29T00:00:00`" in response
     assert state.phase == ConversationPhase.AWAITING_APPROVAL
     assert state.pending_action is not None
     assert state.pending_action["args"]["from_date"] == "2026-03-29T00:00:00"
@@ -105,7 +105,7 @@ def test_handle_approval_response_reject_uses_request_id_and_cleans_up_state():
             tracker,
         )
 
-    assert response == "Action rejected. What would you like me to do instead?"
+    assert response == "Understood. I won't run that action. What would you like me to do instead?"
     assert state.phase == ConversationPhase.IDLE
     assert state.pending_action is None
     assert state.pending_action_summary == ""

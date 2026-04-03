@@ -7,6 +7,7 @@ issue lifecycle (new, continue, recurrence, escalation).
 from __future__ import annotations
 
 import concurrent.futures
+from difflib import SequenceMatcher
 import json
 import logging
 import re
@@ -22,6 +23,7 @@ from config.llm_client import llm_client
 from config.metrics import metrics_collector
 from gateway.progress import ProgressCallback, create_noop_progress
 from rag.engine import get_rag_engine
+from security.workflow_access import can_execute_workflow, is_execute_enforced
 from state.app_config import get_runtime_value
 from state.conversation_state import ConversationState, ConversationPhase
 from state.issue_tracker import (
@@ -258,7 +260,10 @@ class Orchestrator:
         state.phase = ConversationPhase.AWAITING_APPROVAL
         return (
             f"{note}\n\n"
-            + self.approval_gate.format_approval_prompt(approval_request)
+            + self.approval_gate.format_approval_prompt(
+                approval_request,
+                audience=state.user_role,
+            )
         )
 
     def _inject_user_scope(self, tool_name: str, tool_args: dict, tool_def, state: ConversationState) -> dict:
@@ -416,6 +421,19 @@ class Orchestrator:
         return self.issue_trackers[tracker_key]
 
     @staticmethod
+    def _build_related_issue_notice(state: ConversationState) -> str:
+        if str(state.user_role or "").strip().lower() == "business":
+            return (
+                "This seems related to what we were discussing earlier, "
+                "but it looks like a different problem. I'll handle it as a "
+                "new request from here.\n\n"
+            )
+        return (
+            "This looks related to the earlier conversation, but it appears "
+            "to be a different issue. I'll handle it as a new request from here.\n\n"
+        )
+
+    @staticmethod
     def _is_ticket_like_endpoint(endpoint: str) -> bool:
         lowered = str(endpoint or "").lower()
         return any(token in lowered for token in ("ticket", "incident", "/support/", "support/user", "support/create", "usercreateticket"))
@@ -468,6 +486,158 @@ class Orchestrator:
                 "request_type": str(request_type),
             }
         )
+
+    @staticmethod
+    def _looks_like_parameter_followup(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized or len(normalized.split()) > 8:
+            return False
+
+        date_phrases = (
+            "today",
+            "yesterday",
+            "tomorrow",
+            "last 24 hours",
+            "last 24 hrs",
+            "last day",
+            "last week",
+            "this week",
+            "from ",
+            "to ",
+            "between ",
+            "until ",
+            "till ",
+        )
+        if any(phrase in normalized for phrase in date_phrases):
+            return True
+
+        if re.search(r"\b\d{4}-\d{2}-\d{2}\b", normalized):
+            return True
+        if re.search(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", normalized):
+            return True
+        if re.search(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", normalized):
+            return True
+        return False
+
+    def _augment_contextual_tool_query(
+        self,
+        user_message: str,
+        state: ConversationState,
+        enriched_query: str,
+    ) -> str:
+        if not self._looks_like_parameter_followup(user_message):
+            return enriched_query
+
+        last_assistant = next(
+            (
+                str(message.get("content") or "").strip()
+                for message in reversed(state.messages)
+                if message.get("role") == "assistant"
+                and str(message.get("content") or "").strip()
+            ),
+            "",
+        )
+        if not last_assistant:
+            return enriched_query
+
+        lowered = last_assistant.lower()
+        hint_parts: list[str] = []
+        if "agent" in lowered and "log" in lowered:
+            hint_parts.append("agent logs")
+            agent_match = re.search(
+                r"\b(?:agent(?:\s+id)?|id)\s*[:#-]?\s*(\d{3,})\b",
+                last_assistant,
+                re.IGNORECASE,
+            )
+            if agent_match:
+                hint_parts.append(f"agent_id {agent_match.group(1)}")
+        elif "execution" in lowered and "log" in lowered:
+            hint_parts.append("execution logs")
+
+        if not hint_parts:
+            return enriched_query
+
+        augmented = (
+            f"{enriched_query} "
+            f"(Recent assistant context: {' '.join(hint_parts)})"
+        )
+        logger.info("RAG augmented query: %s", augmented)
+        return augmented
+
+    def _extract_agent_log_args_from_call_ae_api(self, tool_args: dict) -> dict | None:
+        if str(tool_args.get("method", "GET")).upper() != "GET":
+            return None
+
+        endpoint = "/" + str(tool_args.get("endpoint", "") or "").strip().lstrip("/")
+        endpoint = endpoint.split("?", 1)[0]
+        match = re.match(
+            r"^(?:/aeengine/rest)?/api/v1/agents/([^/]+)/logs/?$",
+            endpoint,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        params_payload = tool_args.get("params") or {}
+        parsed_params: dict[str, Any] = {}
+        if isinstance(params_payload, dict):
+            parsed_params = dict(params_payload)
+        elif isinstance(params_payload, str) and params_payload.strip():
+            try:
+                loaded = json.loads(params_payload)
+                if isinstance(loaded, dict):
+                    parsed_params = loaded
+            except Exception:
+                parsed_params = {}
+
+        extracted: dict[str, Any] = {"agent_id": str(match.group(1))}
+        from_date = parsed_params.get("from_date") or parsed_params.get("fromDate")
+        to_date = parsed_params.get("to_date") or parsed_params.get("toDate")
+        if from_date:
+            extracted["from_date"] = str(from_date)
+        if to_date:
+            extracted["to_date"] = str(to_date)
+        return extracted
+
+    def _rewrite_call_ae_api_tool(self, tool_name: str, tool_args: dict) -> tuple[str, dict]:
+        if tool_name != "call_ae_api":
+            return tool_name, tool_args
+
+        redirected_ticket_args = self._extract_ticket_args_from_call_ae_api(tool_args)
+        if redirected_ticket_args:
+            return "create_hdfc_ticket", redirected_ticket_args
+
+        redirected_agent_log_args = self._extract_agent_log_args_from_call_ae_api(tool_args)
+        if redirected_agent_log_args:
+            return "analyze_agent_logs", redirected_agent_log_args
+
+        return tool_name, tool_args
+
+    def _ensure_turn_tool_active(
+        self,
+        turn_tools,
+        active_tool_names: set[str],
+        tool_name: str,
+        *,
+        allowed_categories: list[str] | None,
+        feedback_agent_id: str,
+    ):
+        if tool_name in active_tool_names:
+            return turn_tools, active_tool_names
+
+        tool_def = tool_registry.get_tool(tool_name)
+        if not tool_def:
+            return turn_tools, active_tool_names
+        if allowed_categories and tool_def.category not in allowed_categories:
+            return turn_tools, active_tool_names
+
+        turn_tools = tool_registry.build_turn_toolset(
+            list(active_tool_names) + [tool_name],
+            allowed_categories=allowed_categories,
+            include_meta=True,
+            feedback_agent_id=feedback_agent_id,
+        )
+        return turn_tools, set(turn_tools.list_tool_names())
 
     # =====================================================================
     # Public entry point
@@ -627,9 +797,7 @@ class Orchestrator:
                 if parent_id:
                     tracker.link_issues(parent_id, issue.issue_id)
                 response = (
-                    "This looks related to the issue I'm already investigating "
-                    "but appears to be a separate problem. I'll track it as a "
-                    "linked issue.\n\n"
+                    self._build_related_issue_notice(state)
                     + self._process_message(
                         user_message,
                         state,
@@ -931,6 +1099,11 @@ class Orchestrator:
                 if context_parts:
                     enriched_query = f"{user_message} (Context: {' '.join(context_parts)})"
                     logger.info(f"RAG enriched query: {enriched_query}")
+            enriched_query = self._augment_contextual_tool_query(
+                user_message,
+                state,
+                enriched_query,
+            )
 
             query_vec = None
             try:
@@ -1043,13 +1216,7 @@ class Orchestrator:
                     for fc in fn_calls:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
-                        redirected_ticket_args = self._extract_ticket_args_from_call_ae_api(tool_args) if tool_name == "call_ae_api" else None
-                        if redirected_ticket_args:
-                            tool_name = "create_hdfc_ticket"
-                            tool_args = redirected_ticket_args
-                        tool_def = turn_tools.get_tool(tool_name)
-                        if not tool_def:
-                            tool_def = tool_registry.get_tool(tool_name)
+                        tool_name, tool_args = self._rewrite_call_ae_api_tool(tool_name, tool_args)
 
                         tool_name, tool_args = self._rewrite_completed_execution_followup(
                             user_message=user_message,
@@ -1057,8 +1224,16 @@ class Orchestrator:
                             tool_name=tool_name,
                             tool_args=tool_args,
                         )
-                        if tool_name != fc.name:
-                            tool_def = turn_tools.get_tool(tool_name) or tool_registry.get_tool(tool_name)
+                        turn_tools, active_tool_names = self._ensure_turn_tool_active(
+                            turn_tools,
+                            cast(set[str], active_tool_names),
+                            tool_name,
+                            allowed_categories=allowed_categories,
+                            feedback_agent_id=feedback_agent_id,
+                        )
+                        tool_def = turn_tools.get_tool(tool_name)
+                        if not tool_def:
+                            tool_def = tool_registry.get_tool(tool_name)
 
                         if tool_def:
                             tool_args = self._inject_user_scope(tool_name, tool_args, tool_def, state)
@@ -1106,7 +1281,8 @@ class Orchestrator:
                                 state.phase = ConversationPhase.AWAITING_APPROVAL
                                 state.is_agent_working = False
                                 return self.approval_gate.format_approval_prompt(
-                                    approval_request
+                                    approval_request,
+                                    audience=state.user_role,
                                 )
 
                     messages.append(candidate.content)
@@ -1117,10 +1293,7 @@ class Orchestrator:
                     for fc in fn_calls:
                         tool_name = fc.name
                         tool_args = dict(fc.args) if fc.args else {}
-                        redirected_ticket_args = self._extract_ticket_args_from_call_ae_api(tool_args) if tool_name == "call_ae_api" else None
-                        if redirected_ticket_args:
-                            tool_name = "create_hdfc_ticket"
-                            tool_args = redirected_ticket_args
+                        tool_name, tool_args = self._rewrite_call_ae_api_tool(tool_name, tool_args)
 
                         tool_name, tool_args = self._rewrite_completed_execution_followup(
                             user_message=user_message,
@@ -1129,6 +1302,13 @@ class Orchestrator:
                             tool_args=tool_args,
                         )
 
+                        turn_tools, active_tool_names = self._ensure_turn_tool_active(
+                            turn_tools,
+                            cast(set[str], active_tool_names),
+                            tool_name,
+                            allowed_categories=allowed_categories,
+                            feedback_agent_id=feedback_agent_id,
+                        )
                         tool_def = turn_tools.get_tool(tool_name)
                         if not tool_def:
                             tool_def = tool_registry.resolve_discovered_tool(
@@ -1298,7 +1478,7 @@ class Orchestrator:
                             "Falling back to SOP guidance instead of tool call.",
                             best_tool_sim, best_sop_sim,
                         )
-                        final_response = self._build_sop_fallback_response(
+                        final_response = self._build_friendly_sop_fallback_response(
                             user_message=user_message,
                             sop_hits=sop_hits,
                         )
@@ -1421,11 +1601,12 @@ class Orchestrator:
                 return self._refresh_pending_approval_prompt(
                     state,
                     refreshed_args,
-                    note="Updated the pending action with your requested parameter changes.",
+                    note="Updated the pending action with your requested changes.",
                 )
             return self.approval_gate.format_clarification_prompt(
                 state.pending_action,
                 state.pending_action_summary,
+                audience=state.user_role,
             )
 
         if intent == ApprovalIntent.CANCEL:
@@ -1438,7 +1619,7 @@ class Orchestrator:
             state.pending_action = None
             state.pending_action_summary = ""
             state.param_collection = {}
-            return "Understood. I cancelled the pending action. What should I do next?"
+            return "Understood. I cancelled the pending action. What would you like me to do next?"
 
         if intent in (ApprovalIntent.REJECT, ApprovalIntent.NEW_REQUEST):
             self._log_pending_action_decision(
@@ -1452,10 +1633,10 @@ class Orchestrator:
             state.param_collection = {}
             if intent == ApprovalIntent.NEW_REQUEST:
                 return (
-                    "Understood. I will not execute the pending action.\n\n"
+                    "Understood. I won't run the pending action.\n\n"
                     + self._process_message(user_message, state, tracker)
                 )
-            return "Action rejected. What would you like me to do instead?"
+            return "Understood. I won't run that action. What would you like me to do instead?"
 
         updates = self._extract_pending_action_updates(
             user_message,
@@ -1467,27 +1648,25 @@ class Orchestrator:
             return self._refresh_pending_approval_prompt(
                 state,
                 refreshed_args,
-                note="Updated the pending action with your requested parameter changes.",
+                note="Updated the pending action with your requested changes.",
             )
 
         if intent != ApprovalIntent.APPROVE:
             return (
-                "I couldn't confidently tell whether you want to approve, "
-                "reject, or ask a question. Please say what you want in "
-                "natural language, for example: 'yes proceed', "
-                "'no don't do this', or ask a question."
+                "I couldn't tell yet whether you want to approve, reject, or change the request. "
+                "Please reply with **approve**, **reject**, or tell me what you'd like to change."
             )
 
         action = state.pending_action
         if not action:
             state.phase = ConversationPhase.IDLE
             state.param_collection = {}
-            return "No pending action found. How can I help?"
+            return "There isn't a pending action right now. How can I help?"
 
         allowed = action.get("authorized_users", [])
         if allowed and state.user_id and state.user_id not in allowed:
             return (
-                "You are not authorized to approve this action. "
+                "You can't approve this action from this account. "
                 f"Authorized reviewers: {', '.join(allowed)}"
             )
 
@@ -1692,6 +1871,22 @@ class Orchestrator:
                 detail_lines = []
                 if data.get("agent_name"):
                     detail_lines.append(f"**Agent:** {data.get('agent_name')}")
+                assigned_agents = data.get("assigned_agents") or []
+                if isinstance(assigned_agents, list) and assigned_agents:
+                    labels = []
+                    for agent in assigned_agents[:5]:
+                        if not isinstance(agent, dict):
+                            continue
+                        name = str(
+                            agent.get("agentName")
+                            or agent.get("name")
+                            or agent.get("agentId")
+                            or "Unknown"
+                        ).strip()
+                        state_value = str(agent.get("agentState") or agent.get("state") or "UNKNOWN").strip().upper()
+                        labels.append(f"{name} ({state_value})")
+                    if labels:
+                        detail_lines.append(f"**Assigned agents:** {', '.join(labels)}")
                 if data.get("request_id") or data.get("execution_id"):
                     detail_lines.append(f"**Request ID:** `{data.get('request_id') or data.get('execution_id')}`")
                 if data.get("last_status"):
@@ -1916,6 +2111,12 @@ Rules:
 21. **AGENT STATUS DISCOVERY**: Always use `ae.agent.list_all` for any general agent status query to see all Running, Stopped, and Offline agents.
 22. **STRICT AGENT ENFORCEMENT**: You MUST call `ae.agent.list_all` (or `list_running`) to discover numeric IDs and verify `RUNNING` status BEFORE suggesting or triggering any diagnostic action (logs, RDP, etc.). NEVER call diagnostics if the agent is `STOPPED`.
 23. **PRECISION ID RESOLUTION**: When calling agent-related tools, always use the numeric `agent_id` (e.g. "2928") resolved from the agent list, rather than the search name (e.g. "vaishnavi.malusare..."), to ensure 100% precision.
+24. **RELATED SYSTEM HEALTH CHECKS**: If the user asks for a process status, failure reason, or health check and the failing run may be related to Life Asia connectivity or TEBT login/portal problems, call `check_workflow_status` first. That tool may automatically inspect the latest failure evidence and run the configured related-system health check via admin scope. If the tool response includes a related issue check/result, you MUST surface that result clearly to the user.
+25. **MEANINGFUL FIRST-LINE RULE**: Start every final reply with the answer, outcome, or current status. Do NOT open with internal narration such as "This looks related", "I would like to perform", "I'll track it", or raw tool names.
+26. **CHAT-NOT-SYSTEM RULE**: Write like a helpful teammate in chat. Avoid raw field dumps such as `workflow_name`, `user_id`, `org_code`, JSON-like parameter blocks, or internal tool names unless the user explicitly needs that level of detail.
+27. **APPROVAL & INPUT REQUEST STYLE**: When asking for confirmation or missing information, explain what will happen, why it matters, and what you need from the user in clean, user-friendly language. Avoid robotic approval or parameter-collection wording.
+28. **NO EMAIL / LETTER FORMATTING**: Unless the user explicitly asks for an email, memo, or letter, never format a response with subject lines, salutations, sign-offs, placeholder names, or drafted-mail structure.
+29. **MINIMUM-NECESSARY FOLLOW-UP RULE**: When you need more information, ask only for the minimum missing detail required to continue and briefly explain why you need it.
 Available tool categories: status, logs, file, remediation, dependency,
 config, notification, general, meta, agent_read, agent_diag.
 You have a subset of tools loaded. Use discover_tools to find others.
@@ -1926,13 +2127,28 @@ FORBIDDEN: Never respond with SOP steps like 'Step 1: Check workflow status...' 
         if state.user_role == "business":
             persona = """
 ## Persona: Business User
-Explain in plain English. No workflow names, request IDs, or error codes.
-Focus on business impact, timing, and resolution status."""
+Audience: business users, managers, and non-technical stakeholders.
+Style requirements:
+- First sentence must answer the question directly in plain English.
+- Focus on current status, business impact, expected timing, and what happens next.
+- Never start with internal tracking language such as "linked issue", "tool", "workflow mapping", or "parameter collection".
+- Avoid workflow names, request IDs, execution IDs, error codes, endpoint names, and raw file paths unless the user explicitly asks for them.
+- If structure helps, use short sections such as "What happened", "What this means", and "Next options".
+- Keep suggestions simple, concrete, and non-technical.
+- Keep the reply in normal chat format, not as an email, memo, or drafted note.
+- If you need approval or more information, explain it in natural chat language, not system language."""
         else:
             persona = """
 ## Persona: Technical Staff
-Include workflow names, request IDs, error details, and timestamps.
-Provide full diagnostic information."""
+Audience: operations, support, and IT users.
+Style requirements:
+- First sentence must answer the question or summarize the outcome clearly.
+- Then provide the most useful evidence: workflow, request ID, agent, timestamps, status, and error details when relevant.
+- Avoid filler or robotic lead-ins such as "I would like to perform the following action" unless the user explicitly asked for a formal summary.
+- Use bullets or short sections only when they improve clarity.
+- For approvals or next actions, summarize exactly what will happen, what inputs will be used, and what the operator should confirm.
+- Keep the reply in chat format, not as an email, memo, or internal audit note.
+- Stay conversational, readable, and precise."""
 
         issue_context = ""
         if tracker and tracker.issues:
@@ -2089,131 +2305,143 @@ CRITICAL RULES:
         if not msg:
             return None
 
-        discover = tool_registry.execute(
-            "discover_tools",
-            query=msg,
-            category="automationedge",
-            top_k=5,
-            _agent_id=feedback_agent_id,
-            user_id=state.user_id,
-            org_code=self._state_org_code(state),
-        )
-        state.log_tool_call(
-            "discover_tools",
-            {
-                "query": msg,
-                "category": "automationedge",
-                "top_k": 5,
-                "user_id": state.user_id,
-                "org_code": self._state_org_code(state),
-            },
-            discover.data,
-            discover.success,
-        )
-        if not discover.success:
-            return None
-
-        hits = (discover.data or {}).get("tools", [])
-        if not isinstance(hits, list) or not hits:
-            return None
-
         execution_intent = self._is_execution_request(msg)
 
         # Only measure similarity from WF_ workflow hits — non-workflow tools
         # like ae.agent.get_details can score higher but are irrelevant here.
-        best_wf_similarity = 0.0
-        for hit in hits:
-            if isinstance(hit, dict):
-                hit_name = str(hit.get("name") or hit.get("workflow_name") or hit.get("tool_name") or "").strip()
-                hit_meta = hit.get("metadata") or {}
-                is_ae = (
-                    hit_name.startswith("WF_") or 
-                    hit.get("category") == "automationedge" or 
-                    hit_meta.get("source") == "automationedge" or
-                    hit_meta.get("workflow_id")
-                )
-                if not is_ae:
-                    continue
-                try:
-                    best_wf_similarity = max(
-                        best_wf_similarity,
-                        float(hit.get("score", 0.0) or hit.get("similarity", 0.0) or 0.0),
-                    )
-                except Exception:
-                    pass
-
         # AE-102: Strictly respect execution intent.
         # If the LLM says NOT_EXECUTE, don't proactively start param collection/blocking.
         if not execution_intent:
             return None
 
-        # Pre-filter to AutomationEdge workflow hits only.
-        # Previously restricted to "WF_" prefix; now allowing any AE category/source.
-        scored_hits: list[tuple[float, dict]] = []
-        for hit in hits:
-            if not isinstance(hit, dict):
-                continue
-            hit_name = str(hit.get("name") or hit.get("workflow_name") or hit.get("tool_name") or "").strip()
-            hit_meta = hit.get("metadata") or {}
-            
-            # Allow if it has a workflow_id or is from AE source
-            is_ae = (
-                hit_name.startswith("WF_") or 
-                hit.get("category") == "automationedge" or 
-                hit_meta.get("source") == "automationedge" or
-                hit_meta.get("workflow_id")
-            )
-            
-            if not is_ae:
-                continue
-                
-            try:
-                sim = float(hit.get("score", 0.0) or hit.get("similarity", 0.0) or 0.0)
-            except Exception:
-                sim = 0.0
-            scored_hits.append((sim, hit))
-
-        if not scored_hits:
-            return None
-        scored_hits.sort(key=lambda item: item[0], reverse=True)
-        selected_hit = scored_hits[0][1]
-
-        workflow_name = str(
-            selected_hit.get("workflow_name")
-            or selected_hit.get("name")
-            or ""
-        ).strip()
-        if not workflow_name:
-            return None
-
         client = get_ae_client()
-        schema = client.get_cached_workflow_parameters(workflow_name)
+        resolved_org = self._state_org_code(state)
+        direct_workflow_name = self._resolve_workflow_name_from_message(msg, state)
+        hits: list[dict] = []
+        if not direct_workflow_name:
+            suggestions = []
+            suggester = getattr(client, "suggest_cached_workflow_names", None)
+            if callable(suggester):
+                try:
+                    suggestions = suggester(
+                        msg,
+                        user_id=state.user_id,
+                        org_code=resolved_org,
+                        require_execute=True,
+                        limit=5,
+                    )
+                except TypeError:
+                    suggestions = suggester(
+                        msg,
+                        user_id=state.user_id,
+                        org_code=resolved_org,
+                    )
+
+            discover = tool_registry.execute(
+                "discover_tools",
+                query=msg,
+                category="automationedge",
+                top_k=5,
+                _agent_id=feedback_agent_id,
+                user_id=state.user_id,
+                org_code=resolved_org,
+            )
+            state.log_tool_call(
+                "discover_tools",
+                {
+                    "query": msg,
+                    "category": "automationedge",
+                    "top_k": 5,
+                    "user_id": state.user_id,
+                    "org_code": resolved_org,
+                },
+                discover.data,
+                discover.success,
+            )
+            if not discover.success:
+                return self._build_workflow_resolution_message(
+                    workflow_label=msg,
+                    suggestions=suggestions,
+                )
+
+            hits = (discover.data or {}).get("tools", [])
+            if not isinstance(hits, list):
+                hits = []
+            return self._build_workflow_resolution_message(
+                workflow_label=msg,
+                suggestions=suggestions or self._workflow_suggestions_from_hits(hits),
+            )
+
+        selected_hit = {
+            "workflow_name": direct_workflow_name,
+            "name": direct_workflow_name,
+            "category": "automationedge",
+            "metadata": {
+                "source": "automationedge",
+                "workflow_name": direct_workflow_name,
+            },
+            "use_tool": "trigger_workflow",
+        }
+        workflow_name = direct_workflow_name
+
+        workflow_id, schema = client.get_cached_workflow_info(
+            workflow_name,
+            user_id=state.user_id,
+            org_code=resolved_org,
+        )
+        if state.user_id or is_execute_enforced():
+            if not state.user_id or not workflow_id or not can_execute_workflow(state.user_id, workflow_id, resolved_org):
+                return self._build_workflow_resolution_message(
+                    workflow_label=workflow_name,
+                    suggestions=[],
+                )
+
         hit_meta = selected_hit.get("metadata") or {}
         hit_params = hit_meta.get("parameters") or selected_hit.get("parameters") or {}
         
-        # Merge hit_params and schema to get the most comprehensive list.
-        # RAG index (hit_params) is often more up-to-date than the local catalog CACHE.
-        
-        # 1. Start with schema (DB) as the baseline
-        combined_schema: dict[str, dict] = {p.get("name"): p for p in (schema or []) if p.get("name")}
-        
-        # 2. Layer on search hit parameters (Metadata)
+        # Prefer the cached workflow schema when available. Search/RAG metadata is
+        # useful for descriptions, but it can contain extra nested config fields
+        # that are not true runtime inputs for the workflow.
+        combined_schema: dict[str, dict] = {
+            str(p.get("name")).strip(): dict(p)
+            for p in (schema or [])
+            if isinstance(p, dict) and str(p.get("name") or "").strip()
+        }
+        has_authoritative_schema = bool(combined_schema)
+
+        def merge_hit_param(name: str, param_schema: dict) -> None:
+            clean_name = str(name or "").strip()
+            if not clean_name or not isinstance(param_schema, dict):
+                return
+            if not has_authoritative_schema:
+                existing = combined_schema.setdefault(clean_name, {"name": clean_name})
+                existing.update(param_schema)
+                return
+
+            existing = combined_schema.get(clean_name)
+            if not isinstance(existing, dict):
+                return
+            for field in (
+                "description",
+                "displayName",
+                "displayname",
+                "helpText",
+                "extension",
+                "fileextension",
+                "type",
+                "uiControlType",
+            ):
+                value = param_schema.get(field)
+                if value not in (None, "", [], {}) and not existing.get(field):
+                    existing[field] = value
+
         if isinstance(hit_params, dict):
             for name, p_schema in hit_params.items():
-                if name not in combined_schema:
-                    combined_schema[name] = {"name": name}
-                if isinstance(p_schema, dict):
-                    combined_schema[name].update(p_schema)
+                merge_hit_param(name, p_schema)
         elif isinstance(hit_params, list):
             for p in hit_params:
                 if isinstance(p, dict) and p.get("name"):
-                    pname = str(p.get("name")).strip()
-                    if pname and pname not in combined_schema:
-                        combined_schema[pname] = p
-                    else:
-                        target_dict = combined_schema.get(pname)
-                        if isinstance(target_dict, dict):
-                            target_dict.update(p)
+                    merge_hit_param(str(p.get("name")).strip(), p)
 
         # AE-77: Intercept file upload parameters before collection starts.
         # File upload is not supported in agentic chat yet.
@@ -2387,8 +2615,28 @@ CRITICAL RULES:
                 
         return errors
 
+    @staticmethod
+    def _has_explicit_execute_cue(user_message: str) -> bool:
+        text = str(user_message or "").strip().lower()
+        if not text:
+            return False
+        if re.search(
+            r"\b(trigger|run|start|execute|launch|kick\s+off|submit)\b",
+            text,
+        ):
+            return True
+
+        cue_tokens = {"trigger", "run", "start", "execute", "launch", "submit", "rerun", "retry"}
+        tokens = [tok for tok in re.split(r"[^a-z]+", text) if tok]
+        for token in tokens:
+            for cue in cue_tokens:
+                if SequenceMatcher(None, token, cue).ratio() >= 0.84:
+                    return True
+        return False
+
     def _is_execution_request(self, user_message: str) -> bool:
         """LLM-based intent check to avoid hardcoded workflow-action keyword lists."""
+        heuristic_execute = self._has_explicit_execute_cue(user_message)
         try:
             verdict = llm_client.chat(
                 (
@@ -2403,9 +2651,11 @@ CRITICAL RULES:
                 temperature=0.0,
                 max_tokens=8,
             ).strip().upper()
-            return "EXECUTE" in verdict
+            if "EXECUTE" in verdict:
+                return True
+            return heuristic_execute
         except Exception:
-            return False
+            return heuristic_execute
 
     def _detect_context_switch(
         self,
@@ -2653,7 +2903,10 @@ CRITICAL RULES:
         }
         state.pending_action_summary = summary
         state.phase = ConversationPhase.AWAITING_APPROVAL
-        return self.approval_gate.format_approval_prompt(approval_request)
+        return self.approval_gate.format_approval_prompt(
+            approval_request,
+            audience=state.user_role,
+        )
 
     def _extract_params_from_user_message(self, user_message: str, param_names: list[str], messages: list[dict] | None = None) -> dict[str, str | None]:
         """LLM-based param extractor inspired by code_ref remediation_agent_extract_params."""
@@ -2709,6 +2962,122 @@ CRITICAL RULES:
         if txt.endswith("s") and len(txt) > 3:
             txt = cast(Any, txt)[:-1]
         return txt
+
+    def _resolve_workflow_name_from_message(
+        self,
+        user_message: str,
+        state: ConversationState,
+    ) -> str:
+        """Try exact catalog resolution from the user's wording before semantic search."""
+        message = str(user_message or "").strip()
+        if not message:
+            return ""
+
+        client = get_ae_client()
+        org_code = self._state_org_code(state)
+        user_id = state.user_id
+
+        candidates: list[str] = []
+
+        def add_candidate(value: str) -> None:
+            clean = re.sub(r"\s+", " ", str(value or "").strip(" \t\r\n`'\".,:;!?()[]{}")).strip()
+            if clean and clean not in candidates:
+                candidates.append(clean)
+
+        add_candidate(message)
+
+        for pattern in (r"`([^`]+)`", r"'([^']+)'", r"\"([^\"]+)\""):
+            for match in re.findall(pattern, message):
+                add_candidate(match)
+
+        lowered = message.lower()
+        stripped = re.sub(
+            r"^(please\s+)?(can you\s+)?(could you\s+)?(kindly\s+)?"
+            r"(trigger|run|start|execute|launch|kick off|submit|rerun|re-run)\s+",
+            "",
+            lowered,
+        )
+        add_candidate(stripped)
+
+        stop_words = {
+            "a", "an", "the", "this", "that", "my", "our", "please",
+            "bot", "workflow", "process", "job", "agent",
+            "trigger", "run", "start", "execute", "launch", "kick", "off",
+            "submit", "rerun", "re", "again",
+        }
+        tokens = [tok for tok in re.split(r"[^a-zA-Z0-9_]+", lowered) if tok]
+        filtered = [tok for tok in tokens if tok not in stop_words]
+        if filtered:
+            add_candidate(" ".join(filtered))
+            add_candidate("_".join(filtered))
+
+        for candidate in candidates:
+            resolved = client.resolve_cached_workflow_name(
+                candidate,
+                user_id=user_id,
+                org_code=org_code,
+            )
+            if resolved:
+                return resolved
+
+        resolver = getattr(client, "resolve_workflow_name_from_text", None)
+        if callable(resolver):
+            try:
+                resolved = resolver(
+                    message,
+                    user_id=user_id,
+                    org_code=org_code,
+                    require_execute=True,
+                )
+            except TypeError:
+                resolved = resolver(
+                    message,
+                    user_id=user_id,
+                    org_code=org_code,
+                )
+            if resolved:
+                return str(resolved).strip()
+
+        return ""
+
+    @staticmethod
+    def _workflow_suggestions_from_hits(hits: list[dict], limit: int = 5) -> list[str]:
+        suggestions: list[str] = []
+        for hit in hits or []:
+            if not isinstance(hit, dict):
+                continue
+            metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+            name = str(
+                metadata.get("workflow_name")
+                or hit.get("workflow_name")
+                or hit.get("name")
+                or ""
+            ).strip()
+            if not name or name in suggestions:
+                continue
+            suggestions.append(name)
+            if len(suggestions) >= limit:
+                break
+        return suggestions
+
+    @staticmethod
+    def _build_workflow_resolution_message(
+        *,
+        workflow_label: str,
+        suggestions: list[str] | None = None,
+    ) -> str:
+        lines = [
+            f"I couldn't match **{workflow_label or 'that request'}** to an exact workflow you can trigger.",
+            "",
+            "Please use the exact workflow name from your workflow list before I continue.",
+        ]
+        if suggestions:
+            lines.extend([
+                "",
+                "Here are a few workflows you can trigger:",
+                *[f"- {name}" for name in suggestions[:5]],
+            ])
+        return "\n".join(lines)
 
     def _start_or_update_param_collection(
         self,
@@ -2880,6 +3249,15 @@ CRITICAL RULES:
             "failed because",
             "api",
             "endpoint",
+            "risk level",
+            "parameters:",
+            "workflow_name",
+            "workflow_id",
+            "user_id",
+            "org_code",
+            "t4_execute_and_poll",
+            "trigger_workflow",
+            "linked issue",
         )
         if not any(marker in lowered for marker in technical_markers):
             return response
@@ -2891,6 +3269,10 @@ CRITICAL RULES:
                 "Focus on impact, timing, status, and next actions. "
                 "Do not shorten the response unnecessarily. "
                 "Keep the response complete and well-structured. "
+                "Start with one clear sentence that answers the user's question or states the current status. "
+                "Replace awkward internal phrases like 'linked issue', 'tool', 'risk level', 'parameter collection', or raw field names with normal business language. "
+                "If helpful, use at most three short sections such as 'What happened', 'What this means', and 'Next options'. "
+                "Sound like a helpful chatbot, not an internal system note. "
                 "CRITICAL: This is a chatbot reply, not an email, memo, or letter. "
                 "Do NOT add a subject line, greeting line, salutation, sign-off, placeholder name, or email-style sections. "
                 "Write as a direct conversational chat response only. "
@@ -2984,7 +3366,10 @@ CRITICAL RULES:
         prompt = (
             f"You are a helpful RPA automation assistant. You are helping the user with: '{friendly_wf}'.\n"
             f"{intro}\n\n"
+            "Start with one clear sentence explaining what is needed to continue.\n"
             "Ask only for the missing required user inputs in a warm, conversational tone.\n"
+            "Sound professional, friendly, and direct.\n"
+            "Do not sound robotic or like a system form.\n"
             "Never ask whether the user wants to provide anything.\n"
             "Never use the words parameter, parameters, JSON, payload, API, or values.\n"
             "Do not mention optional inputs.\n"
@@ -3010,19 +3395,19 @@ CRITICAL RULES:
             prefix = f"{intro.strip()} " if intro and intro.strip() else ""
             if single_item:
                 label, desc = items[0]
-                msg = f"{prefix}To start {friendly_wf}, what should I use for {label}?"
+                msg = f"{prefix}To continue with {friendly_wf}, I just need {label}."
                 if desc:
-                    msg += f" {desc}."
-                msg += " Once you share it, I'll continue."
+                    msg += f" Please share {desc[0].lower() + desc[1:] if desc[:1].isupper() else desc}."
+                msg += " Once you share it, I'll take it from there."
             else:
                 lines = [f"- {label}: {desc}" if desc else f"- {label}" for label, desc in items]
                 msg = (
-                    f"{prefix}To start {friendly_wf}, please share:\n"
+                    f"{prefix}To continue with {friendly_wf}, please share:\n"
                     + "\n".join(lines)
-                    + "\n\nOnce you send them, I'll continue."
+                    + "\n\nOnce you send these, I'll keep things moving."
                 )
             if sop_guidance:
-                msg += "\n\nPlease follow these guidelines:\n" + "\n".join(f"- {g}" for g in [sop_guidance[i] for i in range(min(len(sop_guidance), 3))])
+                msg += "\n\nHelpful guidance:\n" + "\n".join(f"- {g}" for g in [sop_guidance[i] for i in range(min(len(sop_guidance), 3))])
             return msg
 
     @staticmethod
@@ -3145,7 +3530,7 @@ CRITICAL RULES:
         if guidance and (not error_text or len(error_text) < 50) and not is_formal_rejection:
             msg += "\n\nRecommended troubleshooting steps:\n" + "\n".join(f"- {g}" for g in guidance)
             
-        msg += "\n\nWould you like me to retry, create a support ticket, or escalate?"
+        msg += "\n\nIf you'd like, I can retry this, create a support ticket, or help escalate it."
         return msg
 
     @staticmethod
@@ -3384,6 +3769,40 @@ CRITICAL RULES:
             return best_sop_similarity > 0.003
 
         return best_tool_similarity < threshold
+
+    def _build_friendly_sop_fallback_response(self, user_message: str, sop_hits: list[dict]) -> str:
+        """Provide polished SOP-based guidance for user-facing fallback responses."""
+        steps = self._get_sop_troubleshooting_steps(user_message)
+        if not steps:
+            for hit in [sop_hits[i] for i in range(min(len(sop_hits), 3))]:
+                content = str(hit.get("content") or "")
+                for raw in content.splitlines():
+                    line = raw.strip(" -*\t")
+                    if not line:
+                        continue
+                    if len(line) < 18:
+                        continue
+                    if any(
+                        key in line.lower()
+                        for key in ("check", "verify", "ensure", "restart", "retry", "validate", "contact")
+                    ):
+                        steps.append(line)
+                    if len(steps) >= 3:
+                        break
+                if len(steps) >= 3:
+                    break
+
+        if steps:
+            return (
+                "I couldn't find a direct automation action for this request yet, but these steps should help:\n"
+                + "\n".join(f"- {step}" for step in [steps[i] for i in range(min(len(steps), 3))])
+                + "\n\nIf you'd like, I can also create a support ticket or help narrow this down further."
+            )
+
+        return (
+            "I couldn't match this request to a direct action or a strong SOP yet. "
+            "Please share one more detail, such as the system name, error message, or workflow name, and I'll guide you from there."
+        )
 
     def _build_sop_fallback_response(self, user_message: str, sop_hits: list[dict]) -> str:
         """Provide direct SOP-based guidance when tool coverage is missing."""

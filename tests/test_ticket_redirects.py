@@ -28,3 +28,21 @@ def test_orchestrator_extracts_ticket_args_from_malformed_call_ae_api_body():
     assert extracted["process_name"] == "MG312 BOT2"
     assert "Execution failed for MG312 BOT2" in extracted["description"]
     assert extracted["request_type"] == "Incident"
+
+
+def test_orchestrator_extracts_agent_log_args_from_call_ae_api_params():
+    orch = Orchestrator()
+
+    extracted = orch._extract_agent_log_args_from_call_ae_api(
+        {
+            "method": "GET",
+            "endpoint": "/api/v1/agents/2987/logs",
+            "params": '{"from_date":"2026-04-01T00:00:00","to_date":"2026-04-02T23:59:59"}',
+        }
+    )
+
+    assert extracted == {
+        "agent_id": "2987",
+        "from_date": "2026-04-01T00:00:00",
+        "to_date": "2026-04-02T23:59:59",
+    }

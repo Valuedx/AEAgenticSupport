@@ -705,11 +705,12 @@
 
     async function restoreAuth() {
       try {
-        const r = await fetch('/api/webchat/auth/me', { signal: AbortSignal.timeout(5000) });
+        const r = await fetch('/api/webchat/auth/me?refresh_chat_session=1', { signal: AbortSignal.timeout(5000) });
         const payload = await r.json();
         if (payload && payload.authenticated) {
           webchatUser = payload.username || '';
           sessionId = payload.chat_session_id || '';
+          welcomeShown = false;
         } else {
           webchatUser = null;
           sessionId = '';

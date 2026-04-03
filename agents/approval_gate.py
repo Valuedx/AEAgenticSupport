@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import json
+import ntpath
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -27,6 +28,10 @@ logger = logging.getLogger("ops_agent.approval")
 _SENSITIVE_PARAM_KEYS: frozenset[str] = frozenset({
     "api_key", "token", "secret", "password", "auth", "credential",
     "private_key", "access_key", "client_secret",
+})
+
+_INTERNAL_PROMPT_KEYS: frozenset[str] = frozenset({
+    "user_id", "userid", "org_code", "orgcode", "authorized_users",
 })
 
 
@@ -284,21 +289,235 @@ class ApprovalGate:
     # User-facing prompt formatting
     # ------------------------------------------------------------------
 
-    def format_approval_prompt(self, request: ApprovalRequest) -> str:
-        lines = [
-            "I'd like to perform the following action:",
-            f"  Action: {request.tool_name}",
-            f"  Risk level: {request.tier}",
-            f"  Details: {request.summary}",
-            "",
-            "Parameters:",
-        ]
+    def format_approval_prompt(
+        self,
+        request: ApprovalRequest,
+        audience: str = "technical",
+    ) -> str:
+        role = str(audience or "technical").strip().lower()
         safe = self._redact_sensitive_params(request.tool_params)
-        for k, v in safe.items():
-            lines.append(f"  {k}: {v}")
-        lines.append("")
-        lines.append("Reply **approve** to proceed or **reject** to cancel.")
+        details = self._visible_param_items(safe, audience=role)
+        action_text = self._describe_action(request.tool_name, safe, audience=role)
+        risk_text = self._humanize_risk(request.tier)
+        why_text = self._approval_reason_text(request.tool_name, request.tier, audience=role)
+
+        if role == "business":
+            lines = [
+                "I'm ready to continue with this request.",
+                "",
+                "**What Will Happen**",
+                f"- {action_text}",
+                f"- Risk level: {risk_text}",
+                f"- Why I need your confirmation: {why_text}",
+            ]
+            if details:
+                lines.extend(
+                    [
+                        "",
+                        "**Details**",
+                        *[f"- {label}: {value}" for label, value in details],
+                    ]
+                )
+            lines.extend(
+                [
+                    "",
+                    "Reply **approve** to continue or **reject** to cancel.",
+                ]
+            )
+            return "\n".join(lines)
+
+        lines = [
+            "I'm ready to run this action.",
+            "",
+            "**Planned Action**",
+            f"- {action_text}",
+            f"- Risk level: {risk_text}",
+            f"- Why approval is required: {why_text}",
+        ]
+        if details:
+            lines.extend(
+                [
+                    "",
+                    "**Execution Details**",
+                    *[f"- {label}: {value}" for label, value in details],
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Reply **approve** to continue or **reject** to cancel.",
+            ]
+        )
         return "\n".join(lines)
+
+    @staticmethod
+    def _humanize_risk(tier: str) -> str:
+        labels = {
+            "low_risk": "Low",
+            "medium_risk": "Medium",
+            "high_risk": "High",
+        }
+        return labels.get(str(tier or "").strip().lower(), str(tier or "Medium"))
+
+    @staticmethod
+    def _humanize_tool_name(tool_name: str) -> str:
+        custom = {
+            "trigger_workflow": "run workflow",
+            "t4_execute_and_poll": "run workflow and wait for the result",
+            "restart_execution": "restart execution",
+            "resubmit_execution": "resubmit execution",
+            "create_hdfc_ticket": "create support ticket",
+            "create_incident_ticket": "create incident ticket",
+        }
+        clean = str(tool_name or "").strip()
+        if clean in custom:
+            return custom[clean]
+        return clean.replace("_", " ").replace("-", " ").strip().lower() or "run this action"
+
+    @classmethod
+    def _describe_action(cls, tool_name: str, params: dict, audience: str) -> str:
+        workflow_name = str(params.get("workflow_name") or "").strip()
+        process_name = str(params.get("process_name") or "").strip()
+        execution_id = str(params.get("execution_id") or params.get("request_id") or "").strip()
+        target = workflow_name or process_name or execution_id
+        target_human = target.replace("_", " ").replace("-", " ").strip()
+        target_technical = f"`{target}`" if target else ""
+
+        if tool_name == "t4_execute_and_poll":
+            if audience == "business":
+                return f"Start {target_human or 'the requested automation'} and check the result."
+            return f"Run {target_technical or 'the requested workflow'} and wait for the result."
+        if tool_name == "trigger_workflow":
+            if audience == "business":
+                return f"Start {target_human or 'the requested automation'}."
+            return f"Run {target_technical or 'the requested workflow'}."
+        if tool_name == "restart_execution":
+            if audience == "business":
+                return f"Restart {target_human or 'the selected automation run'}."
+            return f"Restart execution {target_technical or ''}.".replace("  ", " ").strip()
+        if tool_name == "resubmit_execution":
+            if audience == "business":
+                return f"Submit {target_human or 'the selected automation run'} again."
+            return f"Resubmit execution {target_technical or ''}.".replace("  ", " ").strip()
+        if tool_name in {"create_hdfc_ticket", "create_incident_ticket"}:
+            if audience == "business":
+                return f"Create a support request for {target_human or 'this issue'}."
+            return f"Create a support ticket for {target_technical or 'this issue'}."
+
+        action = cls._humanize_tool_name(tool_name).capitalize()
+        if audience == "business" and target_human:
+            return f"{action} for {target_human}."
+        if target_technical:
+            return f"{action} for {target_technical}."
+        return f"{action}."
+
+    @classmethod
+    def _approval_reason_text(cls, tool_name: str, tier: str, audience: str) -> str:
+        if tool_name in {"trigger_workflow", "t4_execute_and_poll", "restart_execution", "resubmit_execution"}:
+            if audience == "business":
+                return "this will start or change a live automation run"
+            return "this action can start or change live automation activity"
+        if tool_name in {"create_hdfc_ticket", "create_incident_ticket"}:
+            if audience == "business":
+                return "this will create a support record that teams may act on"
+            return "this action creates a support record in an external system"
+        if str(tier or "").strip().lower() == "high_risk":
+            return "this action has higher operational impact"
+        return "this action needs confirmation before it is executed"
+
+    @classmethod
+    def _visible_param_items(
+        cls,
+        params: dict,
+        *,
+        audience: str,
+    ) -> list[tuple[str, str]]:
+        flattened = cls._flatten_params(params)
+        items: list[tuple[str, str]] = []
+        hidden_for_business = {"workflow_id"}
+        for key, value in flattened:
+            clean_key = str(key or "").strip()
+            if not clean_key:
+                continue
+            if clean_key.lower() in _INTERNAL_PROMPT_KEYS:
+                continue
+            if audience == "business" and clean_key.lower() in hidden_for_business:
+                continue
+            label = cls._humanize_param_label(clean_key, audience=audience)
+            rendered = cls._format_param_value(clean_key, value, audience=audience)
+            if not rendered:
+                continue
+            items.append((label, rendered))
+        return items
+
+    @classmethod
+    def _flatten_params(cls, params: dict, prefix: str = "") -> list[tuple[str, object]]:
+        items: list[tuple[str, object]] = []
+        for raw_key, value in (params or {}).items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            if isinstance(value, dict):
+                next_prefix = prefix
+                if key.lower() not in {"params", "parameters"}:
+                    next_prefix = f"{prefix}.{key}" if prefix else key
+                items.extend(cls._flatten_params(value, next_prefix))
+                continue
+            items.append((f"{prefix}.{key}" if prefix else key, value))
+        return items
+
+    @staticmethod
+    def _humanize_param_label(key: str, *, audience: str) -> str:
+        leaf = str(key or "").split(".")[-1].strip().lower()
+        business_map = {
+            "workflow_name": "Process",
+            "process_name": "Process",
+            "output_path": "Document",
+            "input_path": "Document",
+            "file_path": "Document",
+            "execution_id": "Run ID",
+            "request_id": "Run ID",
+        }
+        technical_map = {
+            "workflow_name": "Workflow",
+            "process_name": "Process",
+            "workflow_id": "Workflow ID",
+            "output_path": "Output path",
+            "input_path": "Input path",
+            "file_path": "File path",
+            "execution_id": "Execution ID",
+            "request_id": "Request ID",
+        }
+        mapping = business_map if audience == "business" else technical_map
+        if leaf in mapping:
+            return mapping[leaf]
+        human = leaf.replace("_", " ").replace("-", " ").strip()
+        if human.lower() == "emp id":
+            return "Employee ID"
+        return human[:1].upper() + human[1:] if human else key
+
+    @staticmethod
+    def _format_param_value(key: str, value: object, *, audience: str) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        leaf = str(key or "").split(".")[-1].strip().lower()
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (list, tuple, set)):
+            return ", ".join(str(item) for item in value if item not in (None, ""))[:500]
+
+        text = str(value).strip()
+        if not text:
+            return ""
+
+        if audience == "business" and "path" in leaf:
+            name = ntpath.basename(text) or text
+            return name
+
+        if leaf in {"workflow_name", "process_name"} and audience == "business":
+            return text.replace("_", " ").replace("-", " ").strip()
+
+        return f"`{text}`" if audience != "business" else text
 
     @staticmethod
     def _redact_sensitive_params(params: dict) -> dict:
@@ -375,30 +594,68 @@ class ApprovalGate:
         self,
         pending_action: Optional[dict],
         pending_summary: str,
+        audience: str = "technical",
     ) -> str:
+        role = str(audience or "technical").strip().lower()
         if not pending_action:
             return (
-                "There is no pending approval action right now. "
-                "Please tell me what you want to do next."
+                "There isn't a pending approval right now. "
+                "Please tell me what you'd like me to do next."
             )
 
-        lines = [
-            "You asked for clarification before approving.",
-            f"Pending action: {pending_action.get('tool', 'unknown tool')}",
-            f"Summary: {pending_summary or 'No summary available'}",
-            "Parameters:",
-        ]
         safe = self._redact_sensitive_params(pending_action.get("args") or {})
-        for k, v in safe.items():
-            lines.append(f"  {k}: {v}")
+        details = self._visible_param_items(safe, audience=role)
+        action_text = self._describe_action(
+            str(pending_action.get("tool") or ""),
+            safe,
+            audience=role,
+        )
+
+        if role == "business":
+            lines = [
+                "I'm waiting for your decision on this request.",
+                "",
+                "**What Will Happen**",
+                f"- {action_text}",
+            ]
+            if details:
+                lines.extend(
+                    [
+                        "",
+                        "**Details**",
+                        *[f"- {label}: {value}" for label, value in details],
+                    ]
+                )
+            elif pending_summary:
+                lines.extend(["", f"Summary: {pending_summary}"])
+            lines.extend(
+                [
+                    "",
+                    "Reply **approve** to continue, **reject** to cancel, or tell me what you'd like to change.",
+                ]
+            )
+            return "\n".join(lines)
+
+        lines = [
+            "I'm waiting for your decision on this action.",
+            "",
+            "**Planned Action**",
+            f"- {action_text}",
+        ]
+        if details:
+            lines.extend(
+                [
+                    "",
+                    "**Execution Details**",
+                    *[f"- {label}: {value}" for label, value in details],
+                ]
+            )
+        elif pending_summary:
+            lines.extend(["", f"Summary: {pending_summary}"])
         lines.extend(
             [
                 "",
-                "Reply in natural language:",
-                "- approve (for example: 'yes, proceed')",
-                "- reject (for example: 'no, don't do this')",
-                "- update a parameter (for example: 'from date use 29 march')",
-                "- or ask another question.",
+                "Reply **approve** to continue, **reject** to cancel, or tell me what you'd like to change.",
             ]
         )
         return "\n".join(lines)

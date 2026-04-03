@@ -100,6 +100,7 @@ class DiagnosticAgent(BaseAgent):
                 "logs",
                 "dependency",
                 "file",
+                "diagnostics",
                 "agent_read",
                 "agent_diag",
             ],

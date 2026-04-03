@@ -144,8 +144,7 @@ def _webchat_session_identity() -> dict | None:
         user_id = f"webchat:{username}"
     chat_session_id = str(session.get("webchat_chat_session_id", "") or "").strip()
     if not chat_session_id:
-        chat_session_id = f"webchat-{_slugify(username)}-{uuid.uuid4().hex[:8]}"
-        session["webchat_chat_session_id"] = chat_session_id
+        chat_session_id = _issue_webchat_chat_session_id(username)
     return {
         "username": username,
         "user_id": user_id,
@@ -160,8 +159,7 @@ def _require_webchat_session():
         user_id = str(session.get("webchat_user_id", "") or f"webchat:{username}").strip() or f"webchat:{username}"
         chat_session_id = str(session.get("webchat_chat_session_id", "") or "").strip()
         if not chat_session_id:
-            chat_session_id = f"webchat-{_slugify(username)}-{uuid.uuid4().hex[:8]}"
-            session["webchat_chat_session_id"] = chat_session_id
+            chat_session_id = _issue_webchat_chat_session_id(username)
         session["webchat_username"] = username
         session["webchat_user_id"] = user_id
         return {
@@ -179,6 +177,12 @@ def _require_webchat_session():
 def _slugify(value: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
     return text or "agent"
+
+
+def _issue_webchat_chat_session_id(username: str) -> str:
+    chat_session_id = f"webchat-{_slugify(username)}-{uuid.uuid4().hex[:8]}"
+    session["webchat_chat_session_id"] = chat_session_id
+    return chat_session_id
 
 
 def _refresh_runtime_section(section_name: str) -> None:
@@ -445,13 +449,17 @@ def api_aistudio_start_conversation():
 
 @app.route("/api/webchat/auth/me", methods=["GET"])
 def api_webchat_auth_me():
+    refresh_chat_session = _bool_arg(request.args.get("refresh_chat_session"))
     if not _webchat_auth_enabled():
+        chat_session_id = str(session.get("webchat_chat_session_id", "") or "").strip()
+        if refresh_chat_session or not chat_session_id:
+            chat_session_id = _issue_webchat_chat_session_id("webchat_user")
         return jsonify(
             {
                 "authenticated": True,
                 "username": "webchat_user",
                 "user_id": "webchat:webchat_user",
-                "chat_session_id": session.get("webchat_chat_session_id", "webchat-default"),
+                "chat_session_id": chat_session_id,
                 "auth_enabled": False,
             }
         )
@@ -459,6 +467,8 @@ def api_webchat_auth_me():
     identity = _webchat_session_identity()
     if not identity:
         return jsonify({"authenticated": False, "auth_enabled": True})
+    if refresh_chat_session:
+        identity["chat_session_id"] = _issue_webchat_chat_session_id(identity["username"])
 
     return jsonify(
         {
@@ -481,7 +491,7 @@ def api_webchat_auth_login():
     if not _webchat_auth_enabled():
         session["webchat_username"] = username or "webchat_user"
         session["webchat_user_id"] = f"webchat:{session['webchat_username']}"
-        session["webchat_chat_session_id"] = f"webchat-{_slugify(session['webchat_username'])}-{uuid.uuid4().hex[:8]}"
+        session["webchat_chat_session_id"] = _issue_webchat_chat_session_id(session["webchat_username"])
         return jsonify(
             {
                 "success": True,
@@ -507,7 +517,7 @@ def api_webchat_auth_login():
     session.clear()
     session["webchat_username"] = username
     session["webchat_user_id"] = f"webchat:{username}"
-    session["webchat_chat_session_id"] = f"webchat-{_slugify(username)}-{uuid.uuid4().hex[:8]}"
+    session["webchat_chat_session_id"] = _issue_webchat_chat_session_id(username)
 
     return jsonify(
         {

@@ -37,9 +37,28 @@ def _resolve_cached_workflow_name_for_user(client, workflow_name: str, user_id: 
         return ""
     resolver = getattr(client, "resolve_cached_workflow_name")
     try:
-        return resolver(workflow_name, user_id=user_id, org_code=org_code)
+        resolved = resolver(workflow_name, user_id=user_id, org_code=org_code)
     except TypeError:
-        return resolver(workflow_name)
+        resolved = resolver(workflow_name)
+    if resolved:
+        return resolved
+
+    fuzzy_resolver = getattr(client, "resolve_workflow_name_from_text", None)
+    if callable(fuzzy_resolver):
+        try:
+            return fuzzy_resolver(
+                workflow_name,
+                user_id=user_id,
+                org_code=org_code,
+                require_execute=True,
+            )
+        except TypeError:
+            return fuzzy_resolver(
+                workflow_name,
+                user_id=user_id,
+                org_code=org_code,
+            )
+    return ""
 
 
 def _get_cached_workflow_info_for_user(client, workflow_name: str, user_id: str = "", org_code: str = "") -> tuple[str, list[dict]]:
@@ -57,6 +76,136 @@ def _get_cached_workflow_info_for_user(client, workflow_name: str, user_id: str 
     return ("", [])
 
 
+def _get_assigned_agents_for_workflow(client, workflow_name: str) -> list[dict]:
+    getter = getattr(client, "get_workflow_agents", None)
+    if not callable(getter):
+        return []
+
+    try:
+        entries = getter() or []
+    except Exception as exc:
+        logger.warning("Could not load assigned agents for %s: %s", workflow_name, exc)
+        return []
+
+    if not isinstance(entries, list):
+        return []
+
+    normalized = str(workflow_name or "").strip().lower()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        workflow_meta = entry.get("workflow") or entry.get("workflowConfiguration") or {}
+        candidate = str(
+            workflow_meta.get("name")
+            or entry.get("workflowName")
+            or ""
+        ).strip().lower()
+        if candidate != normalized:
+            continue
+        agents = entry.get("agents") or []
+        return [agent for agent in agents if isinstance(agent, dict)]
+    return []
+
+
+def _assigned_agent_summary(agents: list[dict]) -> str:
+    labels: list[str] = []
+    for agent in agents:
+        name = str(
+            agent.get("agentName")
+            or agent.get("name")
+            or agent.get("agentId")
+            or "Unknown"
+        ).strip()
+        state = str(agent.get("agentState") or agent.get("state") or "UNKNOWN").strip().upper()
+        labels.append(f"{name} ({state})")
+    return ", ".join(labels)
+
+
+def _primary_assigned_agent_name(agents: list[dict]) -> str:
+    if len(agents) != 1:
+        return ""
+    agent = agents[0]
+    return str(
+        agent.get("agentName")
+        or agent.get("name")
+        or agent.get("agentId")
+        or ""
+    ).strip()
+
+
+def _running_assigned_agents(agents: list[dict]) -> list[dict]:
+    return [
+        agent for agent in (agents or [])
+        if str(agent.get("agentState") or agent.get("state") or "").strip().upper()
+        in {"RUNNING", "CONNECTED", "ACTIVE"}
+    ]
+
+
+def _extract_workflow_name_from_execution_status(status_resp: dict | None) -> str:
+    if not isinstance(status_resp, dict):
+        return ""
+    workflow_meta = status_resp.get("workflowConfiguration") or {}
+    return str(
+        status_resp.get("workflowName")
+        or status_resp.get("workflow_name")
+        or workflow_meta.get("name")
+        or ""
+    ).strip()
+
+
+def _extract_agent_reference(payload: dict | None) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return ("", "")
+    agent_meta = payload.get("agentDetails") or payload.get("agent") or {}
+    agent_name = str(
+        payload.get("agentName")
+        or payload.get("agent_name")
+        or agent_meta.get("agentName")
+        or agent_meta.get("name")
+        or ""
+    ).strip()
+    agent_id = str(
+        payload.get("agentId")
+        or payload.get("agent_id")
+        or payload.get("uuid")
+        or payload.get("id")
+        or agent_meta.get("agentId")
+        or agent_meta.get("id")
+        or ""
+    ).strip()
+    return (agent_name, agent_id)
+
+
+def _get_request_payload(execution_id: str) -> dict:
+    try:
+        from mcp_server.ae_client import get_ae_client as get_mcp_client
+
+        request_payload = get_mcp_client().get_request(execution_id)
+        return request_payload if isinstance(request_payload, dict) else {}
+    except Exception as exc:
+        logger.debug("Could not load request payload for %s: %s", execution_id, exc)
+        return {}
+
+
+def _find_live_agent_match(client, *, agent_name: str, agent_id: str) -> dict:
+    try:
+        agents = client.list_agents() if hasattr(client, "list_agents") else []
+    except Exception as exc:
+        logger.warning("Could not list live agents while checking %s/%s: %s", agent_name, agent_id, exc)
+        return {}
+
+    for agent in agents or []:
+        if not isinstance(agent, dict):
+            continue
+        live_id = str(agent.get("agentId") or agent.get("id") or agent.get("uuid") or "").strip()
+        live_name = str(agent.get("agentName") or agent.get("name") or "").strip()
+        if agent_id and live_id and live_id == agent_id:
+            return agent
+        if agent_name and live_name and live_name.lower() == agent_name.lower():
+            return agent
+    return {}
+
+
 def _normalize_execution_status(raw_status: str) -> str:
     status = str(raw_status or "").strip().upper()
     if status in {"FAILURE", "FAILED", "ERROR"}:
@@ -70,12 +219,18 @@ def _normalize_execution_status(raw_status: str) -> str:
     return status or "UNKNOWN"
 
 
-def _guard_failed_execution_only(client, execution_id: str, action_name: str) -> dict | None:
+def _guard_failed_execution_only(
+    client,
+    execution_id: str,
+    action_name: str,
+    status_resp: dict | None = None,
+) -> dict | None:
     """Allow restart/resubmit only for failed executions when status is available."""
     try:
-        if not hasattr(client, "get_execution_status"):
+        if status_resp is None and not hasattr(client, "get_execution_status"):
             return None
-        status_resp = client.get_execution_status(execution_id)
+        if status_resp is None:
+            status_resp = client.get_execution_status(execution_id)
     except Exception as exc:
         logger.warning("Could not verify execution status for %s before %s: %s", execution_id, action_name, exc)
         return None
@@ -118,6 +273,121 @@ def _guard_failed_execution_only(client, execution_id: str, action_name: str) ->
         "workflow_name": workflow_name,
         "status": status,
     }
+
+
+def _guard_assigned_agents_running(
+    client,
+    workflow_name: str,
+    execution_id: str,
+    action_name: str,
+    status_resp: dict | None = None,
+) -> dict | None:
+    clean_workflow = str(workflow_name or "").strip()
+    action_label = str(action_name or "this action").strip().capitalize()
+
+    def _blocked_response(agents: list[dict], *, workflow_label: str, source_label: str) -> dict:
+        assigned_summary = _assigned_agent_summary(agents) or "No agents assigned"
+        logger.info(
+            "%s blocked for execution_id=%s workflow=%s because %s agent check found no running agents: %s",
+            action_label,
+            execution_id,
+            workflow_label,
+            source_label,
+            assigned_summary,
+        )
+        message = (
+            f"{action_label} cannot continue for **{workflow_label}** because all assigned agents are currently offline or stopped "
+            f"({assigned_summary}). Please start at least one assigned agent first, then try again."
+        )
+        return {
+            "success": False,
+            "error": message,
+            "message": message,
+            "hint": "Please start the assigned agent first, then retry this action.",
+            "execution_id": execution_id,
+            "workflow_name": workflow_label,
+            "agent_name": _primary_assigned_agent_name(agents),
+            "assigned_agents": agents,
+            "agent_status": "UNAVAILABLE",
+            "status": "AGENT_UNAVAILABLE",
+        }
+
+    if clean_workflow and clean_workflow != "Unknown":
+        try:
+            assigned_agents = _get_assigned_agents_for_workflow(client, clean_workflow)
+        except Exception as exc:
+            logger.warning(
+                "Could not verify assigned agents for %s before %s on %s: %s",
+                clean_workflow,
+                action_name,
+                execution_id,
+                exc,
+            )
+            assigned_agents = []
+
+        if assigned_agents:
+            if _running_assigned_agents(assigned_agents):
+                logger.info(
+                    "%s allowed for execution_id=%s workflow=%s because workflow-agent mapping has a running agent.",
+                    action_label,
+                    execution_id,
+                    clean_workflow,
+                )
+                return None
+            return _blocked_response(
+                assigned_agents,
+                workflow_label=clean_workflow,
+                source_label="workflow mapping",
+            )
+
+    request_payload = _get_request_payload(execution_id)
+    agent_name, agent_id = _extract_agent_reference(status_resp)
+    if not (agent_name or agent_id):
+        request_agent_name, request_agent_id = _extract_agent_reference(request_payload)
+        agent_name = agent_name or request_agent_name
+        agent_id = agent_id or request_agent_id
+
+    live_agent = _find_live_agent_match(
+        client,
+        agent_name=agent_name,
+        agent_id=agent_id,
+    )
+    if not live_agent:
+        logger.info(
+            "%s could not resolve a live assigned agent for execution_id=%s workflow=%s agent_name=%s agent_id=%s",
+            action_label,
+            execution_id,
+            clean_workflow or _extract_workflow_name_from_execution_status(request_payload) or "Unknown",
+            agent_name or "Unknown",
+            agent_id or "Unknown",
+        )
+        return None
+
+    live_state = str(live_agent.get("agentState") or live_agent.get("state") or "UNKNOWN").strip().upper()
+    live_name = str(
+        live_agent.get("agentName")
+        or live_agent.get("name")
+        or agent_name
+        or agent_id
+        or "Unknown"
+    ).strip()
+    workflow_label = clean_workflow or _extract_workflow_name_from_execution_status(request_payload) or "this workflow"
+    if live_state in {"RUNNING", "CONNECTED", "ACTIVE"}:
+        logger.info(
+            "%s allowed for execution_id=%s workflow=%s because fallback assigned agent %s is %s.",
+            action_label,
+            execution_id,
+            workflow_label,
+            live_name,
+            live_state,
+        )
+        return None
+
+    return _blocked_response(
+        [{"agentName": live_name, "agentState": live_state, "agentId": agent_id or live_agent.get("agentId") or live_agent.get("id")}],
+        workflow_label=workflow_label,
+        source_label="execution agent fallback",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +440,7 @@ def _friendly_status_message(
     req_id,
     detail_msg: str = "",
     healthy_agent=None,
+    assigned_agents: list[dict] | None = None,
 ) -> str:
     """Map any raw AE status string to a human-readable sentence."""
     s = str(status or "").upper()
@@ -199,9 +470,16 @@ def _friendly_status_message(
         )
 
     if s == "NO_AGENT":
+        assigned_summary = _assigned_agent_summary(list(assigned_agents or []))
+        if assigned_summary:
+            return (
+                f"**{workflow_name}** could not start because none of its assigned automation agents are currently available. "
+                f"Assigned agent(s): {assigned_summary}. "
+                f"Request ID: `{req_id}`. Please start or reconnect one of these agents, then retry."
+            )
         return (
             f"**{workflow_name}** could not start — no automation agent is currently available. "
-            "Please ask your administrator to start or reconnect an agent, then retry."
+            f"Request ID: `{req_id}`. Please ask your administrator to start or reconnect an agent, then retry."
         )
 
     # QUEUED / PENDING / NEW or anything unrecognised
@@ -244,18 +522,38 @@ def restart_execution(execution_id: str,
         }
 
     client = get_ae_client()
-    status_guard = _guard_failed_execution_only(client, execution_id, "restart")
+    status_resp = None
+    try:
+        if hasattr(client, "get_execution_status"):
+            status_resp = client.get_execution_status(execution_id)
+    except Exception as exc:
+        logger.warning("Could not resolve execution context for %s before restart: %s", execution_id, exc)
+        status_resp = None
+
+    status_guard = _guard_failed_execution_only(
+        client,
+        execution_id,
+        "restart",
+        status_resp=status_resp,
+    )
     if status_guard:
         return status_guard
 
     # 1. Resolve workflow name (internal use/protection only)
-    if not workflow_name or workflow_name == "Unknown":
-        try:
-            status = client.get_execution_status(execution_id)
-            workflow_name = status.get("workflowName") or "Unknown"
-            logger.info(f"Resolved workflow name for {execution_id}: {workflow_name}")
-        except Exception as e:
-            logger.warning(f"Could not resolve workflow name for {execution_id}: {e}")
+    resolved_workflow_name = _extract_workflow_name_from_execution_status(status_resp)
+    if resolved_workflow_name:
+        workflow_name = resolved_workflow_name
+        logger.info(f"Resolved workflow name for {execution_id}: {workflow_name}")
+
+    agent_guard = _guard_assigned_agents_running(
+        client,
+        workflow_name,
+        execution_id,
+        "restart",
+        status_resp=status_resp,
+    )
+    if agent_guard:
+        return agent_guard
 
     # 2. Check Protection
     if workflow_name != "Unknown" and workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
@@ -346,9 +644,33 @@ def resubmit_execution(execution_id: str,
     or from_failure_point=False to resubmit from the very beginning.
     """
     client = get_ae_client()
-    status_guard = _guard_failed_execution_only(client, execution_id, "resubmit")
+    status_resp = None
+    try:
+        if hasattr(client, "get_execution_status"):
+            status_resp = client.get_execution_status(execution_id)
+    except Exception as exc:
+        logger.warning("Could not resolve execution context for %s before resubmit: %s", execution_id, exc)
+        status_resp = None
+
+    status_guard = _guard_failed_execution_only(
+        client,
+        execution_id,
+        "resubmit",
+        status_resp=status_resp,
+    )
     if status_guard:
         return status_guard
+
+    workflow_name = _extract_workflow_name_from_execution_status(status_resp) or "Unknown"
+    agent_guard = _guard_assigned_agents_running(
+        client,
+        workflow_name,
+        execution_id,
+        "resubmit",
+        status_resp=status_resp,
+    )
+    if agent_guard:
+        return agent_guard
 
     try:
         resp = client.resubmit_request(
@@ -359,6 +681,7 @@ def resubmit_execution(execution_id: str,
             "success": True,
             "message": resp.get("message") or f"Request {execution_id} has been resubmitted ({mode})",
             "execution_id": execution_id,
+            "workflow_name": workflow_name,
             "from_failure_point": from_failure_point,
             "raw": resp
         }
@@ -406,7 +729,11 @@ def trigger_workflow(
         if user_id or is_execute_enforced():
             return {
                 "success": False,
-                "error": "You are not authorized to execute this workflow.",
+                "needs_user_input": True,
+                "question": (
+                    f"I couldn't match **{workflow_name}** to an exact workflow you can trigger.\n\n"
+                    "Please use the exact workflow name from your workflow list and try again."
+                ),
                 "workflow_name": workflow_name,
             }
         # Try to surface similar workflow names so the user can correct themselves
@@ -452,7 +779,10 @@ def trigger_workflow(
             )
             return {
                 "success": False,
-                "error": "You are not authorized to execute this workflow.",
+                "error": (
+                    f"**{resolved_name}** is not available in your executable workflow list. "
+                    "Please choose a workflow you are allowed to trigger."
+                ),
                 "workflow_name": resolved_name,
             }
 
@@ -493,17 +823,14 @@ def trigger_workflow(
     # ── IMPROVEMENT 6: Agent status check ─────────────────────────────────────
     # Check if at least one agent assigned to this workflow is RUNNING/CONNECTED.
     try:
-        wf_agents = client.get_workflow_agents()
-        # Find the entry for our resolved_name
-        wf_entry = next((item for item in wf_agents if item.get("workflow", {}).get("name") == resolved_name), None)
-        if wf_entry:
-            agents = wf_entry.get("agents", [])
+        assigned_agents = _get_assigned_agents_for_workflow(client, resolved_name)
+        if assigned_agents:
             running_agents = [
-                a for a in agents 
+                a for a in assigned_agents
                 if str(a.get("agentState", "")).upper() in {"RUNNING", "CONNECTED", "ACTIVE"}
             ]
             if not running_agents:
-                agent_names = ", ".join([a.get("agentName", "Unknown") for a in agents]) or "No agents assigned"
+                agent_names = _assigned_agent_summary(assigned_agents) or "No agents assigned"
                 return {
                     "success": False,
                     "error": (
@@ -511,6 +838,8 @@ def trigger_workflow(
                         "Please start at least one assigned agent in the AutomationEdge portal before proceeding."
                     ),
                     "workflow_name": resolved_name,
+                    "agent_name": _primary_assigned_agent_name(assigned_agents),
+                    "assigned_agents": assigned_agents,
                 }
     except Exception as exc:
         logger.warning(f"Pre-trigger agent check failed for {resolved_name}: {exc}")
@@ -690,6 +1019,29 @@ def trigger_workflow(
             }
 
         # ── IMPROVEMENT 3: Non-terminal / pending path ────────────────────────
+        if status_upper == "NO_AGENT":
+            assigned_agents = _get_assigned_agents_for_workflow(client, resolved_name)
+            pending_msg = _friendly_status_message(
+                status=final_status,
+                workflow_name=resolved_name,
+                req_id=req_id,
+                detail_msg=detail_msg,
+                assigned_agents=assigned_agents,
+            )
+            return {
+                "success": False,
+                "execution_id": req_id,
+                "workflow_name": resolved_name,
+                "status": final_status,
+                "error": pending_msg,
+                "message": pending_msg,
+                "request_id": req_id,
+                "raw": poll_raw or raw,
+                "agent_name": _primary_assigned_agent_name(assigned_agents),
+                "assigned_agents": assigned_agents,
+                "agent_status": "UNAVAILABLE",
+            }
+
         healthy_agent = None
         if status_upper != "COMPLETE":
             in_progress_hint = poll_result.get("in_progress_hint") if poll_result else None

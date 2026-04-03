@@ -197,4 +197,8 @@ CONFIG = {
     "WF_ACCESS_ENABLE_TARGETED_SYNC": os.environ.get("WF_ACCESS_ENABLE_TARGETED_SYNC", "true").lower() == "true",
     "WF_ACCESS_ENABLE_SCHEDULED_SYNC": os.environ.get("WF_ACCESS_ENABLE_SCHEDULED_SYNC", "false").lower() == "true",
     "WF_ACCESS_SYNC_INTERVAL_SECONDS": int(os.environ.get("WF_ACCESS_SYNC_INTERVAL_SECONDS", "3600")),
+    "ENABLE_RELATED_ISSUE_HEALTH_CHECK": os.environ.get("ENABLE_RELATED_ISSUE_HEALTH_CHECK", "false").lower() == "true",
+    "RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE": os.environ.get("RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", "true").lower() == "true",
+    "LIFE_ASIA_HEALTH_CHECK_WORKFLOW": os.environ.get("LIFE_ASIA_HEALTH_CHECK_WORKFLOW", "").strip(),
+    "TEBT_HEALTH_CHECK_WORKFLOW": os.environ.get("TEBT_HEALTH_CHECK_WORKFLOW", "").strip(),
 }

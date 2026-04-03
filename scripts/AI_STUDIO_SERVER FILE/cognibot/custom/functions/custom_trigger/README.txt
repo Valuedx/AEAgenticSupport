@@ -1,0 +1,1 @@
+Functions of all the python files under this directory (custom_triggers) will be accessible under Cognibot Settings -> Custom Triggers

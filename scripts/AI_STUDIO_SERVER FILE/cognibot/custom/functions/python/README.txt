@@ -1,0 +1,1 @@
+Functions of all the python files under this directory (python) will be accessible under Cognibot Project -> Skill -> Dialog Designer -> Action (Dialog element) -> Python. The selected function will be executed on action invocation.

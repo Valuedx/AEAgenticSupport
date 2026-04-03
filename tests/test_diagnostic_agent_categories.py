@@ -21,6 +21,7 @@ def test_diagnostic_agent_allows_agent_log_categories_for_follow_up_turns():
         "logs",
         "dependency",
         "file",
+        "diagnostics",
         "agent_read",
         "agent_diag",
     ]

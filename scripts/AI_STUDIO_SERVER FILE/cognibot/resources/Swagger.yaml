@@ -1,0 +1,617 @@
+swagger: "2.0"
+info:
+  title: Snippets API
+  description: |-
+    This is the documentation of APIs of Chatbot Webservice that is packaged with AIStudio
+  license:
+    name: BSD License
+  version: v1
+host: localhost:3978
+schemes:
+  - http
+basePath: /
+consumes:
+  - application/json
+produces:
+  - application/json
+securityDefinitions:
+  Basic:
+    type: basic
+security:
+  - Basic: []
+paths:
+  /api/messages:
+    post:
+      operationId: api_messages
+      description: Processes activity from Connector Service
+      parameters:
+        - name: data
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/Activity"
+          description: Activity data to be sent to chatbot
+      responses:
+        "201":
+          description: "Activity processed"
+        "200":
+          description: "Invalid Activity/Failed to process activity"
+        "401":
+          description: "Authentication Failed"
+        "415":
+          description: "Unsupported media type - expected application/json"
+      tags:
+        - Chatbot Webservice API
+    parameters: []
+  /api/reply:
+    post:
+      operationId: api_reply
+      description: Endpoint for AEWorkflow to send replies to chat channels asynchronously
+      parameters:
+        - name: data
+          in: body
+          description: ""
+          required: true
+          schema:
+            $ref: "#/definitions/WorkflowResponse"
+      responses:
+        "201":
+          description: "Reply receieved"
+        "401":
+          description: "Authentication Failed"
+        "415":
+          description: "Unsupported media type - expected application/json"
+      tags:
+        - Chatbot Webservice API
+  /api/bot/action-function:
+    get:
+      operationId: bot_action_function
+      description: Get details of available action functions
+      parameters: []
+      responses:
+        "200":
+          description: ""
+          schema:
+            $ref: "#/definitions/FunctionJSON"
+        "400":
+          description: "Wrong Method expected GET"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+  /api/bot/custom-trigger-function:
+    get:
+      operationId: custom_trigger_function
+      description: Get details of available custom trigger functions
+      parameters: []
+      responses:
+        "200":
+          description: ""
+          schema:
+            $ref: "#/definitions/CustomTriggerJSON"
+        "400":
+          description: "Wrong Method expected GET"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+  /api/connections/upload:
+    post:
+      operationId: connection_upload
+      description: Upload Connections to chatbot
+      parameters:
+        - name: data
+          in: body
+          description: Connections
+          required: true
+          schema:
+            $ref: "#/definitions/Connections"
+      responses:
+        "201":
+          description: "Updated"
+        "400":
+          description: "Invalid Connections"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+  /api/upload-config:
+    post:
+      operationId: bot_upload_config
+      description: Upload Bot Config to chatbot
+      parameters:
+        - name: data
+          in: body
+          description: Bot Config
+          required: true
+          schema:
+            $ref: "#/definitions/BotConfig"
+      responses:
+        "201":
+          description: "Updated"
+        "400":
+          description: "Invalid Cognibot Config"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+  /api/reload-config:
+    post:
+      operationId: bot_reload_config
+      description: Reload Bot Config of chatbot
+      responses:
+        "201":
+          description: "Reloaded"
+        "400":
+          description: "Error while reloading cognibot bot config"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+  /api/server-version:
+    get:
+      operationId: server_version
+      description: Get current server version
+      parameters: []
+      responses:
+        "200":
+          description: ""
+          schema:
+            $ref: "#/definitions/ServerVersion"
+        "400":
+          description: "Wrong Method expected GET"
+      tags:
+        - Chatbot Webservice API
+  /api/connection/test:
+    post:
+      operationId: test_connection
+      description: Test AutomationEdge and AIStudio Connections
+      parameters:
+        - name: data
+          in: body
+          description: Connection
+          required: true
+          schema:
+            $ref: "#/definitions/Connection"
+      responses:
+        "200":
+          description: "Test Successful"
+        "400":
+          description: "Wrong Method expected POST"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+  /api/push-notification:
+    post:
+      operationId: api_push_notification
+      description: Endpoint for creating notifications.
+      parameters:
+        - name: data
+          in: body
+          description: ""
+          required: true
+          schema:
+            $ref: "#/definitions/PushNotificationJSON"
+      responses:
+        "201":
+          description: "Notification Created"
+        "400":
+          description: "Expected application/json or Wrong Method expected POST"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+  /api/websocket-disconnect/{conversation_id}:
+    post:
+      operationId: api_websocket_disconnect
+      description: Called by Webchat Channel Connector Service for websocket disconnect event when webservice and connector service are running separately
+      responses:
+        "200":
+          description: "Updated"
+        "400":
+          description: "Wrong Method expected POST"
+        "401":
+          description: "Authentication Failed"
+      tags:
+        - Chatbot Webservice API
+      parameters:
+        - name: conversation_id
+          in: path
+          description: Conversation ID.
+          required: true
+          type: string
+          format: uuid
+  /api/custom:
+    post:
+      operationId: api_custom
+      description: Custom API endpoint configured using Extension Request method(s) are configurable
+      responses:
+        "200":
+          description: "Responses are configurable"
+      tags:
+        - Chatbot Webservice API
+  /api/generate-chatbot-data:
+    post:
+      operationId: api_generate_chatbot_data
+      description: Generates sample data of chat sessions for reports
+      parameters:
+        - name: data
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/GenerateChatbotData"
+          description: Activity data to be sent to chatbot
+      responses:
+        "201":
+          description: "Generated Data"
+        "400":
+          description: "Wrong Method expected POST"
+      tags:
+        - Chatbot Webservice API
+  /v3/directline/conversations:
+    post:
+      operationId: conversation
+      description: Webchat calls the connector service to start conversation with the bot
+      responses:
+        "200":
+          description: ""
+          schema:
+            $ref: "#/definitions/Token2"
+      tags:
+        - Webchat Channel Connector Service API
+  /v3/directline/conversations/{conversation_id}/activities:
+    post:
+      operationId: activities
+      description: Webchat sends activity to connector service to send to the bot
+      parameters:
+        - name: data
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/Activity"
+
+      responses:
+        "200":
+          description: ""
+          schema:
+            $ref: "#/definitions/Conversation"
+        "401":
+          description: "Invalid Token"
+      tags:
+        - Webchat Channel Connector Service API
+    parameters:
+      - name: conversation_id
+        in: path
+        description: Conversation ID.
+        required: true
+        type: string
+        format: uuid
+  /v3/directline/v3/conversations/{conversation_id}/activities/{activity_id}:
+    post:
+      operationId: bot_reply
+      description: Bot sends activity reply to connector service to send to the Webchat
+      parameters:
+        - name: data
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/Activity"
+      responses:
+        "200":
+          description: "Created"
+        "401":
+          description: "Invalid Token"
+      tags:
+        - Webchat Channel Connector Service API
+    parameters:
+      - name: conversation_id
+        in: path
+        description: Conversation ID.
+        required: true
+        type: string
+        format: uuid
+      - name: activity_id
+        in: path
+        description: Activity ID.
+        required: true
+        type: string
+        format: uuid
+  /v3/directline/conversations/{conversation_id}/upload:
+    post:
+      operationId: upload_file
+      description: Uploading files to connector service
+      consumes:
+        - multipart/form-data
+      parameters:
+        - name: file
+          in: formData
+          required: true
+          type: file
+      responses:
+        "200":
+          description: "Created"
+        "401":
+          description: "Invalid Token"
+      tags:
+        - Webchat Channel Connector Service API
+    parameters:
+      - name: conversation_id
+        in: path
+        description: Conversation ID.
+        required: true
+        type: string
+        format: uuid
+  /v3/directline/attachments/{file_name}:
+    post:
+      operationId: download_file
+      description: Downloading files from connector service
+      responses:
+        "200":
+          description: "Created"
+      tags:
+        - Webchat Channel Connector Service API
+    parameters:
+      - name: file_name
+        in: path
+        description: Name of File
+        required: true
+        type: string
+  /v3/directline/tokens/refresh:
+    post:
+      operationId: token_refresh
+      description: Refreshes expired tokens of Webchat that are created in the conversations call.
+      parameters: []
+      responses:
+        "200":
+          description: ""
+          schema:
+            $ref: "#/definitions/Token"
+        "401":
+          description: "Invalid Token"
+      tags:
+        - Webchat Channel Connector Service API
+  /v3/directline/conversations/{conversation_id}:
+    post:
+      operationId: reconnect_to_conversation
+      description: Webchat calls this API to reconnect to a conversation after Websocket gets disconnected
+      responses:
+        "200":
+          description: ""
+          schema:
+            $ref: "#/definitions/Token2"
+        "401":
+          description: "Invalid Token"
+      tags:
+        - Webchat Channel Connector Service API
+      parameters:
+        - name: conversation_id
+          in: path
+          description: Conversation ID.
+          required: true
+          type: string
+          format: uuid
+definitions:
+  Attachment:
+    type: object
+    properties:
+      content_type:
+        type: string
+      content:
+        type: object
+      content_url:
+        type: string
+  Conversation:
+    type: object
+    properties:
+      id:
+        description: Conversation ID
+        type: string
+        format: uuid
+  User:
+    type: object
+    properties:
+      id:
+        description: User ID
+        type: string
+      name:
+        description: User name
+        type: string
+      role:
+        description: User role
+        type: string
+  Activity:
+    required:
+      - channel_id
+      - conversation
+      - from_property
+      - id
+      - recipient
+      - service_url
+    type: object
+    properties:
+      attachments:
+        type: array
+        items:
+          $ref: "#/definitions/Attachment"
+      channel_id:
+        description: Channel ID
+        type: string
+      conversation:
+        $ref: "#/definitions/Conversation"
+      from_property:
+        $ref: "#/definitions/User"
+      id:
+        description: Activity ID
+        type: string
+        format: uuid
+      locale:
+        description: locale eg - 'en-US'
+        type: string
+      recipient:
+        $ref: "#/definitions/User"
+      service_url:
+        description: Service URL
+        type: string
+      text:
+        description: Text
+        type: string
+      type:
+        description: Activity Type
+        type: string
+  WorkflowResponse:
+    type: object
+    properties:
+      addtional_info:
+        type: object
+      workflow_name:
+        type: string
+      success:
+        type: string
+      error_details:
+        type: string
+      details:
+        type: object
+  PushNotificationJSON:
+    type: object
+    properties:
+      addtional_info:
+        type: object
+        properties:
+          auth_header:
+            description: Bearer Token
+      notifications:
+        $ref: "#/definitions/Notification"
+  FunctionJSON:
+    type: object
+    properties:
+      pythonFunctions:
+        type: array
+        items:
+          type: string
+      actionFunctions:
+        type: array
+        items:
+          type: string
+  CustomTriggerJSON:
+    type: object
+    properties:
+      customTriggerFunctions:
+        type: array
+        items:
+          type: string
+  BotConfig:
+    type: object
+    properties:
+      cognibot_json:
+        $ref: "#/definitions/CognibotConfig"
+      signature:
+        type: string
+        format: uuid
+      keygen:
+        type: string
+        format: uuid
+      key:
+        type: string
+        format: uuid
+  CognibotConfig:
+    type: object
+    properties:
+      cognibot_settings:
+        type: object
+      skills:
+        type: array
+        items: { type: object }
+      connections:
+        type: array
+        items:
+          $ref: "#/definitions/Connection"
+      credentials:
+        type: array
+        items: { type: object }
+      version:
+        type: string
+        default: 3.7.0
+  Connections:
+    type: array
+    items:
+      $ref: "#/definitions/Connection"
+  ServerVersion:
+    type: object
+    properties:
+      version:
+        type: string
+        default: 3.7.0
+  Connection:
+    type: object
+    properties:
+      name:
+        type: string
+      type:
+        type: string
+      url:
+        type: string
+      username:
+        type: string
+      password:
+        type: string
+      tenant_orgcode:
+        type: string
+  Token:
+    type: object
+    properties:
+      conversation_id:
+        type: string
+        format: uuid
+      token:
+        type: string
+        format: uuid
+      expires_in:
+        type: number
+        default: 3600
+  Token2:
+    type: object
+    properties:
+      conversationId:
+        type: string
+        format: uuid
+      token:
+        type: string
+        format: uuid
+      expires_in:
+        type: number
+        default: 3600
+      streamUrl:
+        type: string
+  Notification:
+    type: object
+    properties:
+      bot_id:
+        description: bot_id of bot for notification
+        type: string
+      chat_channel:
+        description: chat_channel of user to whom notification has to be sent
+        type: string
+      user_id:
+        description: user_id of user to whom notification has to be sent
+        type: string
+      service_url:
+        description: service_url of channel
+        type: string
+      trigger_aistudio_dialog:
+        description: Dialog that should be triggered
+        type: object
+        properties:
+          dialog_id:
+            type: string
+          params:
+            type: object
+  GenerateChatbotData:
+    type: object
+    properties:
+      chat_session_count:
+        description: Number of Chat Sessions to be generated (max 1000)
+        type: number
+      duration_in_weeks:
+        description: duration of weeks for generating sessions.
+        type: number

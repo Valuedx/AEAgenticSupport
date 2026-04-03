@@ -106,7 +106,7 @@ def test_trigger_workflow_denies_unauthorized_user(monkeypatch):
     )
 
     assert result["success"] is False
-    assert "not authorized" in result["error"].lower()
+    assert "not available" in result["error"].lower()
 
 
 def test_t4_execute_and_poll_denies_unauthorized_user(monkeypatch):

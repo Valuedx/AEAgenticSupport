@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import MagicMock
 
 from agents.base_agent import AgentResult
@@ -34,3 +35,29 @@ def test_dispatch_filters_routed_response_for_business_user():
 
     assert response == "Your report could not be completed. I can help check the delay."
     orchestrator._filter_for_persona.assert_called_once()
+
+
+def test_process_message_empty_input_reply_is_specific():
+    gateway = MessageGateway()
+
+    response = gateway.process_message("conv-empty", "   ")
+
+    assert "workflow name" in response.lower()
+    assert "request id" in response.lower()
+
+
+def test_process_message_busy_interrupt_reply_is_user_friendly():
+    gateway = MessageGateway()
+    state = ConversationState()
+    state.conversation_id = "conv-busy"
+    state.user_id = "user-1"
+    state.user_role = "technical"
+    state.phase = ConversationPhase.INVESTIGATING
+    state.is_agent_working = True
+
+    gateway._sessions["conv-busy"] = state
+    gateway._locks["conv-busy"] = threading.Lock()
+
+    response = gateway.process_message("conv-busy", "urgent, production down", user_id="user-1")
+
+    assert "pausing the current investigation" in response.lower()

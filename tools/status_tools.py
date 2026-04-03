@@ -4,7 +4,9 @@ Status & health monitoring tools.
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
+from config.settings import CONFIG
 from security.workflow_access import (
     can_execute_workflow,
     can_view_workflow,
@@ -76,6 +78,63 @@ def _resolve_workflow_via_rag_for_user(client, query: str, user_id: str = "", or
         return resolver(query)
 
 
+def _get_assigned_agents_for_workflow(client, workflow_name: str) -> list[dict]:
+    getter = getattr(client, "get_workflow_agents", None)
+    if not callable(getter):
+        return []
+
+    try:
+        entries = getter() or []
+    except Exception as exc:
+        logger.warning("Could not load assigned agents for %s: %s", workflow_name, exc)
+        return []
+
+    if not isinstance(entries, list):
+        return []
+
+    normalized = str(workflow_name or "").strip().lower()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        workflow_meta = entry.get("workflow") or entry.get("workflowConfiguration") or {}
+        candidate = str(
+            workflow_meta.get("name")
+            or entry.get("workflowName")
+            or ""
+        ).strip().lower()
+        if candidate != normalized:
+            continue
+        agents = entry.get("agents") or []
+        return [agent for agent in agents if isinstance(agent, dict)]
+    return []
+
+
+def _assigned_agent_summary(agents: list[dict]) -> str:
+    labels: list[str] = []
+    for agent in agents:
+        name = str(
+            agent.get("agentName")
+            or agent.get("name")
+            or agent.get("agentId")
+            or "Unknown"
+        ).strip()
+        state = str(agent.get("agentState") or agent.get("state") or "UNKNOWN").strip().upper()
+        labels.append(f"{name} ({state})")
+    return ", ".join(labels)
+
+
+def _primary_assigned_agent_name(agents: list[dict]) -> str:
+    if len(agents) != 1:
+        return ""
+    agent = agents[0]
+    return str(
+        agent.get("agentName")
+        or agent.get("name")
+        or agent.get("agentId")
+        or ""
+    ).strip()
+
+
 def _get_workflow_instances_compat(client, workflow_name: str, limit: int, status_filter: str | None = None):
     getter = getattr(client, "get_workflow_instances")
     try:
@@ -84,6 +143,220 @@ def _get_workflow_instances_compat(client, workflow_name: str, limit: int, statu
         return getter(workflow_name, limit=limit)
     except TypeError:
         return getter(workflow_name, limit)
+
+
+def _extract_related_issue_text(log_result: dict[str, Any]) -> str:
+    if not isinstance(log_result, dict):
+        return ""
+
+    parts: list[str] = []
+    for key in ("report", "error", "message", "note", "workflow_name"):
+        value = log_result.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+
+    primary_error = log_result.get("primary_error")
+    if isinstance(primary_error, dict):
+        for key in ("error_message", "error_label", "component"):
+            value = primary_error.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+
+    for group in log_result.get("error_groups") or []:
+        if not isinstance(group, dict):
+            continue
+        value = group.get("error_message")
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+
+    for block in log_result.get("error_blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        value = block.get("error_message")
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+        for line in block.get("lines") or []:
+            if isinstance(line, str) and line.strip():
+                parts.append(line.strip())
+
+    for line in log_result.get("logs") or []:
+        if isinstance(line, str) and line.strip():
+            parts.append(line.strip())
+
+    return "\n".join(parts)
+
+
+def _detect_related_issue(log_result: dict[str, Any]) -> dict[str, str] | None:
+    text = _extract_related_issue_text(log_result)
+    lowered = text.lower()
+    if not lowered:
+        return None
+
+    life_asia_markers = ("life asia", "life_asia", "lifeasia")
+    tebt_markers = ("tebt",)
+    life_asia_context = ("connect", "connection", "timeout", "down", "unavailable", "socket", "host", "service")
+    tebt_context = ("login", "portal", "credential", "password", "auth", "authentication", "session", "sign in", "signin")
+
+    if any(marker in lowered for marker in life_asia_markers) and (
+        any(marker in lowered for marker in life_asia_context) or "life asia" in lowered
+    ):
+        workflow_name = str(CONFIG.get("LIFE_ASIA_HEALTH_CHECK_WORKFLOW", "") or "").strip()
+        if workflow_name:
+            return {
+                "issue_type": "life_asia",
+                "issue_label": "Life Asia",
+                "health_check_label": "Life Asia health check",
+                "workflow_name": workflow_name,
+            }
+
+    if any(marker in lowered for marker in tebt_markers) and (
+        any(marker in lowered for marker in tebt_context) or "tebt" in lowered
+    ):
+        workflow_name = str(CONFIG.get("TEBT_HEALTH_CHECK_WORKFLOW", "") or "").strip()
+        if workflow_name:
+            return {
+                "issue_type": "tebt",
+                "issue_label": "TEBT",
+                "health_check_label": "TEBT health check",
+                "workflow_name": workflow_name,
+            }
+
+    return None
+
+
+def _build_related_health_check_summary(issue_info: dict[str, str], status: str) -> str:
+    issue_type = str(issue_info.get("issue_type") or "").strip().lower()
+    normalized = str(status or "").strip().upper()
+    success_statuses = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED"}
+    failure_statuses = {"FAILURE", "FAILED", "ERROR", "DOWN", "TERMINATED", "CANCELLED"}
+
+    if issue_type == "life_asia":
+        if normalized in success_statuses:
+            return "Life Asia health check: ✅ System is up. Issue may be intermittent. Retry recommended."
+        if normalized in failure_statuses:
+            return "Life Asia health check: ❌ System is down. Please investigate system connectivity."
+        return f"Life Asia health check is running. Current status: {status}."
+
+    if issue_type == "tebt":
+        if normalized in success_statuses:
+            return "TEBT health check: ✅ Portal accessible. Check bot credentials or session issue."
+        if normalized in failure_statuses:
+            return "TEBT health check: ❌ Login service down. Please check credentials/server."
+        return f"TEBT health check is running. Current status: {status}."
+
+    return f"Related health check status: {status}."
+
+
+def _run_related_health_check(
+    client,
+    issue_info: dict[str, str],
+) -> dict[str, Any]:
+    workflow_name = str(issue_info.get("workflow_name") or "").strip()
+    if not workflow_name:
+        return {}
+
+    resolved_org = str(default_org_code()).strip()
+    workflow_id = ""
+    getter = getattr(client, "get_cached_workflow_id", None)
+    if callable(getter):
+        try:
+            workflow_id = getter(workflow_name, user_id="", org_code=resolved_org)
+        except TypeError:
+            workflow_id = getter(workflow_name)
+        except Exception as exc:
+            logger.warning("Health check workflow id lookup failed for %s: %s", workflow_name, exc)
+
+    raw = client.execute_workflow(
+        workflow_name=workflow_name,
+        workflow_id=workflow_id or workflow_name,
+        params={},
+        org_code=resolved_org,
+        user_id="",
+        source="ops-agent-related-health-check",
+        mail_subject="null",
+    )
+    request_id = (
+        raw.get("automationRequestId")
+        or raw.get("requestId")
+        or raw.get("id")
+        or ""
+    )
+    final_status = str(raw.get("status") or raw.get("state") or "QUEUED")
+    poll_raw: dict[str, Any] = {}
+    if request_id:
+        try:
+            poll_result = client.poll_execution_status(
+                execution_id=str(request_id),
+                poll_interval_sec=2,
+                max_attempts=10,
+            )
+            if isinstance(poll_result, dict):
+                final_status = str(poll_result.get("status") or final_status)
+                poll_raw = poll_result.get("raw") or {}
+        except Exception as exc:
+            logger.warning("Health check polling failed for %s (%s): %s", workflow_name, request_id, exc)
+
+    return {
+        "issue_type": issue_info.get("issue_type", ""),
+        "issue_label": issue_info.get("issue_label", ""),
+        "health_check_label": issue_info.get("health_check_label", ""),
+        "workflow_name": workflow_name,
+        "request_id": request_id,
+        "status": final_status,
+        "used_admin_scope": bool(CONFIG.get("RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)),
+        "message": _build_related_health_check_summary(issue_info, final_status),
+        "raw": poll_raw or raw,
+    }
+
+
+def _maybe_add_related_issue_health_check(
+    latest: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not bool(CONFIG.get("ENABLE_RELATED_ISSUE_HEALTH_CHECK", False)):
+        return None
+
+    latest_status = str(latest.get("status") or "").strip().upper()
+    if latest_status not in {"FAILURE", "FAILED", "ERROR"}:
+        return None
+
+    execution_id = latest.get("id") or latest.get("automationRequestId")
+    if not execution_id:
+        return None
+
+    try:
+        from tools.log_tools import get_execution_logs
+
+        log_result = get_execution_logs(str(execution_id), tail=0)
+    except Exception as exc:
+        logger.warning("Related issue detection skipped for execution_id=%s: %s", execution_id, exc)
+        return None
+
+    issue_info = _detect_related_issue(log_result)
+    if not issue_info:
+        return None
+
+    client = get_ae_client()
+    try:
+        health_result = _run_related_health_check(client, issue_info)
+    except Exception as exc:
+        logger.warning(
+            "Related health check trigger failed for issue=%s workflow=%s: %s",
+            issue_info.get("issue_type"),
+            issue_info.get("workflow_name"),
+            exc,
+        )
+        return {
+            "issue_type": issue_info.get("issue_type", ""),
+            "issue_label": issue_info.get("issue_label", ""),
+            "health_check_label": issue_info.get("health_check_label", ""),
+            "workflow_name": issue_info.get("workflow_name", ""),
+            "request_id": "",
+            "status": "ERROR",
+            "used_admin_scope": bool(CONFIG.get("RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)),
+            "message": f"{issue_info.get('health_check_label', 'Related health check')} could not be triggered: {exc}",
+        }
+
+    return health_result
 
 
 def check_workflow_status(
@@ -243,7 +516,15 @@ def check_workflow_status(
     else:
         msg = f"Global status summary for all bots (Last 24 hours)."
 
-    return {
+    related_issue_check = _maybe_add_related_issue_health_check(latest) if query_name else None
+    if related_issue_check and related_issue_check.get("message"):
+        issue_label = str(related_issue_check.get("issue_label") or "").strip()
+        health_check_label = str(related_issue_check.get("health_check_label") or "Related health check").strip()
+        if issue_label:
+            msg += f" Latest failure logs suggest a **{issue_label}** issue."
+        msg += f" Triggered **{health_check_label}** via admin scope. {related_issue_check['message']}"
+
+    result = {
         "bot_name": display_name,
         "workflow_name": display_name,
         "is_global_check": not bool(query_name),
@@ -261,6 +542,9 @@ def check_workflow_status(
         "status_filter_applied": status_filter or "None",
         "message": msg
     }
+    if related_issue_check:
+        result["related_issue_check"] = related_issue_check
+    return result
 
 
 def _format_single_instance_response(instance: dict) -> dict:
@@ -740,6 +1024,12 @@ def t4_execute_and_poll(
 
     status = poll_result.get("status", "unknown")
     raw = poll_result.get("raw") or {}
+    assigned_agents = (
+        _get_assigned_agents_for_workflow(client, resolved_name)
+        if str(status or "").upper() == "NO_AGENT"
+        else []
+    )
+    assigned_summary = _assigned_agent_summary(assigned_agents)
 
     # ── Extract detailed workflowResponse ──
     detailed_msg = ""
@@ -755,7 +1045,13 @@ def t4_execute_and_poll(
     status_messages = {
         "Complete": f"'{workflow_name}' completed successfully! {detailed_msg}".strip(),
         "Failure": f"'{workflow_name}' encountered a failure. Check logs for details.",
-        "no_agent": "No automation agent was available. Please check agent health.",
+        "no_agent": (
+            f"No automation agent was available to start '{workflow_name}'. "
+            f"Assigned agent(s): {assigned_summary}. "
+            f"Request ID: `{request_id}`. Please start or reconnect one of these agents and retry."
+            if assigned_summary
+            else f"No automation agent was available to start '{workflow_name}'. Request ID: `{request_id}`. Please check agent health."
+        ),
         "timeout": "Execution timed out waiting for a result.",
         "Error": f"'{workflow_name}' encountered an error.",
         "in_progress": poll_result.get(
@@ -770,6 +1066,9 @@ def t4_execute_and_poll(
         "request_id": str(request_id),
         "workflow_name": workflow_name,
         "message": status_messages.get(status, f"Status: {status}"),
+        "error": status_messages.get(status, f"Status: {status}") if status == "no_agent" else "",
+        "agent_name": _primary_assigned_agent_name(assigned_agents),
+        "assigned_agents": assigned_agents,
         "raw": raw,
     }
 

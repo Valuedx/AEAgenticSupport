@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 import json
 import logging
+import re
 import threading
 from typing import Any, List, Optional, cast
 
@@ -18,7 +20,7 @@ import httpx
 import urllib3
 
 from config.settings import CONFIG
-from security.workflow_access import can_view_workflow, execute_auth_mode, is_read_enforced
+from security.workflow_access import can_execute_workflow, can_view_workflow, execute_auth_mode, is_read_enforced
 from state.app_config import get_runtime_value
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -34,6 +36,15 @@ class AEWorkflowParameter:
 
 class AutomationEdgeClient:
     """HTTP client for AutomationEdge APIs with auto re-auth handling."""
+
+    _WORKFLOW_LOOKUP_STOPWORDS = {
+        "a", "an", "the", "this", "that", "my", "our", "your",
+        "please", "can", "could", "would", "kindly", "me",
+        "bot", "workflow", "process", "job", "agent", "automation",
+        "automationedge", "ae", "trigger", "run", "start", "execute",
+        "launch", "submit", "rerun", "retry", "kick", "off", "for",
+        "to", "of", "on", "in", "with", "and", "now",
+    }
 
     def __init__(self, client: Optional[httpx.Client] = None):
         self.base_url = str(
@@ -776,6 +787,144 @@ class AutomationEdgeClient:
         except Exception as exc:
             logger.debug("T4: cached workflow name resolution failed for %s: %s", workflow_name, exc)
             return ""
+
+    @classmethod
+    def _normalize_workflow_lookup_text(cls, text: str) -> str:
+        clean = str(text or "").strip().lower().replace("_", " ").replace("-", " ")
+        clean = re.sub(r"\bwf\s+", "", clean)
+        clean = re.sub(r"[^a-z0-9\s]", " ", clean)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean
+
+    @classmethod
+    def _workflow_lookup_tokens(cls, text: str) -> list[str]:
+        normalized = cls._normalize_workflow_lookup_text(text)
+        if not normalized:
+            return []
+        return [
+            token
+            for token in normalized.split()
+            if token and token not in cls._WORKFLOW_LOOKUP_STOPWORDS
+        ]
+
+    @classmethod
+    def _workflow_match_score(cls, query: str, workflow_name: str) -> float:
+        query_norm = cls._normalize_workflow_lookup_text(query)
+        workflow_norm = cls._normalize_workflow_lookup_text(workflow_name)
+        if not query_norm or not workflow_norm:
+            return 0.0
+
+        query_tokens = cls._workflow_lookup_tokens(query)
+        workflow_tokens = cls._workflow_lookup_tokens(workflow_name)
+        if not query_tokens or not workflow_tokens:
+            return 0.0
+
+        query_phrase = " ".join(query_tokens)
+        workflow_phrase = " ".join(workflow_tokens)
+        if not query_phrase or not workflow_phrase:
+            return 0.0
+
+        if query_phrase == workflow_phrase:
+            return 1.0
+        if set(query_tokens) == set(workflow_tokens):
+            return 0.97
+
+        common = set(query_tokens) & set(workflow_tokens)
+        if not common:
+            return 0.0
+
+        workflow_coverage = len(common) / max(len(set(workflow_tokens)), 1)
+        query_coverage = len(common) / max(len(set(query_tokens)), 1)
+        seq_ratio = SequenceMatcher(None, query_phrase, workflow_phrase).ratio()
+        contains_bonus = 0.0
+        if query_phrase in workflow_phrase or workflow_phrase in query_phrase:
+            contains_bonus = 0.15
+        all_workflow_tokens_present = set(workflow_tokens).issubset(set(query_tokens))
+        subset_bonus = 0.1 if all_workflow_tokens_present else 0.0
+
+        score = (
+            0.45 * workflow_coverage
+            + 0.25 * query_coverage
+            + 0.25 * seq_ratio
+            + contains_bonus
+            + subset_bonus
+        )
+        return min(score, 1.0)
+
+    def suggest_cached_workflow_names(
+        self,
+        query: str,
+        *,
+        user_id: str = "",
+        org_code: str = "",
+        require_execute: bool = False,
+        limit: int = 5,
+        min_score: float = 0.45,
+    ) -> list[str]:
+        text = str(query or "").strip()
+        if not text:
+            return []
+
+        try:
+            from config.db import get_conn
+
+            target_org = str(org_code or "").strip()
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    sql = (
+                        "SELECT workflow_id, workflow_name, org_code "
+                        "FROM workflow_catalog WHERE active = TRUE"
+                    )
+                    params: list[Any] = []
+                    if target_org:
+                        sql += " AND org_code = %s"
+                        params.append(target_org)
+                    sql += " ORDER BY fetched_at DESC"
+                    cur.execute(sql, tuple(params))
+                    rows = cur.fetchall()
+        except Exception as exc:
+            logger.debug("T4: cached workflow suggestions failed for %s: %s", query, exc)
+            return []
+
+        predicate = can_execute_workflow if require_execute else can_view_workflow
+        best_by_name: dict[str, tuple[float, str]] = {}
+        for row in rows:
+            workflow_id = str(row[0] or "").strip() if row else ""
+            workflow_name = str(row[1] or "").strip() if row and len(row) > 1 else ""
+            workflow_org = str(row[2] or "").strip() if row and len(row) > 2 else target_org
+            if not workflow_name:
+                continue
+            if user_id and workflow_id and not predicate(user_id, workflow_id, workflow_org or target_org):
+                continue
+            score = self._workflow_match_score(text, workflow_name)
+            if score < min_score:
+                continue
+            key = workflow_name.lower()
+            prev = best_by_name.get(key)
+            if not prev or score > prev[0]:
+                best_by_name[key] = (score, workflow_name)
+
+        ranked = sorted(best_by_name.values(), key=lambda item: (-item[0], item[1].lower()))
+        return [name for _, name in ranked[: max(int(limit or 5), 1)]]
+
+    def resolve_workflow_name_from_text(
+        self,
+        query: str,
+        *,
+        user_id: str = "",
+        org_code: str = "",
+        require_execute: bool = False,
+        min_score: float = 0.72,
+    ) -> str:
+        suggestions = self.suggest_cached_workflow_names(
+            query,
+            user_id=user_id,
+            org_code=org_code,
+            require_execute=require_execute,
+            limit=1,
+            min_score=min_score,
+        )
+        return suggestions[0] if suggestions else ""
 
     def get_cached_workflow_id(self, workflow_name: str) -> Optional[str]:
         """Resolve numeric workflow_id from local catalog for a given technical name."""

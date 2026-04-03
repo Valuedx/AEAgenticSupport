@@ -8,6 +8,7 @@ Message Gateway handles:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from enum import Enum
 from typing import Callable, Optional
@@ -156,7 +157,7 @@ class MessageGateway:
                 with user-friendly progress messages during long operations.
         """
         if not user_message or not user_message.strip():
-            return "It looks like your message was empty. How can I help?"
+            return "I didn't catch a request there. Please send the workflow name, issue, or request ID you'd like me to check."
 
         state = self.get_or_create_session(
             conversation_id, user_id, user_role, user_name, user_email, user_team, user_metadata
@@ -186,16 +187,16 @@ class MessageGateway:
 
         if intent == MessageIntent.CANCEL:
             state.interrupt_requested = True
-            return "Stopping current work. What would you like me to do instead?"
+            return "Okay, I'll stop the current work here. What would you like me to do next?"
 
         elif intent == MessageIntent.INTERRUPT:
             state.interrupt_requested = True
             state.queue_user_message(user_message, hint="interrupt")
-            return "Got your urgent message. Pausing current work to handle this."
+            return "I saw your urgent update. I'm pausing the current investigation and switching to this now."
 
         elif intent == MessageIntent.ADDITIVE:
             state.queue_user_message(user_message, hint="additive")
-            return "Noted — I'll include this in my current investigation."
+            return "Thanks, I'll include that in the current investigation."
 
         elif intent == MessageIntent.APPROVAL:
             with lock:
@@ -205,11 +206,11 @@ class MessageGateway:
 
         elif intent == MessageIntent.NEW_REQUEST:
             state.queue_user_message(user_message, hint="new_request")
-            return "I'm working on something else right now. I'll get to this next."
+            return "I'm finishing the current investigation first. I've queued this next request and will pick it up right after."
 
         else:
             state.queue_user_message(user_message, hint="additive")
-            return "Noted - I'll include this in my current investigation."
+            return "Thanks, I'll include that in the current investigation."
 
     def _dispatch(
         self,

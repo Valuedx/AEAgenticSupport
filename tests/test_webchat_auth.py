@@ -67,6 +67,36 @@ def test_webchat_login_sets_exact_username_session():
             assert me_payload["user_id"] == "webchat:Claims.User"
 
 
+def test_webchat_auth_me_can_rotate_chat_session_on_refresh():
+    agent_server.app.config["TESTING"] = True
+    with patch.dict(
+        agent_server.CONFIG,
+        {
+            "WEBCHAT_AUTH_ENABLED": True,
+            "WEBCHAT_LOGIN_PASSWORD": "Edge@1234",
+        },
+        clear=False,
+    ):
+        with agent_server.app.test_client() as client:
+            with patch("agent_server._webchat_username_exists_in_ae", return_value=True):
+                login = client.post(
+                    "/api/webchat/auth/login",
+                    json={"username": "claims.user", "password": "Edge@1234"},
+                )
+            assert login.status_code == 200
+            first_session_id = login.get_json()["chat_session_id"]
+
+            refreshed = client.get("/api/webchat/auth/me?refresh_chat_session=1")
+
+            assert refreshed.status_code == 200
+            refreshed_payload = refreshed.get_json()
+            assert refreshed_payload["authenticated"] is True
+            assert refreshed_payload["username"] == "claims.user"
+            assert refreshed_payload["user_id"] == "webchat:claims.user"
+            assert refreshed_payload["chat_session_id"].startswith("webchat-claims_user-")
+            assert refreshed_payload["chat_session_id"] != first_session_id
+
+
 def test_webchat_authenticated_chat_uses_session_username_only():
     agent_server.app.config["TESTING"] = True
     with patch.dict(
@@ -102,6 +132,42 @@ def test_webchat_authenticated_chat_uses_session_username_only():
             assert kwargs["user_id"] == "webchat:claims.user"
             assert kwargs["user_name"] == "claims.user"
             assert kwargs["session_id"].startswith("webchat-claims_user-")
+
+
+def test_webchat_authenticated_chat_uses_refreshed_session_id():
+    agent_server.app.config["TESTING"] = True
+    with patch.dict(
+        agent_server.CONFIG,
+        {
+            "WEBCHAT_AUTH_ENABLED": True,
+            "WEBCHAT_LOGIN_PASSWORD": "Edge@1234",
+        },
+        clear=False,
+    ):
+        with agent_server.app.test_client() as client:
+            with patch("agent_server._webchat_username_exists_in_ae", return_value=True):
+                login = client.post(
+                    "/api/webchat/auth/login",
+                    json={"username": "claims.user", "password": "Edge@1234"},
+                )
+            assert login.status_code == 200
+
+            refreshed = client.get("/api/webchat/auth/me?refresh_chat_session=1")
+            refreshed_session_id = refreshed.get_json()["chat_session_id"]
+
+            with patch("agent_server.handle_chat_message", return_value="ok") as mock_handle:
+                response = client.post(
+                    "/api/webchat/chat",
+                    json={
+                        "message": "run claims",
+                        "user_role": "technical",
+                    },
+                )
+
+            assert response.status_code == 200
+            assert response.get_json()["response"] == "ok"
+            kwargs = mock_handle.call_args.kwargs
+            assert kwargs["session_id"] == refreshed_session_id
 
 
 def test_webchat_stream_chat_uses_session_identity():

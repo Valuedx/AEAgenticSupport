@@ -876,8 +876,17 @@ class ToolRegistry:
             # and re-prompt the user with the question.
             # AE-77: Check for "File" type parameters. File upload is not supported in agentic chat yet.
             schema = client.get_cached_workflow_parameters(mapping.workflow_name)
+            flattened_kwargs = dict(kwargs)
+            for carrier in ("parameters", "params"):
+                payload = kwargs.get(carrier)
+                if not isinstance(payload, dict):
+                    continue
+                for key, value in payload.items():
+                    flattened_kwargs.setdefault(key, value)
+
+            schema_params = schema or list(mapping.parameter_meta or [])
             file_params = [
-                p.get("name") for p in (schema or [])
+                p.get("name") for p in schema_params
                 if str(p.get("type") or p.get("uiControlType") or "").strip().lower() in {"file", "attachment", "upload"}
             ]
             if file_params:
@@ -895,7 +904,13 @@ class ToolRegistry:
                     "workflow_name": mapping.workflow_name,
                 }
 
-            missing = [p for p in mapping.required_params if not kwargs.get(p)]
+            cached_required = client.get_required_parameters(mapping.workflow_name) if schema else []
+            effective_required = list(dict.fromkeys(cached_required or list(mapping.required_params or [])))
+            missing = [
+                p
+                for p in effective_required
+                if flattened_kwargs.get(p) in (None, "", {}, [])
+            ]
             if missing:
                 # Build a friendly, conversational question (mirrors code_ref.py pattern)
                 param_bullets = "\n".join(f"  • {p}" for p in missing)
@@ -914,7 +929,9 @@ class ToolRegistry:
                     "workflow_name": mapping.workflow_name,
                 }
 
-            payload_args = dict(kwargs)
+            payload_args = dict(flattened_kwargs)
+            payload_args.pop("parameters", None)
+            payload_args.pop("params", None)
             org_code = str(
                 payload_args.pop("orgCode", "")
                 or payload_args.pop("org_code", "")

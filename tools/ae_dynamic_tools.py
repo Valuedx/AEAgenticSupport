@@ -60,6 +60,56 @@ def _collect_parameter_lists(payload: Any, bag: list[list[dict]]):
             _collect_parameter_lists(item, bag)
 
 
+def _normalize_parameter_list(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    dict_items = [item for item in value if isinstance(item, dict)]
+    if not dict_items:
+        return []
+    named_items = [
+        item
+        for item in dict_items
+        if str(_get_first_value(item, ("name", "parametername", "paramname", "key"), "") or "").strip()
+    ]
+    return named_items or dict_items
+
+
+def _extract_direct_parameter_list(payload: Any) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    for key in (
+        "parameters",
+        "params",
+        "inputParameters",
+        "runtimeParameters",
+        "workflowParameters",
+        "configurationParameters",
+    ):
+        for actual_key, value in payload.items():
+            if _norm_key(actual_key) != _norm_key(key):
+                continue
+            params = _normalize_parameter_list(value)
+            if params:
+                return params
+    return []
+
+
+def _select_parameter_list(
+    workflow_summary: dict,
+    workflow_details: dict,
+    cfg: dict,
+    merged: dict,
+) -> list[dict]:
+    for source in (workflow_details, workflow_summary, cfg):
+        params = _extract_direct_parameter_list(source)
+        if params:
+            return params
+
+    parameter_lists: list[list[dict]] = []
+    _collect_parameter_lists(merged, parameter_lists)
+    return parameter_lists[0] if parameter_lists else []
+
+
 def _get_first_value(d: dict, keys: tuple[str, ...], default: Any = None) -> Any:
     lookup = {_norm_key(k): v for k, v in d.items()}
     for key in keys:
@@ -296,9 +346,7 @@ def extract_dynamic_tool_mapping(
         )
     )
 
-    parameter_lists: list[list[dict]] = []
-    _collect_parameter_lists(merged, parameter_lists)
-    params_raw = max(parameter_lists, key=len) if parameter_lists else []
+    params_raw = _select_parameter_list(workflow_summary, details, cfg, merged)
 
     properties: dict[str, dict] = {}
     required: list[str] = []
