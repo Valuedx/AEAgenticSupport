@@ -639,7 +639,7 @@ def _execute_single_node(
     if node_category == "action" and node_data.get("config", {}).get("approvalMessage") is not None:
         if "approval" not in context:
             instance.status = "suspended"
-            instance.context_json = context
+            instance.context_json = _get_clean_context(context)
             log_entry.status = "suspended"
             db.commit()
             logger.info("Workflow %s suspended at node %s for human approval", instance.id, node_id)
@@ -678,7 +678,7 @@ def _execute_single_node(
             log_entry.completed_at = _utcnow()
 
             instance.status = "failed"
-            instance.context_json = context
+            instance.context_json = _get_clean_context(context)
             instance.completed_at = _utcnow()
             db.commit()
             span.update(output={"status": "failed", "error": str(exc)})

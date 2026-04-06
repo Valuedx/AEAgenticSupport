@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     mcp_server_url: str = "http://localhost:8000/mcp"
     secret_key: str = "change-me-in-production"
-    cors_origins: list[str] = ["http://localhost:8080"]
+    cors_origins: list[str] = ["http://localhost:8080", "http://localhost:8082"]
 
     # Auth: "dev" = X-Tenant-Id header, "jwt" = Bearer token required
     auth_mode: str = "dev"
@@ -44,6 +44,9 @@ class Settings(BaseSettings):
 
     # MCP connection pool size
     mcp_pool_size: int = 4
+
+    # When False, tasks run in-process via background threads (no Redis/Celery needed)
+    use_celery: bool = False
 
     # Langfuse Observability
     langfuse_enabled: bool = False
