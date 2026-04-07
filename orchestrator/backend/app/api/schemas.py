@@ -206,3 +206,93 @@ class ConversationSessionSummary(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# A2A Protocol (Agent-to-Agent)
+# ---------------------------------------------------------------------------
+
+class A2AMessagePart(BaseModel):
+    """A single content unit inside an A2A message (text or future media types)."""
+    text: str | None = None
+
+
+class A2AMessage(BaseModel):
+    role: str = "user"
+    parts: list[A2AMessagePart]
+
+
+class A2ATaskStatus(BaseModel):
+    # A2A spec states: submitted | working | input-required | completed | failed | canceled
+    state: str
+    message: A2AMessage | None = None
+    timestamp: str | None = None
+
+
+class A2AArtifact(BaseModel):
+    """Final output of a completed task — one or more content parts."""
+    index: int = 0
+    parts: list[A2AMessagePart]
+    lastChunk: bool | None = None
+
+
+class A2ATask(BaseModel):
+    """Full A2A Task object returned by tasks/send and tasks/get."""
+    id: str
+    sessionId: str | None = None
+    status: A2ATaskStatus
+    artifacts: list[A2AArtifact] = []
+
+
+class A2ASendParams(BaseModel):
+    """Parameters for the tasks/send JSON-RPC method."""
+    id: str | None = None          # caller-supplied idempotency key
+    sessionId: str | None = None   # conversation thread
+    skillId: str                   # workflow_def_id (UUID string)
+    message: A2AMessage
+
+
+class A2AJsonRpcRequest(BaseModel):
+    jsonrpc: str = "2.0"
+    id: int | str | None = None
+    method: str
+    params: dict[str, Any] = {}
+
+
+class A2AJsonRpcResponse(BaseModel):
+    jsonrpc: str = "2.0"
+    id: int | str | None = None
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
+# A2A API key management (tenant-facing REST endpoints, not part of the A2A spec)
+
+class A2AApiKeyCreate(BaseModel):
+    label: str = Field(..., min_length=1, max_length=128,
+                       description="Human-readable name for this key, e.g. 'teams-bot'")
+
+
+class A2AApiKeyCreated(BaseModel):
+    """Returned once at creation time. raw_key is never stored."""
+    id: uuid.UUID
+    label: str
+    raw_key: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class A2AApiKeyOut(BaseModel):
+    """Safe summary — no key material."""
+    id: uuid.UUID
+    label: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# A2A publish/unpublish workflow
+
+class WorkflowPublishRequest(BaseModel):
+    is_published: bool

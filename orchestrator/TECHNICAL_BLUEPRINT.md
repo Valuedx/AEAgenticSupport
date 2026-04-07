@@ -1,3 +1,5 @@
+> - **V0.9.12 A2A Protocol (2026-04-07)**: Google A2A protocol v0.2 inbound and outbound support. **Inbound:** Per-tenant agent card (`GET /tenants/{id}/.well-known/agent.json`) lists `is_published` workflows as skills. JSON-RPC 2.0 dispatcher (`POST /tenants/{id}/a2a`) handles `tasks/send`, `tasks/get`, `tasks/cancel`, `tasks/sendSubscribe` (SSE). Inbound auth via SHA-256-hashed API keys stored in new `a2a_api_keys` table. `WorkflowInstance` status maps to A2A task states: `suspended` → `input-required` (Human Approval integration). **Outbound:** New `A2A Agent Call` action node wraps `app/engine/a2a_client.py` (`fetch_agent_card`, `send_task`, `poll_until_done`). **Key management:** `POST/GET/DELETE /api/v1/a2a/keys`. **Publish toggle:** `PATCH /api/v1/workflows/{id}/publish`. New `A2AApiKey` ORM model. `WorkflowDefinition.is_published` column (Alembic `0007_a2a_support.py`). MCP and A2A coexist — MCP is for tools, A2A is for agent delegation.
+>
 > - **V0.9.11 Operator execution control (2026-03-22)**: Cooperative **cancel**, **pause**, and **resume** between nodes (the current node always finishes; no mid–LLM-call interrupt). New DB columns on `workflow_instances`: `cancel_requested`, `pause_requested` (Alembic `0005_workflow_cancel_requested.py`, `0006_workflow_pause_requested.py`). `dag_runner` exposes `_finalize_cancelled`, `_finalize_paused`, and `_abort_if_cancel_or_pause` — **cancel wins** if both flags are set. Instance statuses: `cancelled` (terminal, sets `completed_at`), `paused` (operator pause, not HITL — `completed_at` stays null). **API:** `POST /{workflow_id}/instances/{instance_id}/cancel` (queued/running: sets `cancel_requested`; **paused**: immediate `cancelled`), `POST …/pause` (sets `pause_requested`), `POST …/resume-paused` (body optional `context_patch`, Celery `resume_paused_workflow_task` → `resume_paused_graph`). **SSE** (`sse.py`) ends the stream with `done` for `cancelled` and `paused` (same pattern as `suspended`). **Frontend:** `ExecutionPanel` — Pause, Resume (when `paused`), Stop (cooperative cancel while running; **discard** when paused). **`workflowStore`:** `cancelInstance`, `pauseInstance`, `resumePausedInstance`. **`tools/orchestrator_client.py`:** `cancel()`, `pause()`, `resume_paused()`; `run_and_wait()` returns context when status is `cancelled` or `paused`. See §4.5, §5.2, §6.11.
 >
 > - **V0.9.10 Bridge reply UX + canvas display names (2026-03-22)**: **Bridge User Reply** action node (`bridge_user_reply` in `node_registry.json`) sets the final chat string for the AI Studio proxy: handler `_handle_bridge_user_reply` resolves `messageExpression` (safe_eval) or `responseNodeId` (same pattern as Save Conversation State); `dag_runner._promote_orchestrator_user_reply()` copies non-empty `orchestrator_user_reply` to **context root** after each completed node so `GET …/context` exposes it for Studio/Teams. Parent `gateway/message_gateway.py`: sync completion prefers top-level `orchestrator_user_reply`, then `_extract_user_facing_orchestrator_reply()` (longest LLM/ReAct `response`, skipping short router JSON); `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` / `orchestrator_chat_reply_mode` (`auto` vs `full_context`); `orchestrator_include_context_json`; clearer **suspended** bridge text. Frontend: optional `displayName` on `AgenticNodeData` + `nodeCanvasTitle()` for human-friendly canvas titles while **registry `label`** stays the engine key; PropertyInspector splits **Display name** vs **Engine type**; expression picker groups use canvas titles; `validateWorkflow` messages use canvas titles. Example workflows (`exampleMainAppWorkflow.ts`, `exampleComplexWorkflow.ts`) use `displayName` and per-branch Bridge nodes. Tests: `tests/test_orchestrator_bridge.py`.
@@ -26,9 +28,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9.11
-**Last updated:** 2026-03-22
-**Status:** V0.9.11 Operator cancel/pause/resume; V0.9.10 Bridge User Reply + Studio chat formatting + `displayName`; V0.9.9 Loop Node; V0.9.8 Rich Token Streaming; V0.9.7 Checkpoint-aware Langfuse; V0.9.6 Checkpointing; V0.9.5 Reflection; V0.9.4 HITL UX; V0.9.3 Deterministic batch; V0.9.2 UX; V0.9.1 Stateful DAGs; V0.9 execution; V0.8 enterprise; earlier milestones through V0.1
+**Version:** 0.9.12
+**Last updated:** 2026-04-07
+**Status:** V0.9.12 A2A Protocol; V0.9.11 Operator cancel/pause/resume; V0.9.10 Bridge User Reply + Studio chat formatting + `displayName`; V0.9.9 Loop Node; V0.9.8 Rich Token Streaming; V0.9.7 Checkpoint-aware Langfuse; V0.9.6 Checkpointing; V0.9.5 Reflection; V0.9.4 HITL UX; V0.9.3 Deterministic batch; V0.9.2 UX; V0.9.1 Stateful DAGs; V0.9 execution; V0.8 enterprise; earlier milestones through V0.1
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -462,6 +464,35 @@ prompts to be reusable across different workflow topologies.
 |--------|------|-------------|
 | `GET` | `/` | List all MCP tools from parent `tool_specs.py` |
 
+**Conversations** (prefix: `/api/v1/conversations`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | List all conversation sessions for tenant (summaries) |
+| `GET` | `/{session_id}` | Full message history for a session |
+| `DELETE` | `/{session_id}` | Delete session (next DAG run auto-recreates) |
+
+**A2A Inbound** (per-tenant, auth: Bearer A2A key)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/tenants/{tenant_id}/.well-known/agent.json` | Agent card — lists published workflows as skills (no auth) |
+| `POST` | `/tenants/{tenant_id}/a2a` | JSON-RPC 2.0 dispatcher: `tasks/send`, `tasks/get`, `tasks/cancel`, `tasks/sendSubscribe` |
+
+**A2A Key Management** (prefix: `/api/v1/a2a/keys`, auth: standard tenant credentials)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/` | Generate inbound A2A key — raw key shown once |
+| `GET` | `/` | List keys (no key material) |
+| `DELETE` | `/{key_id}` | Revoke key immediately |
+
+**A2A Publish Toggle** (extends `/api/v1/workflows`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `PATCH` | `/{workflow_id}/publish` | Set `is_published` true/false |
+
 **Health**
 
 | Method | Path | Description |
@@ -488,10 +519,11 @@ Stores the visual graph designed in the React Flow canvas.
 | `description` | `TEXT` | Optional |
 | `graph_json` | `JSONB` | Full React Flow export `{nodes: [], edges: []}` |
 | `version` | `INTEGER` | Bumped on each graph update |
+| `is_published` | `BOOLEAN` | When `True`, listed in the A2A agent card as a skill |
 | `created_at` | `TIMESTAMPTZ` | Auto |
 | `updated_at` | `TIMESTAMPTZ` | Auto on update |
 
-Index: `(tenant_id, name)`.
+Index: `(tenant_id, name)`. Migration `0007_a2a_support.py` adds `is_published`.
 
 ### 5.2 WorkflowInstance
 
@@ -575,6 +607,22 @@ Per-tenant MCP tool visibility and configuration overrides.
 | `config_json` | `JSONB` | Tenant-specific parameter defaults |
 
 Unique index: `(tenant_id, tool_name)`.
+
+### 5.7 A2AApiKey
+
+Hashed inbound API keys issued to external A2A agents per tenant. Only the SHA-256 digest is stored — a DB breach cannot expose working credentials.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `UUID` (PK) | Auto-generated |
+| `tenant_id` | `VARCHAR(64)` | Indexed |
+| `label` | `VARCHAR(128)` | Human-readable name, e.g. `teams-bot`. Unique per tenant. |
+| `key_hash` | `VARCHAR(64)` | SHA-256 hex of the raw 32-byte key |
+| `created_at` | `TIMESTAMPTZ` | Auto |
+
+Indexes: `(tenant_id)`, `(key_hash)` unique.  
+Constraints: `UNIQUE (tenant_id, label)`.  
+Migration: `alembic/versions/0007_a2a_support.py`
 
 ---
 
@@ -1017,19 +1065,83 @@ Use the proxy pattern when the **workflow UUID and payload are already known** a
 
 ---
 
-## 11. Shared Schemas
+## 11. A2A Protocol (Agent-to-Agent)
+
+File: `app/api/a2a.py`, `app/engine/a2a_client.py`
+
+### 11.1 Architecture
+
+```
+External Agent                     This Orchestrator (tenant: acme)
+──────────────                     ────────────────────────────────
+
+GET  /tenants/acme/.well-known/agent.json          (no auth)
+  ← agent card listing published workflows as skills
+
+POST /tenants/acme/a2a   Bearer <a2a-key>          (A2A auth)
+  body: {"jsonrpc":"2.0","method":"tasks/send","params":{...}}
+  → creates WorkflowInstance, enqueues Celery task
+  ← Task {id, status:{state:"submitted"}}
+
+POST /tenants/acme/a2a   {"method":"tasks/get","params":{"id":"..."}}
+  ← Task {status:{state:"working"|"completed"|"input-required"}}
+
+POST /tenants/acme/a2a   {"method":"tasks/sendSubscribe",...}
+  ← SSE: event:task (status updates) + event:artifact (final output)
+```
+
+### 11.2 Status Mapping
+
+| WorkflowInstance.status | A2A state | Notes |
+|---|---|---|
+| `queued` | `submitted` | |
+| `running` | `working` | |
+| `completed` | `completed` | Final LLM response in `artifacts[0]` |
+| `suspended` | `input-required` | Human Approval waiting — message in `status.message` |
+| `failed` | `failed` | |
+| `cancelled` | `canceled` | |
+
+### 11.3 Inbound Authentication
+
+`POST /tenants/{tenant_id}/a2a` requires `Authorization: Bearer <raw_key>`. The server hashes the key with SHA-256 and looks it up in `a2a_api_keys` filtered by `tenant_id`. Tenant isolation is enforced at the URL path level — a key for tenant A cannot reach tenant B's surface.
+
+Key lifecycle:
+1. Tenant admin calls `POST /api/v1/a2a/keys` with normal credentials → raw key returned once.
+2. External agent stores key in its vault, sends it as Bearer on every A2A request.
+3. Admin calls `DELETE /api/v1/a2a/keys/{id}` to revoke — takes effect immediately.
+
+### 11.4 Outbound — A2A Agent Call Node
+
+Handler: `_handle_a2a_call` in `node_handlers.py`. Uses `app/engine/a2a_client.py`:
+
+1. `fetch_agent_card(agent_card_url)` — GET the remote discovery document.
+2. `send_task(agent_url, skill_id, message, api_key)` — POST `tasks/send`, return initial Task.
+3. `poll_until_done(agent_url, task_id, api_key, timeout)` — poll `tasks/get` every 3s until terminal.
+4. `extract_response_text(task)` — pull text from `artifacts` or `status.message`.
+
+The `apiKeySecret` config field uses the vault reference pattern (`{{ env.REMOTE_AGENT_KEY }}`), resolved by `resolve_config_env_vars` before the handler runs.
+
+### 11.5 Design Constraints
+
+- **MCP and A2A coexist** — MCP is for structured tool calls within a DAG; A2A is for delegating entire tasks to external agents. Do not replace one with the other.
+- **A2A does not replace webhooks** — the existing `POST /execute` webhook trigger still works. A2A is an additive surface.
+- **`tasks/sendSubscribe` uses DB polling** — the SSE stream polls the `workflow_instances` table every 1s. For very high-frequency tenants, add Redis pub/sub (same pattern as token streaming in `sse.py`).
+
+---
+
+## 12. Shared Schemas
 
 File: `orchestrator/shared/node_registry.json`
 
 A version-controlled JSON file defining all node types with their `config_schema`. This serves as the canonical schema that both frontend and backend can reference:
 
 - 4 categories: `trigger`, `agent`, `action`, `logic`.
-- **10+ node types** (triggers, agents including Router/ReAct/Reflection, actions including MCP/HTTP/Human Approval/**Bridge User Reply**/conversation memory, logic including Condition/Merge/ForEach/**Loop**) with typed `config_schema` objects (type, default, enum, min/max).
+- **14 node types** (triggers, agents including Router/ReAct/Reflection, actions including MCP/HTTP/Human Approval/Bridge User Reply/conversation memory/**A2A Agent Call**, logic including Condition/Merge/ForEach/Loop) with typed `config_schema` objects (type, default, enum, min/max).
 - Drives `DynamicConfigForm` in the UI and server-side config validation on save.
 
 ---
 
-## 12. Known Limitations (V0.8)
+## 13. Known Limitations (V0.8)
 
 | Area | Limitation | Planned Resolution |
 |------|------------|-------------------|
@@ -1042,7 +1154,7 @@ A version-controlled JSON file defining all node types with their `config_schema
 
 ---
 
-## 13. Roadmap
+## 14. Roadmap
 
 **V0.2 — Wire Frontend to Backend (Implemented)**
 - Frontend API client for save/load/execute workflows.

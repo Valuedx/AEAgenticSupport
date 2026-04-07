@@ -14,6 +14,7 @@ from app.api.workflows import router as workflows_router
 from app.api.tools import router as tools_router
 from app.api.sse import router as sse_router
 from app.api.conversations import router as conversations_router
+from app.api.a2a import router as a2a_router
 from app.security.rate_limiter import limiter
 
 logging.basicConfig(
@@ -24,7 +25,7 @@ logging.basicConfig(
 app = FastAPI(
     title="AE AI Hub - Orchestrator",
     description="Agentic workflow orchestration engine with visual DAG builder",
-    version="0.9.1",
+    version="0.9.2",
 )
 
 app.state.limiter = limiter
@@ -42,6 +43,7 @@ app.include_router(workflows_router)
 app.include_router(tools_router)
 app.include_router(sse_router)
 app.include_router(conversations_router)
+app.include_router(a2a_router)
 
 if settings.oidc_enabled:
     from app.api.auth import router as oidc_router

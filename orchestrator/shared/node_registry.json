@@ -417,6 +417,40 @@
           "description": "Maximum tokens for the LLM response"
         }
       }
+    },
+    {
+      "type": "a2a_call",
+      "category": "action",
+      "label": "A2A Agent Call",
+      "description": "Delegate a task to an external A2A-compatible agent and wait for the result. The remote agent's response is injected into context for downstream nodes.",
+      "icon": "network",
+      "config_schema": {
+        "agentCardUrl": {
+          "type": "string",
+          "default": "",
+          "description": "URL of the remote agent's /.well-known/agent.json discovery document"
+        },
+        "skillId": {
+          "type": "string",
+          "default": "",
+          "description": "Skill ID to invoke on the remote agent. Leave blank to use the first available skill."
+        },
+        "messageExpression": {
+          "type": "string",
+          "default": "trigger.message",
+          "description": "Expression that resolves to the message text sent to the remote agent (e.g. trigger.message or node_3.response)"
+        },
+        "apiKeySecret": {
+          "type": "string",
+          "default": "",
+          "description": "Vault reference to the remote agent's A2A API key, e.g. {{ env.REMOTE_AGENT_KEY }}"
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "default": 300,
+          "description": "Maximum seconds to wait for the remote agent to complete. Raises an error if exceeded."
+        }
+      }
     }
   ]
 }

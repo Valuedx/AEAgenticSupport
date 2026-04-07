@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     Index,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -30,6 +31,8 @@ class WorkflowDefinition(Base):
     description = Column(Text, nullable=True)
     graph_json = Column(JSONB, nullable=False)
     version = Column(Integer, nullable=False, default=1)
+    # When True, this workflow is listed in the tenant's A2A agent card as a skill
+    is_published = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
@@ -166,4 +169,26 @@ class ConversationSession(Base):
 
     __table_args__ = (
         Index("ix_conv_session_tenant_session", "tenant_id", "session_id", unique=True),
+    )
+
+
+class A2AApiKey(Base):
+    """Hashed inbound API keys issued to external A2A agents per tenant.
+
+    The raw key is returned only at creation time and never stored.
+    Only the SHA-256 hex digest is persisted so a DB breach cannot
+    expose working credentials.
+    """
+
+    __tablename__ = "a2a_api_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(String(64), nullable=False, index=True)
+    label = Column(String(128), nullable=False)       # human-readable name, e.g. "teams-bot"
+    key_hash = Column(String(64), nullable=False)     # SHA-256 hex of the raw key
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_a2a_key_hash", "key_hash", unique=True),
+        UniqueConstraint("tenant_id", "label", name="uq_a2a_key_tenant_label"),
     )

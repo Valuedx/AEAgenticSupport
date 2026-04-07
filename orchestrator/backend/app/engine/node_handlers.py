@@ -56,6 +56,8 @@ def dispatch_node(
         return _handle_bridge_user_reply(node_data, context, tenant_id)
     if label == "LLM Router":
         return _handle_llm_router(node_data, context, tenant_id)
+    if label == "A2A Agent Call":
+        return _handle_a2a_call(node_data, context, tenant_id)
     if label == "Reflection":
         from app.engine.reflection_handler import _handle_reflection
         return _handle_reflection(node_data, context, tenant_id)
@@ -376,6 +378,7 @@ def _handle_load_conversation_state(
 
     from app.database import SessionLocal
     from app.models.workflow import ConversationSession
+    from sqlalchemy.exc import IntegrityError
 
     db = SessionLocal()
     try:
@@ -385,16 +388,25 @@ def _handle_load_conversation_state(
             .first()
         )
         if not session:
-            session = ConversationSession(
-                session_id=session_id,
-                tenant_id=tenant_id,
-                messages=[],
-            )
-            db.add(session)
-            db.commit()
-            db.refresh(session)
+            try:
+                session = ConversationSession(
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    messages=[],
+                )
+                db.add(session)
+                db.commit()
+                db.refresh(session)
+            except IntegrityError:
+                # Another concurrent DAG instance created the session first
+                db.rollback()
+                session = (
+                    db.query(ConversationSession)
+                    .filter_by(session_id=session_id, tenant_id=tenant_id)
+                    .first()
+                )
 
-        messages = session.messages or []
+        messages = session.messages or [] if session else []
         logger.info(
             "Load Conversation State: session=%s messages=%d", session_id, len(messages)
         )
@@ -450,28 +462,46 @@ def _handle_save_conversation_state(
 
     from app.database import SessionLocal
     from app.models.workflow import ConversationSession
+    from sqlalchemy.exc import IntegrityError
     from sqlalchemy.orm.attributes import flag_modified
 
     db = SessionLocal()
     try:
+        # Use with_for_update() to lock the row for the duration of the append,
+        # preventing a lost-update race when multiple DAG instances share a session.
         session = (
             db.query(ConversationSession)
             .filter_by(session_id=session_id, tenant_id=tenant_id)
+            .with_for_update()
             .first()
         )
         if not session:
-            session = ConversationSession(
-                session_id=session_id,
-                tenant_id=tenant_id,
-                messages=new_messages,
-            )
-            db.add(session)
+            try:
+                session = ConversationSession(
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    messages=new_messages,
+                )
+                db.add(session)
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                session = (
+                    db.query(ConversationSession)
+                    .filter_by(session_id=session_id, tenant_id=tenant_id)
+                    .with_for_update()
+                    .first()
+                )
+                if session:
+                    session.messages = (session.messages or []) + new_messages
+                    flag_modified(session, "messages")
+                    db.commit()
         else:
             session.messages = (session.messages or []) + new_messages
             flag_modified(session, "messages")
+            db.commit()
 
-        db.commit()
-        total = len(session.messages)
+        total = len(session.messages) if session else len(new_messages)
         logger.info(
             "Save Conversation State: session=%s total_messages=%d", session_id, total
         )
@@ -500,7 +530,9 @@ def _handle_llm_router(
     # Pull conversation history from the Load Conversation State node output
     messages: list[dict] = []
     if history_node_id and history_node_id in context:
-        messages = context[history_node_id].get("messages", [])
+        node_out = context[history_node_id]
+        if isinstance(node_out, dict):
+            messages = node_out.get("messages", [])
 
     raw_user = _resolve_expr(user_msg_expr, context)
     user_message = str(raw_user) if raw_user is not None else str(
@@ -581,5 +613,136 @@ def _handle_llm_router(
         "intent": intent,
         "raw_response": raw_response,
         "usage": result.get("usage"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# A2A Agent Call — outbound task delegation
+# ---------------------------------------------------------------------------
+
+def _handle_a2a_call(
+    node_data: dict, context: dict[str, Any], tenant_id: str
+) -> dict[str, Any]:
+    """Delegate a task to an external A2A-compatible agent and return its result.
+
+    Flow:
+      1. Fetch the remote agent card to discover the agent's base URL and
+         validate the requested skill exists.
+      2. Submit the task via tasks/send.
+      3. Poll tasks/get until the task reaches a terminal state.
+      4. Extract and return the response text so downstream nodes can use it.
+
+    The ``apiKeySecret`` config field should reference a vault secret
+    (e.g. ``{{ env.REMOTE_AGENT_KEY }}``) — it is resolved by
+    ``resolve_config_env_vars`` before this handler is called.
+    """
+    from app.engine.a2a_client import (
+        fetch_agent_card,
+        send_task,
+        poll_until_done,
+        extract_response_text,
+    )
+
+    config          = node_data.get("config", {})
+    agent_card_url  = config.get("agentCardUrl", "").strip()
+    skill_id        = config.get("skillId", "").strip()
+    message_expr    = config.get("messageExpression", "trigger.message")
+    api_key         = config.get("apiKeySecret", "").strip()
+    timeout         = int(config.get("timeoutSeconds", 300))
+
+    if not agent_card_url:
+        return {"error": "agentCardUrl is not configured", "state": "failed"}
+    if not api_key:
+        return {"error": "apiKeySecret is not configured (use a vault reference)", "state": "failed"}
+
+    # Resolve the message text from the DAG context
+    raw_msg = _resolve_expr(message_expr, context)
+    message = str(raw_msg) if raw_msg is not None else str(
+        context.get("trigger", {}).get("message", "")
+    )
+
+    # 1. Discover — fetch agent card and resolve agent base URL
+    try:
+        card = fetch_agent_card(agent_card_url)
+    except Exception as exc:
+        logger.error("A2A Agent Call: failed to fetch agent card: %s", exc)
+        return {"error": f"Agent card fetch failed: {exc}", "state": "failed"}
+
+    agent_url = card.get("url", "")
+    if not agent_url:
+        return {"error": "Agent card has no 'url' field", "state": "failed"}
+
+    # If no skill_id supplied, use the first available skill
+    available_skills = [s["id"] for s in card.get("skills", [])]
+    if not skill_id:
+        if not available_skills:
+            return {"error": "Remote agent exposes no skills", "state": "failed"}
+        skill_id = available_skills[0]
+        logger.info("A2A Agent Call: no skillId configured, using first skill '%s'", skill_id)
+    elif skill_id not in available_skills:
+        return {
+            "error": f"Skill '{skill_id}' not found on remote agent. Available: {available_skills}",
+            "state": "failed",
+        }
+
+    # Carry the session_id across if one exists in the current context
+    session_id = str(context.get("trigger", {}).get("session_id", uuid.uuid4()))
+
+    # 2. Send task
+    try:
+        task = send_task(
+            agent_url=agent_url,
+            skill_id=skill_id,
+            message=message,
+            api_key=api_key,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        logger.error("A2A Agent Call: tasks/send failed: %s", exc)
+        return {"error": f"tasks/send failed: {exc}", "state": "failed"}
+
+    task_id = task["id"]
+    initial_state = task["status"]["state"]
+    logger.info(
+        "A2A Agent Call: task submitted id=%s state=%s agent=%s",
+        task_id, initial_state, agent_url,
+    )
+
+    # 3. Poll until terminal state
+    try:
+        final_task = poll_until_done(
+            agent_url=agent_url,
+            task_id=task_id,
+            api_key=api_key,
+            timeout_seconds=timeout,
+        )
+    except TimeoutError as exc:
+        logger.error("A2A Agent Call: polling timed out: %s", exc)
+        return {
+            "error": str(exc),
+            "state": "timeout",
+            "task_id": task_id,
+        }
+    except Exception as exc:
+        logger.error("A2A Agent Call: polling failed: %s", exc)
+        return {"error": f"Polling failed: {exc}", "state": "failed", "task_id": task_id}
+
+    final_state = final_task["status"]["state"]
+
+    # 4. Extract response text
+    response_text = extract_response_text(final_task)
+
+    logger.info(
+        "A2A Agent Call: completed task=%s state=%s response_len=%d",
+        task_id, final_state, len(response_text),
+    )
+
+    return {
+        "task_id":  task_id,
+        "state":    final_state,
+        "response": response_text,
+        "skill_id": skill_id,
+        "agent":    card.get("name", agent_url),
+        "task":     final_task,
     }
 

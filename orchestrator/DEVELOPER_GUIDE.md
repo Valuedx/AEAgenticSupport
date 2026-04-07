@@ -1,11 +1,13 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
+> - **V0.9.12 (2026-04-07):** **§25** — A2A (Agent-to-Agent) protocol. Per-tenant agent card (`GET /tenants/{id}/.well-known/agent.json`), JSON-RPC 2.0 dispatcher (`POST /tenants/{id}/a2a`) with `tasks/send`, `tasks/get`, `tasks/cancel`, `tasks/sendSubscribe`. Outbound **A2A Agent Call** node delegates tasks to remote A2A agents. Inbound key management (`POST/GET/DELETE /api/v1/a2a/keys`). Workflow publish toggle (`PATCH /api/v1/workflows/{id}/publish`). New `A2AApiKey` model, `is_published` on `WorkflowDefinition`. Alembic migration `0007_a2a_support.py`. `WorkflowInstance` status → A2A task state mapping (`suspended` → `input-required`).
+>
 > - **V0.9.11 (2026-03-22):** **§24** — operator pause / cancel / resume (`cancel_requested`, `pause_requested`, migrations `0005`/`0006`); **§4** clarified HITL `suspended` vs operator `paused`; **§21** SSE terminal statuses. **§23** — Bridge User Reply + `displayName` pointers (V0.9.10).
 >
 > - **Earlier sections:** Custom nodes (§1), `safe_eval` (§2), ReAct (§3), ForEach / retry / HITL (§4), vault (§5), conversational memory (§6), through Loop node (§22).
 
-**Version:** 0.9.11
-**Last updated:** 2026-03-22
+**Version:** 0.9.12
+**Last updated:** 2026-04-07
 
 Welcome to the Developer Guide! 🚀 
 
@@ -1174,3 +1176,188 @@ These controls are **cooperative**: the runner observes flags **between nodes** 
 
 - `TECHNICAL_BLUEPRINT.md` §4.5 (API table), §5.2 (`WorkflowInstance` columns), §6.11 (full semantics)
 - `HOW_IT_WORKS.md` — Step 6 (Execution), Pause / Stop / Resume subsection
+
+---
+
+## 🔗 25. A2A Protocol — Agent-to-Agent Communication (V0.9.12)
+
+The orchestrator now speaks the **Google A2A protocol v0.2**, letting external agents discover and invoke your published workflows — and letting DAG nodes call out to remote A2A-capable agents.
+
+---
+
+### 25.1 What A2A Gives You
+
+| Before (V0.9.11) | After (V0.9.12) |
+|---|---|
+| External agents call raw `POST /execute` (fire-and-forget) | Structured `tasks/send` → poll `tasks/get` → receive `completed` with artifacts |
+| No way for the caller to know if the workflow is waiting on a human | `suspended` maps to `input-required` — the caller knows to wait |
+| Cross-DAG calls require hand-wired HTTP Request nodes | **A2A Agent Call** node handles discovery, auth, polling, and result injection |
+| No discovery — caller must know the workflow UUID | `GET /.well-known/agent.json` lists all published workflows as named skills |
+
+---
+
+### 25.2 Inbound A2A — Making Your Workflow Callable
+
+**Step 1: Publish the workflow**
+
+```
+PATCH /api/v1/workflows/{workflow_id}/publish
+Body: {"is_published": true}
+```
+
+This flips `WorkflowDefinition.is_published = True`. The workflow now appears as a **skill** in the tenant's agent card.
+
+**Step 2: Issue an API key to the external agent**
+
+```
+POST /api/v1/a2a/keys
+Body: {"label": "teams-bot"}
+
+← {"id": "...", "label": "teams-bot", "raw_key": "abc123...", "created_at": "..."}
+```
+
+The `raw_key` is shown **exactly once** and never stored. Hand it to the external agent. It lives in their vault as `Bearer abc123...` on all A2A requests to this tenant.
+
+**Step 3: External agent discovers the tenant's skills**
+
+```
+GET /tenants/{tenant_id}/.well-known/agent.json
+(no auth required — this is a public discovery endpoint)
+```
+
+Returns:
+```json
+{
+  "name": "AE Orchestrator — acme",
+  "url": "https://orch.example.com/tenants/acme/a2a",
+  "capabilities": {"streaming": true},
+  "skills": [
+    {"id": "wf-uuid-1", "name": "Server Diagnostics", "description": "..."}
+  ]
+}
+```
+
+**Step 4: External agent sends a task**
+
+```
+POST /tenants/{tenant_id}/a2a
+Authorization: Bearer abc123...
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tasks/send",
+  "params": {
+    "skillId": "wf-uuid-1",
+    "sessionId": "thread-abc",
+    "message": {"role": "user", "parts": [{"text": "Server us-east-1 is down"}]}
+  }
+}
+```
+
+Returns immediately with a `Task` object (`state: submitted`). The external agent then polls `tasks/get` or uses `tasks/sendSubscribe` for streaming updates.
+
+**Status mapping** — `WorkflowInstance.status` → A2A `state`:
+
+| Instance status | A2A state | Notes |
+|---|---|---|
+| `queued` | `submitted` | |
+| `running` | `working` | |
+| `completed` | `completed` | Final response in `artifacts[0]` |
+| `suspended` | `input-required` | Human Approval node waiting — approval message surfaced in `status.message` |
+| `failed` | `failed` | |
+| `cancelled` | `canceled` | |
+
+---
+
+### 25.3 Outbound A2A — Calling Remote Agents from a DAG
+
+Drop an **A2A Agent Call** node onto the canvas.
+
+| Config field | What to put | Example |
+|---|---|---|
+| `agentCardUrl` | Full URL to the remote agent's discovery doc | `https://other.example.com/tenants/acme/.well-known/agent.json` |
+| `skillId` | Skill ID from the agent card (leave blank for first skill) | `wf-uuid-1` |
+| `messageExpression` | safe_eval expression for the message text | `node_2.response` or `trigger.message` |
+| `apiKeySecret` | Vault reference to the remote agent's A2A key | `{{ env.REMOTE_AGENT_KEY }}` |
+| `timeoutSeconds` | Max seconds to wait for the task to complete | `300` |
+
+The node returns:
+
+```json
+{
+  "task_id": "...",
+  "state": "completed",
+  "response": "The server was restarted successfully.",
+  "skill_id": "wf-uuid-1",
+  "agent": "AE Orchestrator — partner-org",
+  "task": { ... full A2A Task object ... }
+}
+```
+
+Downstream nodes access the response via `node_X.response` in Condition or systemPrompt fields.
+
+> **Error handling:** If the remote agent is unreachable, the task times out, or it returns `failed`, the node returns `{"state": "failed"|"timeout", "error": "..."}`. Wire a Condition node on `node_X.state == "completed"` to handle the failure path.
+
+---
+
+### 25.4 Key Management
+
+```
+# Create — raw key shown once, store in the external agent's vault
+POST /api/v1/a2a/keys           {"label": "teams-bot"}
+
+# List — safe summary, no key material
+GET  /api/v1/a2a/keys
+
+# Revoke — external agents using this key get 401 immediately
+DELETE /api/v1/a2a/keys/{key_id}
+```
+
+Keys use the existing `get_tenant_id` auth dependency — your normal API credentials manage them. Only the SHA-256 hash is stored in `a2a_api_keys`.
+
+---
+
+### 25.5 Streaming — `tasks/sendSubscribe`
+
+For real-time updates, external agents can use `tasks/sendSubscribe` instead of `tasks/send`. It creates the instance and immediately starts an SSE stream of A2A-formatted events:
+
+```
+event: task
+data: {"id": "...", "status": {"state": "submitted", ...}}
+
+event: task
+data: {"id": "...", "status": {"state": "working", ...}}
+
+event: task
+data: {"id": "...", "status": {"state": "completed", ...}}
+
+event: artifact
+data: {"id": "...", "artifact": {"parts": [{"text": "Final answer here"}]}}
+```
+
+The stream closes automatically when the task reaches a terminal state.
+
+---
+
+### 25.6 Files Added / Changed
+
+| File | Change |
+|---|---|
+| `backend/app/api/a2a.py` | New — agent card, JSON-RPC dispatcher, key CRUD, publish endpoint |
+| `backend/app/engine/a2a_client.py` | New — `fetch_agent_card`, `send_task`, `poll_until_done`, `extract_response_text` |
+| `backend/alembic/versions/0007_a2a_support.py` | New — `is_published` column + `a2a_api_keys` table |
+| `backend/app/models/workflow.py` | `is_published` on `WorkflowDefinition` + `A2AApiKey` ORM model |
+| `backend/app/engine/node_handlers.py` | `_handle_a2a_call` + dispatch line |
+| `backend/app/api/schemas.py` | A2A Pydantic models + `WorkflowPublishRequest` |
+| `shared/node_registry.json` | `a2a_call` action node |
+| `backend/main.py` | `a2a_router` registered, version → `0.9.2` |
+
+**Run migration:** `alembic upgrade head`
+
+**Add expression autocomplete for the new node** — open `frontend/src/lib/expressionVariables.ts` and add:
+
+```ts
+"A2A Agent Call": ["task_id", "state", "response", "agent", "skill_id"],
+```
