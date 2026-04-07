@@ -443,6 +443,57 @@ def get_allowed_workflows(user_id: str, org_code: str = "") -> set[str]:
     }
 
 
+def get_user_accessible_workflow_names(
+    user_id: str,
+    org_code: str = "",
+    *,
+    require_execute: bool = False,
+    limit: int = 15,
+) -> list[str]:
+    """Return a sorted list of workflow *names* the user is allowed to access.
+
+    Used to build helpful denial messages that show what the user *can* do.
+    """
+    pairs = _get_allowed_workflow_pairs(
+        user_id,
+        _normalize_org_code(org_code),
+        require_execute=require_execute,
+    )
+    if not pairs:
+        return []
+
+    wf_ids = [wf_id for wf_id, _ in pairs]
+    if not wf_ids:
+        return []
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                placeholders = ",".join(["%s"] * len(wf_ids))
+                cur.execute(
+                    f"""
+                    SELECT DISTINCT workflow_name
+                    FROM workflow_catalog
+                    WHERE workflow_id IN ({placeholders})
+                      AND active = TRUE
+                    ORDER BY workflow_name
+                    """,
+                    tuple(wf_ids),
+                )
+                names = [
+                    _normalize_text(row[0])
+                    for row in cur.fetchall()
+                    if row and row[0]
+                ]
+                return names[:limit]
+    except Exception as exc:
+        logger.warning(
+            "get_user_accessible_workflow_names failed for user_id=%r: %s",
+            user_id, exc,
+        )
+        return []
+
+
 def can_view_workflow(user_id: str, workflow_id: str, org_code: str = "") -> bool:
     clean_user_id = _normalize_text(user_id)
     clean_workflow_id = _normalize_text(workflow_id)

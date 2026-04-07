@@ -11,6 +11,7 @@ from security.workflow_access import (
     can_execute_workflow,
     can_view_workflow,
     default_org_code,
+    get_user_accessible_workflow_names,
     is_execute_enforced,
     is_read_enforced,
 )
@@ -20,9 +21,36 @@ from tools.registry import tool_registry
 logger = logging.getLogger("ops_agent.tools.status")
 
 
-def _workflow_access_denied_message(workflow_name: str = "") -> str:
-    target = f"workflow '{workflow_name}'" if workflow_name else "workflow"
-    return f"You are not authorized to access {target}, or it is not available in your scope."
+def _workflow_access_denied_message(
+    workflow_name: str = "",
+    user_id: str = "",
+    org_code: str = "",
+    *,
+    action: str = "view",
+) -> str:
+    """Build a user-friendly denial message with a list of accessible workflows."""
+    friendly_name = workflow_name or "this workflow"
+    require_exec = action in ("trigger", "execute", "run")
+    available = []
+    if user_id:
+        try:
+            available = get_user_accessible_workflow_names(
+                user_id, org_code, require_execute=require_exec, limit=15,
+            )
+        except Exception:
+            pass
+
+    if available:
+        wf_list = "\n".join(f"  \u2022 `{n}`" for n in available)
+        return (
+            f"I’m unable to {action} **{friendly_name}** with the workflow access currently assigned to your account.\n\n"
+            f"The workflows currently available to your account are:\n{wf_list}\n\n"
+            "Please choose one from this list, or ask an AutomationEdge administrator to review your workflow access."
+        )
+    return (
+        f"I’m unable to {action} **{friendly_name}** because no eligible workflow access is currently available for your account.\n\n"
+        "Please contact an AutomationEdge administrator to review and update your workflow permissions."
+    )
 
 
 def _is_visible_workflow_record(client, record: dict, user_id: str, org_code: str) -> bool:
@@ -266,6 +294,19 @@ def _run_related_health_check(
         except Exception as exc:
             logger.warning("Health check workflow id lookup failed for %s: %s", workflow_name, exc)
 
+    # Pick a running agent so AE dispatches to the right one
+    _picked_agent_id = ""
+    _picked_agent_name = ""
+    try:
+        wf_assigned = _get_assigned_agents_for_workflow(client, workflow_name)
+        for a in (wf_assigned or []):
+            if str(a.get("agentState") or "").upper() in {"RUNNING", "CONNECTED", "ACTIVE"}:
+                _picked_agent_id = str(a.get("id") or a.get("agentId") or a.get("uuid") or "")
+                _picked_agent_name = str(a.get("agentName") or a.get("name") or "")
+                break
+    except Exception:
+        pass
+
     raw = client.execute_workflow(
         workflow_name=workflow_name,
         workflow_id=workflow_id or workflow_name,
@@ -274,6 +315,8 @@ def _run_related_health_check(
         user_id="",
         source="ops-agent-related-health-check",
         mail_subject="null",
+        agent_id=_picked_agent_id,
+        agent_name=_picked_agent_name,
     )
     request_id = (
         raw.get("automationRequestId")
@@ -388,7 +431,9 @@ def check_workflow_status(
                 return {
                     "workflow_name": query_name,
                     "status": "UNAUTHORIZED",
-                    "message": _workflow_access_denied_message(),
+                    "message": _workflow_access_denied_message(
+                        query_name, user_id=user_id, org_code=org_code, action="view",
+                    ),
                 }
         except Exception as exc:
             logger.warning(f"Direct request ID lookup failed for {query_name}: {exc}")
@@ -418,7 +463,9 @@ def check_workflow_status(
             return {
                 "workflow_name": query_name,
                 "status": "UNAUTHORIZED",
-                "message": _workflow_access_denied_message(query_name),
+                "message": _workflow_access_denied_message(
+                    query_name, user_id=user_id, org_code=org_code, action="view",
+                ),
             }
             
     name_to_check = resolved_name or query_name
@@ -942,7 +989,10 @@ def t4_execute_and_poll(
         if not user_id or not resolved_workflow_id or not can_execute_workflow(user_id, resolved_workflow_id, resolved_org):
             return {
                 "success": False,
-                "error": _workflow_access_denied_message(resolved_name or workflow_name),
+                "error": _workflow_access_denied_message(
+                    resolved_name or workflow_name,
+                    user_id=user_id, org_code=resolved_org, action="trigger",
+                ),
             }
     
     # AE-77: Check for "File" type parameters. File upload is not supported in agentic chat yet.
@@ -987,6 +1037,18 @@ def t4_execute_and_poll(
         }
 
     # Execute via the updated client method (handles payload format + query params automatically)
+    # Pick a running agent so AE dispatches to the right one
+    _picked_agent_id = ""
+    _picked_agent_name = ""
+    try:
+        wf_assigned = _get_assigned_agents_for_workflow(client, resolved_name)
+        for a in (wf_assigned or []):
+            if str(a.get("agentState") or "").upper() in {"RUNNING", "CONNECTED", "ACTIVE"}:
+                _picked_agent_id = str(a.get("id") or a.get("agentId") or a.get("uuid") or "")
+                _picked_agent_name = str(a.get("agentName") or a.get("name") or "")
+                break
+    except Exception:
+        pass
     try:
         execute_resp = client.execute_workflow(
             workflow_name=resolved_name,
@@ -994,7 +1056,9 @@ def t4_execute_and_poll(
             params=params,
             org_code=resolved_org,
             user_id=user_id,
-            source="ae-agentic-support-status-check"
+            source="ae-agentic-support-status-check",
+            agent_id=_picked_agent_id,
+            agent_name=_picked_agent_name,
         )
     except Exception as exc:
         logger.error("T4 execute failed: %s", exc)

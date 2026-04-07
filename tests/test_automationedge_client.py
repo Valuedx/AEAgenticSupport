@@ -77,6 +77,89 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertEqual(calls["auth"], 1)
         client.close()
 
+    def test_authenticate_uses_rest_prefix_query_params_and_session_token_fallback(self):
+        seen = {}
+
+        def handler(request: httpx.Request):
+            if request.url.path == "/aeengine/rest/authenticate":
+                seen["method"] = request.method
+                seen["path"] = request.url.path
+                seen["username"] = request.url.params.get("username")
+                seen["password"] = request.url.params.get("password")
+                seen["ep"] = request.url.params.get("ep")
+                return httpx.Response(200, json={"sessionToken": "sess-123"})
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+        token = client.authenticate()
+
+        self.assertEqual(token, "sess-123")
+        self.assertEqual(seen["method"], "POST")
+        self.assertEqual(seen["path"], "/aeengine/rest/authenticate")
+        self.assertEqual(seen["username"], "user1")
+        self.assertEqual(seen["password"], "pass1")
+        self.assertEqual(seen["ep"], "true")
+        client.close()
+
+    def test_authenticate_retries_other_request_shapes_after_server_error(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            if request.url.path != "/aeengine/rest/authenticate":
+                return httpx.Response(404, json={})
+
+            calls.append(dict(request.url.params))
+            if request.url.params.get("ep") == "true":
+                return httpx.Response(500, json={"message": "decrypt failed"})
+            return httpx.Response(200, json={"sessionToken": "sess-456"})
+
+        client = self._client_with_transport(handler)
+        token = client.authenticate()
+
+        self.assertEqual(token, "sess-456")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].get("ep"), "true")
+        self.assertIsNone(calls[1].get("ep"))
+        client.close()
+
+    def test_resolve_cached_workflow_name_accepts_numeric_workflow_id(self):
+        class _Cursor:
+            def __init__(self):
+                self._rows = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql, params):
+                normalized = " ".join(str(sql).split())
+                if "WHERE workflow_id = %s" in normalized:
+                    self._rows = [("1439", "TEBT_Workflow", "ORG1")]
+                else:
+                    self._rows = []
+
+            def fetchall(self):
+                return list(self._rows)
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def cursor(self):
+                return _Cursor()
+
+        client = self._client_with_transport(lambda request: httpx.Response(404, json={}))
+        with patch("config.db.get_conn", return_value=_Conn()):
+            resolved = client.resolve_cached_workflow_name("1439")
+
+        self.assertEqual(resolved, "TEBT_Workflow")
+        client.close()
+
     def test_authorized_request_retries_once_on_401(self):
         calls = {"auth": 0, "workflows": 0}
 
@@ -240,6 +323,65 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertEqual(workflows[0]["name"], "WF-POST")
         self.assertEqual(calls["get"], 1)
         self.assertEqual(calls["post"], 1)
+        client.close()
+
+    def test_resolve_cached_workflow_name_falls_back_to_live_workflow_list_when_cache_misses(self):
+        client = self._client_with_transport(lambda request: httpx.Response(404, json={}))
+
+        with patch("config.db.get_conn", side_effect=RuntimeError("db unavailable")), \
+             patch.object(
+                 client,
+                 "list_workflows",
+                 return_value=[
+                     {
+                         "id": "1440",
+                         "name": "Cashier Receipting Report Download -MG22P1W25",
+                         "orgCode": "ORG1",
+                     }
+                 ],
+             ), \
+             patch.object(client, "sync_workflow_catalog", return_value=1) as mock_sync:
+            resolved = client.resolve_cached_workflow_name(
+                "Cashier Receipting Report Download -MG22P1W25"
+            )
+
+        self.assertEqual(resolved, "Cashier Receipting Report Download -MG22P1W25")
+        mock_sync.assert_called_once()
+        client.close()
+
+    def test_get_cached_workflow_info_falls_back_to_live_workflow_details_when_cache_misses(self):
+        client = self._client_with_transport(lambda request: httpx.Response(404, json={}))
+
+        with patch("config.db.get_conn", side_effect=RuntimeError("db unavailable")), \
+             patch.object(
+                 client,
+                 "list_workflows",
+                 return_value=[
+                     {
+                         "id": "1440",
+                         "name": "Cashier Receipting Report Download -MG22P1W25",
+                         "orgCode": "ORG1",
+                     }
+                 ],
+             ), \
+             patch.object(
+                 client,
+                 "get_workflow_details",
+                 return_value={
+                     "id": "1440",
+                     "name": "Cashier Receipting Report Download -MG22P1W25",
+                     "configurationParameters": [
+                         {"name": "batch_id", "type": "String", "optional": False}
+                     ],
+                 },
+             ), \
+             patch.object(client, "sync_workflow_catalog", return_value=1):
+            workflow_id, params = client.get_cached_workflow_info(
+                "Cashier Receipting Report Download -MG22P1W25"
+            )
+
+        self.assertEqual(workflow_id, "1440")
+        self.assertEqual(params, [{"name": "batch_id", "type": "String", "optional": False}])
         client.close()
 
     def test_get_workflow_latest_instance_uses_modern_status_endpoint(self):

@@ -1,1 +1,0 @@
-This folder will contain migration scripts to be applied on custom database

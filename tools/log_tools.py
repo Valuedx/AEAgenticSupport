@@ -316,6 +316,50 @@ def get_execution_logs(execution_id: str, tail: int = 0, user_id: str = "", org_
                     if agent_id == str(agent_name) or resolved_name.lower() == str(agent_name).lower():
                         state = str(agent.get("agentState") or agent.get("state") or "UNKNOWN").upper()
                         if state not in ("CONNECTED", "RUNNING", "ACTIVE"):
+                            # The execution's specific agent is offline.
+                            # Before blocking, check if ANY other agent assigned
+                            # to this workflow is running (multi-agent support).
+                            if workflow_name:
+                                try:
+                                    wf_agents = (
+                                        client.get_workflow_agents()
+                                        if hasattr(client, "get_workflow_agents")
+                                        else []
+                                    )
+                                    normalized_wf = workflow_name.strip().lower()
+                                    for entry in (wf_agents or []):
+                                        wf_meta = entry.get("workflow") or entry.get("workflowConfiguration") or {}
+                                        candidate = str(
+                                            wf_meta.get("name") or entry.get("workflowName") or ""
+                                        ).strip().lower()
+                                        if candidate == normalized_wf:
+                                            assigned = entry.get("agents") or []
+                                            any_running = any(
+                                                str(a.get("agentState") or "").upper()
+                                                in {"RUNNING", "CONNECTED", "ACTIVE"}
+                                                for a in assigned
+                                                if isinstance(a, dict)
+                                            )
+                                            if any_running:
+                                                logger.info(
+                                                    "Agent guard: execution agent %s is %s but another "
+                                                    "agent assigned to workflow %s is running — allowing log access.",
+                                                    resolved_name, state, workflow_name,
+                                                )
+                                                break
+                                    else:
+                                        # No workflow match found or no running agents
+                                        # in the workflow mapping — fall through to block.
+                                        pass
+                                    # If we broke out (any_running), skip the block
+                                    if any_running:
+                                        break
+                                except Exception as wf_exc:
+                                    logger.warning(
+                                        "Multi-agent workflow check failed for %s: %s",
+                                        workflow_name, wf_exc,
+                                    )
+
                             logger.info(
                                 "Agent guard blocked log access: agent=%s state=%s request=%s",
                                 resolved_name,
@@ -428,6 +472,13 @@ def get_execution_logs(execution_id: str, tail: int = 0, user_id: str = "", org_
     error_blocks = extract_error_blocks(normalized_logs, context_lines=50)
     error_groups = _group_error_blocks(error_blocks)
 
+    # ── Truncation constants ──
+    # Cap the payload sent back as a function_response to avoid hitting
+    # Vertex AI token / quota limits (429 RESOURCE_EXHAUSTED).
+    _MAX_ERROR_BLOCKS = 5        # most-relevant blocks only
+    _MAX_LINES_PER_BLOCK = 20   # enough context without bloating
+    _MAX_TAIL_LINES = 50        # for the no-errors path
+
     if error_blocks:
         report = _build_execution_log_report(
             execution_id=execution_id,
@@ -437,11 +488,23 @@ def get_execution_logs(execution_id: str, tail: int = 0, user_id: str = "", org_
             error_blocks=error_blocks,
             error_groups=error_groups,
         )
+
+        # Truncate error blocks for the LLM payload
+        truncated_blocks = []
+        for block in error_blocks[:_MAX_ERROR_BLOCKS]:
+            truncated_block = dict(block)
+            lines = truncated_block.get("lines", [])
+            if len(lines) > _MAX_LINES_PER_BLOCK:
+                truncated_block["lines"] = lines[:_MAX_LINES_PER_BLOCK]
+                truncated_block["lines_truncated"] = True
+                truncated_block["original_line_count"] = len(lines)
+            truncated_blocks.append(truncated_block)
+
         return {
             "success": True,
             "execution_id": execution_id,
             "workflow_name": workflow_name,
-            "logs": normalized_logs,
+            # Omit raw "logs" — the report + error_blocks have the analysis.
             "log_count": len(normalized_logs),
             "note": note,
             "scan_mode": "full_log" if tail == 0 else "tail_scan",
@@ -449,13 +512,15 @@ def get_execution_logs(execution_id: str, tail: int = 0, user_id: str = "", org_
             "error_block_count": len(error_blocks),
             "distinct_error_count": len(error_groups),
             "error_groups": error_groups,
-            "error_blocks": error_blocks,
-            "primary_error": error_blocks[0],
-            "latest_error": error_blocks[-1],
+            "error_blocks": truncated_blocks,
+            "blocks_truncated": len(error_blocks) > _MAX_ERROR_BLOCKS,
+            "total_error_blocks": len(error_blocks),
+            "primary_error": truncated_blocks[0],
+            "latest_error": truncated_blocks[-1],
             "report": report,
         }
 
-    tail_logs = normalized_logs[-100:] if len(normalized_logs) > 100 else normalized_logs
+    tail_logs = normalized_logs[-_MAX_TAIL_LINES:] if len(normalized_logs) > _MAX_TAIL_LINES else normalized_logs
     return {
         "success": True,
         "execution_id": execution_id,

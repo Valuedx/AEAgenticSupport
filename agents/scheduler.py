@@ -282,6 +282,51 @@ def workflow_access_sync_handler(**kwargs) -> TaskResult:
         return TaskResult(success=False, message=f"Workflow access sync error: {exc}")
 
 
+def workflow_catalog_sync_handler(**kwargs) -> TaskResult:
+    """Periodic sync of AE workflow catalog → DB + RAG embeddings.
+
+    Fetches the latest workflow list from the AE server, upserts into
+    workflow_catalog (Postgres), re-indexes into RAG for semantic search,
+    and reloads dynamic tool definitions so newly added workflows are
+    immediately available without a server restart.
+    """
+    try:
+        from tools.automationedge_client import get_automationedge_client
+        from tools.registry import tool_registry
+
+        client = get_automationedge_client()
+
+        # 1. Sync workflow catalog to DB + RAG embeddings
+        sync_result = client.sync_and_index_workflows()
+        db_synced = sync_result.get("db_synced", 0)
+        rag_indexed = sync_result.get("rag_indexed", 0)
+
+        # 2. Reload dynamic tool definitions from the updated catalog
+        reload_result = tool_registry.reload_automationedge_tools()
+        registered = reload_result.get("registered", 0)
+        removed = reload_result.get("removed", 0)
+
+        message = (
+            f"Workflow catalog sync complete: "
+            f"{db_synced} synced to DB, {rag_indexed} indexed to RAG, "
+            f"{registered} tools registered, {removed} removed."
+        )
+        logger.info(message)
+        return TaskResult(
+            success=True,
+            message=message,
+            data={
+                "db_synced": db_synced,
+                "rag_indexed": rag_indexed,
+                "tools_registered": registered,
+                "tools_removed": removed,
+            },
+        )
+    except Exception as exc:
+        logger.error("Workflow catalog sync failed: %s", exc)
+        return TaskResult(success=False, message=f"Workflow catalog sync error: {exc}")
+
+
 # ── Handler registry ─────────────────────────────────────────────────
 
 _BUILTIN_HANDLERS: dict[str, Callable[..., TaskResult]] = {
@@ -289,6 +334,7 @@ _BUILTIN_HANDLERS: dict[str, Callable[..., TaskResult]] = {
     "workflow_monitor": workflow_monitor_handler,
     "daily_summary": daily_summary_handler,
     "workflow_access_sync": workflow_access_sync_handler,
+    "workflow_catalog_sync": workflow_catalog_sync_handler,
 }
 
 _HANDLER_SUMMARIES: dict[str, str] = {
@@ -296,6 +342,7 @@ _HANDLER_SUMMARIES: dict[str, str] = {
     "workflow_monitor": "Watches a defined list of workflows for failures or stuck states.",
     "daily_summary": "Creates a daily plain-language operations summary for stakeholders.",
     "workflow_access_sync": "Refreshes user-to-workflow grants from AutomationEdge and removes stale access.",
+    "workflow_catalog_sync": "Fetches new/updated workflows from AE, syncs to DB and RAG embeddings, reloads tools.",
     "session_cleanup": "Removes stale conversation state after the configured retention period.",
 }
 
@@ -756,6 +803,19 @@ def setup_default_tasks(scheduler: AgentScheduler | None = None) -> None:
         handler_name="workflow_access_sync",
         handler_args={"dry_run": False},
         enabled=bool(CONFIG.get("WF_ACCESS_ENABLE_SCHEDULED_SYNC", False)),
+        is_system=True,
+    ))
+
+    # Workflow catalog sync — auto-detect new workflows from AE server
+    sched.add_task(ScheduledTask(
+        task_id="default-workflow-catalog-sync",
+        name="Workflow Catalog Sync",
+        description="Fetch new/updated workflows from AE, sync to DB + RAG embeddings",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=int(CONFIG.get("WF_CATALOG_SYNC_INTERVAL_SECONDS", 1800)),
+        handler_name="workflow_catalog_sync",
+        handler_args={},
+        enabled=bool(CONFIG.get("ENABLE_WF_CATALOG_SYNC", True)),
         is_system=True,
     ))
 

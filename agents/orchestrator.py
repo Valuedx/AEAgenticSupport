@@ -70,6 +70,79 @@ class Orchestrator:
         )
         return f"{tool_name} on {target}"
 
+    @staticmethod
+    def _collect_exception_messages(exc: BaseException) -> list[str]:
+        messages: list[str] = []
+        queue: list[BaseException] = [exc]
+        seen: set[int] = set()
+
+        while queue:
+            current = queue.pop(0)
+            ident = id(current)
+            if ident in seen:
+                continue
+            seen.add(ident)
+
+            text = str(current).strip()
+            if text:
+                messages.append(text)
+
+            for attr in ("__cause__", "__context__"):
+                nested = getattr(current, attr, None)
+                if isinstance(nested, BaseException):
+                    queue.append(nested)
+
+            last_attempt = getattr(current, "last_attempt", None)
+            if last_attempt is not None:
+                try:
+                    last_attempt.result()
+                except BaseException as nested:
+                    queue.append(nested)
+
+        return messages
+
+    @classmethod
+    def _is_rate_limit_error(cls, exc: BaseException) -> bool:
+        combined = " ".join(msg.lower() for msg in cls._collect_exception_messages(exc))
+        return any(token in combined for token in ("429", "resource_exhausted", "rate limit", "quota"))
+
+    @staticmethod
+    def _build_recent_tool_result_fallback_response(state: ConversationState) -> str:
+        for call in reversed(state.tool_call_log[-10:]):
+            result = call.get("result") or {}
+            if not isinstance(result, dict):
+                continue
+
+            report = str(result.get("report") or "").strip()
+            if len(report) > 40:
+                return report
+
+            message = str(result.get("message") or result.get("error") or "").strip()
+            if not message:
+                continue
+
+            details: list[str] = []
+            workflow_name = str(result.get("workflow_name") or "").strip()
+            request_id = str(
+                result.get("execution_id")
+                or result.get("request_id")
+                or ""
+            ).strip()
+            status = str(result.get("status") or result.get("state") or "").strip()
+
+            if workflow_name and workflow_name.lower() not in message.lower():
+                details.append(f"Workflow: `{workflow_name}`")
+            if request_id:
+                details.append(f"Request ID: `{request_id}`")
+            if status:
+                details.append(f"Status: {status}")
+
+            if details:
+                return f"{message}\n\n" + "\n".join(details)
+            return message
+
+        return ""
+
     def _log_pending_action_decision(
         self,
         state: ConversationState,
@@ -1532,6 +1605,20 @@ class Orchestrator:
             logger.error(f"Processing error: {e}", exc_info=True)
             state.is_agent_working = False
             state.phase = ConversationPhase.IDLE
+
+            if self._is_rate_limit_error(e):
+                fallback = self._build_recent_tool_result_fallback_response(state)
+                if fallback:
+                    return (
+                        f"{fallback}\n\n"
+                        "Note: the result above was retrieved successfully, but the final summarization step hit a temporary Vertex AI rate limit."
+                    )
+                return (
+                    "I'm currently experiencing API rate limits while processing "
+                    "the response. The data was retrieved successfully. "
+                    "Please try your request again in about a minute."
+                )
+
             return (
                 "I encountered an error during investigation. "
                 "The operations team has been notified."
@@ -3067,14 +3154,14 @@ CRITICAL RULES:
         suggestions: list[str] | None = None,
     ) -> str:
         lines = [
-            f"I couldn't match **{workflow_label or 'that request'}** to an exact workflow you can trigger.",
+            f"I’m unable to verify **{workflow_label or 'that request'}** as a workflow your account can trigger right now.",
             "",
-            "Please use the exact workflow name from your workflow list before I continue.",
+            "Please select the workflow from your authorized workflow list, or ask me to show the workflows currently available to your account.",
         ]
         if suggestions:
             lines.extend([
                 "",
-                "Here are a few workflows you can trigger:",
+                "Here are a few workflows currently available to your account:",
                 *[f"- {name}" for name in suggestions[:5]],
             ])
         return "\n".join(lines)

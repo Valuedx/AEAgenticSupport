@@ -144,66 +144,172 @@ class AutomationEdgeClient:
         endpoint_norm = self._normalize_path(endpoint)
         if endpoint_norm.startswith("http://") or endpoint_norm.startswith("https://"):
             return endpoint_norm
-        base = self._normalize_path(self.rest_base_path).rstrip("/")
-        if endpoint_norm.startswith(base + "/") or endpoint_norm == base:
+        
+        prefix = self.rest_base_path
+        if endpoint_norm.startswith(prefix):
             return endpoint_norm
-        return f"{base}{endpoint_norm}"
+        return f"{prefix}{endpoint_norm}"
 
-    def _json_or_text(self, response: httpx.Response) -> Any:
-        try:
-            return response.json()
-        except (ValueError, json.JSONDecodeError):
-            # If not JSON, check if it's binary/ZIP (common for T4 debug logs)
-            content_type = response.headers.get("Content-Type", "").lower()
-            if "zip" in content_type or "octet-stream" in content_type:
-                logger.info("Response is binary/ZIP, returning for manual extraction.")
-                return {"is_zip": True, "log_zip_content": response.content}
-            return {"raw": response.text}
+    def _auth_token_fields(self) -> list[str]:
+        fields: list[str] = []
+        seen: set[str] = set()
+        for field in (
+            self.token_field,
+            "sessionToken",
+            "session_token",
+            "token",
+            "sessionId",
+        ):
+            clean = str(field or "").strip()
+            if clean and clean not in seen:
+                seen.add(clean)
+                fields.append(clean)
+        return fields
+
+    def _extract_auth_token(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for field in self._auth_token_fields():
+            token = str(payload.get(field, "")).strip()
+            if token:
+                return token
+        return ""
+
+    def _auth_request_candidates(self) -> list[dict[str, Any]]:
+        credentials = {"username": self.username, "password": self.password}
+        headers = {"Accept": "application/json"}
+        rest_path = self._rest_path(self.auth_endpoint)
+        raw_path = self._normalize_path(self.auth_endpoint)
+        paths = [rest_path]
+        if raw_path != rest_path:
+            paths.append(raw_path)
+
+        candidates: list[dict[str, Any]] = []
+        for path in paths:
+            candidates.append(
+                {
+                    "path": path,
+                    "label": "query-params+ep",
+                    "params": {**credentials, "ep": "true"},
+                    "headers": headers,
+                }
+            )
+            candidates.append(
+                {
+                    "path": path,
+                    "label": "query-params",
+                    "params": credentials,
+                    "headers": headers,
+                }
+            )
+            candidates.append(
+                {
+                    "path": path,
+                    "label": "form-body+ep",
+                    "data": {**credentials, "ep": "true"},
+                    "headers": {
+                        **headers,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                }
+            )
+            candidates.append(
+                {
+                    "path": path,
+                    "label": "form-body",
+                    "data": credentials,
+                    "headers": {
+                        **headers,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                }
+            )
+            candidates.append(
+                {
+                    "path": path,
+                    "label": "json-body",
+                    "payload": credentials,
+                    "headers": headers,
+                }
+            )
+        return candidates
 
     def authenticate(self, force: bool = False) -> str:
-        """Authenticate against AE and cache session token.
-
-        T4 /authenticate expects username+password as QUERY PARAMS (not form body).
-        Ref: code_ref.py t4_authenticate()
-        """
-        if not self.use_session_auth:
-            return ""
+        """Authenticate with AE and cache a session token."""
+        if not force and self._is_token_valid():
+            return self._session_token
 
         with self._auth_lock:
+            # Double-check after acquiring lock
             if not force and self._is_token_valid():
                 return self._session_token
 
-            auth_path = self._rest_path(self.auth_endpoint)
-            # T4 uses query params for auth, not form data
-            response = self._client.post(
-                auth_path,
-                params={"username": self.username, "password": self.password},
-                headers={"Accept": "application/json"},
-            )
-            response.raise_for_status()
-            payload = self._json_or_text(response) or {}
-            token = str(payload.get(self.token_field, "")).strip()
-            if not token:
-                for alt_field in ("sessionToken", "session_token", "token", "sessionId"):
-                    candidate = str(payload.get(alt_field, "")).strip()
-                    if candidate:
-                        token = candidate
-                        break
-            if not token:
-                raise RuntimeError(
-                    f"AE authentication succeeded but '{self.token_field}' not found."
+            last_error: Optional[Exception] = None
+            checked_fields = ", ".join(self._auth_token_fields())
+            retryable_statuses = {
+                400, 401, 403, 404, 405, 415, 422, 429, 500, 501, 502, 503, 504
+            }
+
+            for attempt in self._auth_request_candidates():
+                logger.info(
+                    "Authenticating with AutomationEdge at %s (%s)",
+                    attempt["path"],
+                    attempt["label"],
                 )
-            self._session_token = token
-            ttl = max(self.token_ttl_seconds - 30, 30)
-            self._token_expiry = datetime.now(timezone.utc) + timedelta(seconds=ttl)
-            logger.info("AE authentication successful; session token cached.")
-            return token
+                try:
+                    response = self._client.post(
+                        attempt["path"],
+                        params=attempt.get("params"),
+                        data=attempt.get("data"),
+                        json=attempt.get("payload"),
+                        headers=attempt.get("headers"),
+                    )
+                    response.raise_for_status()
+                    data = self._json_or_text(response)
+                    token = self._extract_auth_token(data)
+                    if not token:
+                        raise RuntimeError(
+                            f"Auth failed: token field missing in response. Checked {checked_fields}"
+                        )
+
+                    self._session_token = token
+                    self._token_expiry = datetime.now(timezone.utc) + timedelta(
+                        seconds=self.token_ttl_seconds
+                    )
+                    logger.info(
+                        "AE Authentication successful. Token expires in %ds",
+                        self.token_ttl_seconds,
+                    )
+                    return self._session_token
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    if exc.response.status_code in retryable_statuses:
+                        logger.debug(
+                            "AE auth attempt failed with status %d for %s (%s)",
+                            exc.response.status_code,
+                            attempt["path"],
+                            attempt["label"],
+                        )
+                        continue
+                    logger.error("AE Authentication failed: %s", exc)
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    logger.debug(
+                        "AE auth attempt failed for %s (%s): %s",
+                        attempt["path"],
+                        attempt["label"],
+                        exc,
+                    )
+                    continue
+
+            if last_error is not None:
+                logger.error("AE Authentication failed: %s", last_error)
+                raise last_error
+            raise RuntimeError("AE Authentication failed: no auth request candidates were available")
 
     def _build_auth_headers(self, extra_headers: Optional[dict] = None) -> dict:
-        headers = {"Accept": "application/json"}
-        if extra_headers:
-            headers.update(extra_headers)
-
+        headers = (extra_headers or {}).copy()
         if self.use_session_auth:
             if not self._is_token_valid():
                 self.authenticate()
@@ -213,6 +319,12 @@ class AutomationEdgeClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
             headers.setdefault("Content-Type", "application/json")
         return headers
+
+    def _json_or_text(self, response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except Exception:
+            return response.text
 
     def _authorized_request(
         self,
@@ -337,7 +449,7 @@ class AutomationEdgeClient:
                 return response.text
             # Truncate non-JSON bodies
             body = "".join([response.text[i] for i in range(min(len(response.text), 200))])
-            if len(response.text) > 200:
+            if len(body) > 200:
                 body += "... [truncated]"
             return body
         except Exception:
@@ -570,6 +682,8 @@ class AutomationEdgeClient:
         user_id: str = "",
         source: str = "ae-agentic-support",
         mail_subject: str = "null",
+        agent_id: str = "",
+        agent_name: str = "",
         **extra_fields,
     ) -> dict:
         if not workflow_name:
@@ -594,6 +708,12 @@ class AutomationEdgeClient:
             "responseMailSubject": mail_subject or "null",
             "params": self._build_param_array(params or {}),
         }
+        # When a specific running agent is identified, include it so AE
+        # dispatches to that agent instead of picking an offline one.
+        if agent_id:
+            payload["agentId"] = str(agent_id)
+        if agent_name:
+            payload["agentName"] = str(agent_name)
         payload.update({k: v for k, v in extra_fields.items() if v is not None})
 
         endpoint = self.execute_endpoint.format(
@@ -728,18 +848,29 @@ class AutomationEdgeClient:
         user_id: str = "",
         org_code: str = "",
     ) -> str:
-        """Resolve workflow name from local catalog using safe exact-match variants."""
+        """Resolve workflow name from local catalog using safe variants and fuzzy fallbacks."""
+        import re
         name = str(workflow_name or "").strip()
         if not name:
             return ""
 
+        # 1. Build prioritized variants
+        # Primary: Original name (trimmed)
+        # Secondary: Name without "(ID: 1234)" suffix (common in UI lists)
+        # Tertiary: Underscore/Slug variants (legacy support)
         variants = []
+        variants.append(name)
+        
+        # Strip ID suffix if present: "My Workflow (ID: 101)" -> "My Workflow"
+        no_id = re.sub(r"\s*\(ID:\s*\d+\)\s*$", "", name, flags=re.IGNORECASE).strip()
+        if no_id and no_id != name:
+            variants.append(no_id)
+
+        # Slug/Underline variants for legacy shell-style matching
         base = name.replace("-", "_").replace(" ", "_").strip()
-        if base:
+        if base and base != name and base != no_id:
             variants.append(base)
-            if base.upper().startswith("WF_"):
-                variants.append("".join([base[i] for i in range(3, len(base))]) if len(base) > 3 else "")
-            else:
+            if not base.upper().startswith("WF_") and len(base) > 2:
                 variants.append(f"WF_{base}")
 
         seen = set()
@@ -752,45 +883,222 @@ class AutomationEdgeClient:
 
         if not ordered:
             return ""
+
         try:
             from config.db import get_conn
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    target_org = str(org_code or "").strip()
+
+                    if name.isdigit():
+                        sql_id = (
+                            "SELECT workflow_id, workflow_name, org_code "
+                            "FROM workflow_catalog WHERE workflow_id = %s"
+                        )
+                        id_params: list[Any] = [name]
+                        if target_org:
+                            sql_id += " AND org_code = %s"
+                            id_params.append(target_org)
+                        sql_id += " ORDER BY active DESC, fetched_at DESC"
+                        cur.execute(sql_id, tuple(id_params))
+                        for row in cur.fetchall():
+                            row_id = str(row[0]).strip()
+                            row_name = str(row[1]).strip()
+                            row_org = str(row[2]).strip()
+                            if user_id and not can_view_workflow(user_id, row_id, row_org or target_org):
+                                continue
+                            return row_name
+
+                    # Phase 1: Exact search across prioritized variants
                     placeholders = ",".join(["%s"] * len(ordered))
                     sql = (
                         "SELECT workflow_id, workflow_name, org_code "
                         f"FROM workflow_catalog WHERE lower(workflow_name) IN ({placeholders})"
                     )
                     params: list[Any] = [value.lower() for value in ordered]
-                    target_org = str(org_code or "").strip()
                     if target_org:
                         sql += " AND org_code = %s"
                         params.append(target_org)
+                    
                     sql += " ORDER BY active DESC, fetched_at DESC"
                     cur.execute(sql, tuple(params))
-                    rows = [
-                        (
-                            str(row[0]).strip() if row and row[0] else "",
-                            str(row[1]).strip() if row and row[1] else "",
-                            str(row[2]).strip() if row and len(row) > 2 and row[2] else "",
-                        )
-                        for row in cur.fetchall()
-                    ]
+                    rows = cur.fetchall()
+                    
+                    # Return first exact match found in variant order
                     for candidate in ordered:
-                        for workflow_id, resolved_name, resolved_org in rows:
-                            if resolved_name.lower() != candidate.lower():
+                        for row in rows:
+                            row_id = str(row[0]).strip()
+                            row_name = str(row[1]).strip()
+                            row_org = str(row[2]).strip()
+                            if row_name.lower() == candidate.lower():
+                                if user_id and not can_view_workflow(user_id, row_id, row_org or target_org):
+                                    continue
+                                return row_name
+
+                    # Phase 2: Partial/Contains fallback if no exact match
+                    # (Helpful for long names with trailing version codes or spaces)
+                    clean_query = re.sub(r"[^a-zA-Z0-9]", "%", no_id or name)
+                    if len(clean_query) > 3:
+                        sql_fuzzy = (
+                            "SELECT workflow_id, workflow_name, org_code "
+                            "FROM workflow_catalog WHERE lower(workflow_name) LIKE %s "
+                        )
+                        like_params: list[Any] = [f"%{clean_query.lower()}%"]
+                        if target_org:
+                            sql_fuzzy += " AND org_code = %s"
+                            like_params.append(target_org)
+                        
+                        sql_fuzzy += " ORDER BY length(workflow_name) ASC, active DESC LIMIT 5"
+                        cur.execute(sql_fuzzy, tuple(like_params))
+                        fuzzy_rows = cur.fetchall()
+                        for f_row in fuzzy_rows:
+                            f_id, f_name, f_org = str(f_row[0]), str(f_row[1]), str(f_row[2])
+                            if user_id and not can_view_workflow(user_id, f_id, f_org or target_org):
                                 continue
-                            if user_id and not can_view_workflow(user_id, workflow_id, resolved_org or target_org):
-                                continue
-                            return resolved_name
+                            logger.info(f"T4 Resolver: Fuzzy match '{name}' -> '{f_name}'")
+                            return f_name
+
             return ""
         except Exception as exc:
             logger.debug("T4: cached workflow name resolution failed for %s: %s", workflow_name, exc)
-            return ""
+        live_match = self._resolve_live_workflow_record(
+            name,
+            user_id=user_id,
+            org_code=org_code,
+            require_execute=False,
+            min_score=0.72,
+        )
+        if live_match:
+            live_name = str(
+                live_match.get("workflowName")
+                or live_match.get("name")
+                or ""
+            ).strip()
+            if live_name:
+                try:
+                    self.sync_workflow_catalog([live_match])
+                except Exception:
+                    pass
+                logger.info("T4 Resolver: Live match '%s' -> '%s'", name, live_name)
+                return live_name
+        return ""
+
+    @staticmethod
+    def _extract_workflow_params_from_payload(payload: Any) -> list[dict]:
+        if not isinstance(payload, dict):
+            return []
+        for key in ("parameters", "configurationParameters", "params"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [dict(item) for item in value if isinstance(item, dict)]
+        wf_cfg = payload.get("workflowConfiguration")
+        if isinstance(wf_cfg, dict):
+            for key in ("parameters", "configurationParameters", "params"):
+                value = wf_cfg.get(key)
+                if isinstance(value, list):
+                    return [dict(item) for item in value if isinstance(item, dict)]
+        return []
+
+    def _resolve_live_workflow_record(
+        self,
+        workflow_name: str,
+        *,
+        user_id: str = "",
+        org_code: str = "",
+        require_execute: bool = False,
+        min_score: float = 0.72,
+    ) -> Optional[dict]:
+        text = str(workflow_name or "").strip()
+        if not text:
+            return None
+
+        target_org = str(org_code or "").strip()
+        query_norm = self._normalize_workflow_lookup_text(text)
+        predicate = can_execute_workflow if require_execute else can_view_workflow
+
+        try:
+            workflows = self.list_workflows(page_size=200, all_pages=True)
+        except Exception as exc:
+            logger.debug("T4: live workflow lookup failed for %s: %s", workflow_name, exc)
+            return None
+
+        best_score = 0.0
+        best_match: Optional[dict] = None
+        for item in workflows:
+            if not isinstance(item, dict):
+                continue
+            candidate_name = str(
+                item.get("workflowName")
+                or item.get("name")
+                or ""
+            ).strip()
+            if not candidate_name:
+                continue
+            candidate_id = str(item.get("workflowId") or item.get("id") or "").strip()
+            candidate_org = str(
+                item.get("orgCode")
+                or item.get("org_code")
+                or self.default_org_code
+                or target_org
+            ).strip()
+            if target_org and candidate_org and candidate_org != target_org:
+                continue
+            if user_id and candidate_id and not predicate(user_id, candidate_id, candidate_org or target_org):
+                continue
+
+            if text.isdigit() and candidate_id == text:
+                return dict(item)
+
+            candidate_norm = self._normalize_workflow_lookup_text(candidate_name)
+            if candidate_name.lower() == text.lower() or (query_norm and candidate_norm == query_norm):
+                return dict(item)
+
+            score = self._workflow_match_score(text, candidate_name)
+            if score >= min_score and score > best_score:
+                best_score = score
+                best_match = dict(item)
+
+        return best_match
+
+    def _hydrate_live_workflow_record(self, workflow: dict) -> dict:
+        hydrated = dict(workflow or {})
+        params = self._extract_workflow_params_from_payload(hydrated)
+        if params:
+            hydrated["parameters"] = params
+            return hydrated
+
+        workflow_id = str(hydrated.get("workflowId") or hydrated.get("id") or "").strip()
+        workflow_name = str(hydrated.get("workflowName") or hydrated.get("name") or "").strip()
+        for identifier in (workflow_id, workflow_name):
+            if not identifier:
+                continue
+            try:
+                details = self.get_workflow_details(identifier)
+            except Exception:
+                continue
+            if not isinstance(details, dict):
+                continue
+            params = self._extract_workflow_params_from_payload(details)
+            if params:
+                hydrated["parameters"] = params
+            if not hydrated.get("workflowName") and details.get("workflowName"):
+                hydrated["workflowName"] = details.get("workflowName")
+            if not hydrated.get("name") and details.get("name"):
+                hydrated["name"] = details.get("name")
+            if not hydrated.get("description") and details.get("description"):
+                hydrated["description"] = details.get("description")
+            if "active" not in hydrated and "active" in details:
+                hydrated["active"] = details.get("active")
+            if hydrated.get("parameters"):
+                break
+        return hydrated
 
     @classmethod
     def _normalize_workflow_lookup_text(cls, text: str) -> str:
-        clean = str(text or "").strip().lower().replace("_", " ").replace("-", " ")
+        # Strip "(ID: 1234)" or similar suffixes before normalizing
+        import re
+        clean = re.sub(r"\s*\(ID:\s*\d+\)\s*", " ", str(text or ""), flags=re.IGNORECASE)
+        clean = clean.strip().lower().replace("_", " ").replace("-", " ")
         clean = re.sub(r"\bwf\s+", "", clean)
         clean = re.sub(r"[^a-z0-9\s]", " ", clean)
         clean = re.sub(r"\s+", " ", clean).strip()
@@ -2187,6 +2495,41 @@ class AutomationEdgeClient:
                             required_names.append(p_name)
                         
                         p_desc = p.get("description") or p.get("helpText") or ""
+
+                # Try to extract configured tool name for stable ID
+                mapping = extract_dynamic_tool_mapping(wf)
+                
+                # FALLBACK: If no explicit mapping, use raw metadata so it's still searchable
+                display_name = mapping.tool_name if mapping else wf_name
+                description = mapping.description if mapping else str(wf.get("description") or f"Execute workflow {wf_name}")
+                category = mapping.category if mapping else str(wf.get("category") or "automationedge")
+                tags = mapping.tags if mapping else (wf.get("tags") or [])
+                params = mapping.parameter_meta if mapping else (wf.get("parameters") or [])
+                active = mapping.active if mapping else bool(wf.get("active", True))
+                tier = mapping.tier if mapping else "medium_risk"
+
+                # Build rich content for semantic search
+                param_parts = []
+                required_names = []
+                for p in params:
+                    if isinstance(p, dict):
+                        p_name = p.get("name", "")
+                        disp = p.get("displayName") or p.get("displayname") or p.get("description")
+                        opt = p.get("optional")
+                        is_explicitly_optional = (
+                            opt is True or 
+                            (isinstance(opt, str) and str(opt).strip().lower() in {"true", "1", "yes", "y"}) or
+                            p.get("is_optional") is True or
+                            p.get("required") is False or
+                            p.get("is_required") is False
+                        )
+                        req = not is_explicitly_optional
+                        
+                        req_label = "[MANDATORY]" if req else "[Optional]"
+                        if req and p_name:
+                            required_names.append(p_name)
+                        
+                        p_desc = p.get("description") or p.get("helpText") or ""
                         label = f"{p_name} ({disp})" if disp and disp != p_name else p_name
                         
                         if p_name:
@@ -2204,8 +2547,8 @@ class AutomationEdgeClient:
                 if tags:
                     content += f"Tags: {', '.join(str(t) for t in tags)}\n\n"
 
-                # UNIFIED ID: tool-{tool_name} matches ToolDefinition.to_rag_document()
-                doc_id = f"tool-{display_name}"
+                # UNIFIED ID: tool-{workflow_name} as requested by user
+                doc_id = f"tool-{wf_name}"
                 # Cast to Any to avoid strict dict type mismatch on tags/metadata
                 docs.append(cast(Any, {
                     "id": doc_id,
@@ -2232,15 +2575,11 @@ class AutomationEdgeClient:
 
             rag = get_rag_engine()
             rag.index_documents(docs, collection="tools")
-            logger.info(
-                "T4: indexed %d workflows into RAG rag_documents(tools).", len(docs)
-            )
+            logger.info("T4: indexed %d workflows into RAG.", len(docs))
             return len(docs)
 
         except Exception as exc:
-            logger.warning(
-                "T4: workflow RAG indexing failed (non-fatal): %s", exc
-            )
+            logger.warning("T4: workflow RAG indexing failed: %s", exc)
             return 0
 
     def get_cached_workflow_parameters(self, workflow_name: str) -> list[dict]:
@@ -2263,7 +2602,7 @@ class AutomationEdgeClient:
             name = p.get("name")
             if not name:
                 continue
-                
+            
             # A parameter is REQUIRED unless it is explicitly marked as optional.
             # We look for 'optional': True, 'is_optional': True, or 'required': False.
             opt = p.get("optional")
@@ -2319,6 +2658,7 @@ class AutomationEdgeClient:
         if user_id and not resolved:
             return ("", [])
         lookup_name = resolved if resolved else name
+        target_org = str(org_code or "").strip()
 
         try:
             from config.db import get_conn
@@ -2329,7 +2669,6 @@ class AutomationEdgeClient:
                         "FROM workflow_catalog WHERE workflow_name = %s"
                     )
                     params: list[Any] = [lookup_name]
-                    target_org = str(org_code or "").strip()
                     if target_org:
                         sql += " AND org_code = %s"
                         params.append(target_org)
@@ -2342,10 +2681,36 @@ class AutomationEdgeClient:
                             continue
                         wf_params = list(row[1]) if row and row[1] else []
                         return (wf_id, wf_params)
-            return ("", [])
         except Exception as exc:
             logger.debug("T4: cached workflow info lookup failed for %s: %s", workflow_name, exc)
+
+        live_match = self._resolve_live_workflow_record(
+            lookup_name,
+            user_id=user_id,
+            org_code=org_code,
+            require_execute=False,
+            min_score=0.72,
+        )
+        if not live_match:
             return ("", [])
+
+        hydrated = self._hydrate_live_workflow_record(live_match)
+        try:
+            self.sync_workflow_catalog([hydrated])
+        except Exception:
+            pass
+
+        wf_id = str(hydrated.get("workflowId") or hydrated.get("id") or "").strip()
+        wf_org = str(
+            hydrated.get("orgCode")
+            or hydrated.get("org_code")
+            or target_org
+            or self.default_org_code
+        ).strip()
+        if user_id and wf_id and not can_view_workflow(user_id, wf_id, wf_org or target_org):
+            return ("", [])
+        wf_params = self._extract_workflow_params_from_payload(hydrated)
+        return (wf_id, wf_params)
 
     def sync_and_index_workflows(
         self,

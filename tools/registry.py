@@ -941,6 +941,19 @@ class ToolRegistry:
             user_id = str(payload_args.pop("userId", "") or payload_args.pop("user_id", ""))
             source = str(payload_args.pop("source", "ae-dynamic-tool"))
 
+            # Pick a running agent so AE dispatches to the right one
+            _picked_agent_id = ""
+            _picked_agent_name = ""
+            try:
+                wf_assigned = _get_assigned_agents_for_workflow(client, mapping.workflow_name)
+                for a in (wf_assigned or []):
+                    if str(a.get("agentState") or "").upper() in {"RUNNING", "CONNECTED", "ACTIVE"}:
+                        _picked_agent_id = str(a.get("id") or a.get("agentId") or a.get("uuid") or "")
+                        _picked_agent_name = str(a.get("agentName") or a.get("name") or "")
+                        break
+            except Exception:
+                pass
+
             raw = client.execute_workflow(
                 workflow_name=mapping.workflow_name,
                 workflow_id=workflow_id,
@@ -948,6 +961,8 @@ class ToolRegistry:
                 user_id=user_id,
                 source=source,
                 params=payload_args,
+                agent_id=_picked_agent_id,
+                agent_name=_picked_agent_name,
             )
 
             status = str(
