@@ -49,16 +49,38 @@ def index_mcp_tools():
     """Index all registered MCP/static tools into the 'tools' RAG collection."""
     logger.info("=== Indexing MCP / static tools ===")
     from rag.engine import get_rag_engine
+    from rag.document_processor import DocumentProcessor
     from tools.registry import tool_registry
+    import glob
 
     docs = tool_registry.get_all_rag_documents()
-    if not docs:
+    extra_docs = []
+    tool_doc_dir = os.path.join(PROJECT_ROOT, "rag", "data", "tool_docs")
+    if os.path.isdir(tool_doc_dir):
+        processor = DocumentProcessor()
+        for ext in ("*.pdf", "*.md", "*.json"):
+            for filepath in glob.glob(os.path.join(tool_doc_dir, "**", ext), recursive=True):
+                chunks = processor.process_file(filepath)
+                for chunk in chunks:
+                    extra_docs.append({
+                        "id": chunk.id,
+                        "content": chunk.content,
+                        "metadata": chunk.metadata,
+                    })
+
+    all_docs = docs + extra_docs
+    if not all_docs:
         logger.warning("No tool documents found in registry — is tool_registry populated?")
         return 0
 
-    get_rag_engine().index_documents(docs, collection="tools")
-    logger.info("  ✔ Indexed %d MCP / static tool documents.", len(docs))
-    return len(docs)
+    get_rag_engine().index_documents(all_docs, collection="tools")
+    logger.info(
+        "  ✔ Indexed %d MCP / static tool documents (%d registry + %d file-based).",
+        len(all_docs),
+        len(docs),
+        len(extra_docs),
+    )
+    return len(all_docs)
 
 
 def index_mcp_server_tools() -> int:

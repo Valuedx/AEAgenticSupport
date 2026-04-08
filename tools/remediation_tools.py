@@ -1,24 +1,25 @@
 """
-Remediation tools — restart, trigger, requeue operations.
+Remediation tools â€” restart, trigger, requeue operations.
 Higher-risk actions require approval via the ApprovalGate.
 
 CHANGES in trigger_workflow (v2):
-  1. Better parameter collection UX       — batch-collects ALL missing params in one shot,
+  1. Better parameter collection UX       â€” batch-collects ALL missing params in one shot,
                                             with per-param type hints and examples.
-  2. Smarter workflow name resolution      — fuzzy/alias resolution before schema lookup;
+  2. Smarter workflow name resolution      â€” fuzzy/alias resolution before schema lookup;
                                             unknown names surface a friendly suggestion.
-  3. Improved status/response messaging   — distinct human-readable messages for every
+  3. Improved status/response messaging   â€” distinct human-readable messages for every
                                             terminal and non-terminal state; no raw dict dumps.
-  4. Approval gate flow improvements      — clean, card-style confirmation message instead of
+  4. Approval gate flow improvements      â€” clean, card-style confirmation message instead of
                                             raw dict; risk badge and parameter table.
-  5. File-parameter early exit            — detected BEFORE asking for any other params so the
+  5. File-parameter early exit            â€” detected BEFORE asking for any other params so the
                                             user is never asked for inputs they can't supply.
-  6. Agent-status pre-check               — ensures at least one assigned automation agent is
+  6. Agent-status pre-check               â€” ensures at least one assigned automation agent is
                                             active before proceeding with parameter collection.
 """
 
 import logging
 
+from config.client_policy import format_client_message
 from config.settings import CONFIG
 from security.workflow_access import (
     can_execute_workflow,
@@ -125,103 +126,139 @@ def _build_trigger_access_message(
     clean_name = str(workflow_name or "this workflow").strip() or "this workflow"
     choices = [str(item or "").strip() for item in (available or []) if str(item or "").strip()]
     if choices:
-        wf_list = "\n".join(f"  • `{name}`" for name in choices)
+        wf_list = "\n".join(f"  â€¢ `{name}`" for name in choices)
         return (
-            f"I’m unable to start **{clean_name}** with the workflow access currently assigned to your account.\n\n"
+            f"Iâ€™m unable to start **{clean_name}** with the workflow access currently assigned to your account.\n\n"
             f"The workflows currently available to your account are:\n{wf_list}\n\n"
             "Please select one from this list, or ask an AutomationEdge administrator to review your workflow access."
         )
     return (
-        f"I’m unable to start **{clean_name}** because no eligible workflow access is currently available for your account.\n\n"
+        f"Iâ€™m unable to start **{clean_name}** because no eligible workflow access is currently available for your account.\n\n"
         "Please contact an AutomationEdge administrator to review and update your workflow permissions."
     )
 
 
 # ---------------------------------------------------------------------------
-# Pre-trigger health gate — blocks re-trigger when upstream systems are down
+# Pre-trigger health gate â€” blocks re-trigger when upstream systems are down
 # ---------------------------------------------------------------------------
 
 class _HealthGateBlockError(Exception):
     """Raised when the pre-trigger health gate blocks a workflow trigger."""
 
 
-def _run_both_health_checks(client) -> dict:
-    """Run Life Asia AND TEBT health check workflows, return combined summary.
+def _is_success_status(value: str) -> bool:
+    return str(value or "").strip().upper() in {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED"}
 
-    Returns dict with keys: life_asia, tebt — each containing a result dict
-    from _run_related_health_check (status, message, request_id, etc.).
-    """
-    from tools.status_tools import _run_related_health_check
 
-    results = {}
-    success_statuses = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED"}
+def _evaluate_related_issue_health(
+    client,
+    *,
+    execution_id: str,
+    org_code: str = "",
+) -> dict | None:
+    from tools.log_tools import get_execution_logs
+    from tools.status_tools import _detect_related_issue, _run_related_health_check
 
-    # Life Asia health check
-    la_wf = str(CONFIG.get("LIFE_ASIA_HEALTH_CHECK_WORKFLOW", "") or "").strip()
-    if la_wf:
-        la_info = {
-            "issue_type": "life_asia",
-            "issue_label": "Life Asia",
-            "health_check_label": "Life Asia health check",
-            "workflow_name": la_wf,
+    request_id = str(execution_id or "").strip()
+    if not request_id:
+        return None
+
+    try:
+        log_result = get_execution_logs(request_id, tail=0)
+    except Exception as exc:
+        logger.warning("Health gate: log fetch failed for execution %s: %s", request_id, exc)
+        return None
+
+    issue_info = _detect_related_issue(log_result)
+    if not issue_info:
+        return None
+
+    try:
+        health_result = _run_related_health_check(client, issue_info, org_code=org_code)
+    except Exception as exc:
+        logger.warning(
+            "Health gate: health check trigger failed for execution %s issue=%s: %s",
+            request_id,
+            issue_info.get("issue_type"),
+            exc,
+        )
+        return {
+            **issue_info,
+            "request_id": "",
+            "status": "ERROR",
+            "message": f"{issue_info.get('health_check_label', 'Related health check')} could not be triggered: {exc}",
+            "passed": False,
         }
-        try:
-            la_result = _run_related_health_check(client, la_info)
-            la_result["passed"] = str(la_result.get("status", "")).upper() in success_statuses
-            results["life_asia"] = la_result
-        except Exception as exc:
-            logger.warning("Life Asia health check failed to execute: %s", exc)
-            results["life_asia"] = {
-                "passed": False,
-                "status": "ERROR",
-                "message": f"Life Asia health check could not be triggered: {exc}",
-            }
 
-    # TEBT health check
-    tebt_wf = str(CONFIG.get("TEBT_HEALTH_CHECK_WORKFLOW", "") or "").strip()
-    if tebt_wf:
-        tebt_info = {
-            "issue_type": "tebt",
-            "issue_label": "TEBT",
-            "health_check_label": "TEBT health check",
-            "workflow_name": tebt_wf,
-        }
-        try:
-            tebt_result = _run_related_health_check(client, tebt_info)
-            tebt_result["passed"] = str(tebt_result.get("status", "")).upper() in success_statuses
-            results["tebt"] = tebt_result
-        except Exception as exc:
-            logger.warning("TEBT health check failed to execute: %s", exc)
-            results["tebt"] = {
-                "passed": False,
-                "status": "ERROR",
-                "message": f"TEBT health check could not be triggered: {exc}",
-            }
+    health_result["passed"] = _is_success_status(str(health_result.get("status") or ""))
+    return {
+        **issue_info,
+        **health_result,
+    }
 
-    return results
+
+def _apply_related_issue_health_gate(
+    client,
+    *,
+    execution_id: str,
+    workflow_name: str,
+    org_code: str = "",
+) -> dict | None:
+    related = _evaluate_related_issue_health(
+        client,
+        execution_id=execution_id,
+        org_code=org_code,
+    )
+    if not related:
+        return None
+
+    issue_label = str(related.get("issue_label") or "Related system").strip()
+    health_message = str(related.get("message") or "").strip()
+    friendly = workflow_name.replace("_", " ").replace("-", " ").title()
+
+    if not bool(related.get("passed")):
+        block_message = format_client_message(
+            "retry_blocked_unhealthy",
+            "{application} system is currently unavailable or under maintenance. Please try again later.",
+            org_code=org_code,
+            application=issue_label,
+            workflow_name=friendly,
+            health_message=health_message,
+        )
+        raise _HealthGateBlockError(
+            f"The latest failed execution of **{friendly}** appears related to **{issue_label}**.\n\n"
+            f"{health_message}\n\n"
+            f"{block_message}"
+        )
+
+    allow_message = format_client_message(
+        "retry_allowed_healthy",
+        "{application} is healthy. Retrying workflow now...",
+        org_code=org_code,
+        application=issue_label,
+        workflow_name=friendly,
+        health_message=health_message,
+    )
+    return {
+        "health_gate_passed": True,
+        "issue_type": str(related.get("issue_type") or "").strip(),
+        "issue_label": issue_label,
+        "health_summary": f"{health_message}\n\n{allow_message}",
+        "health_result": related,
+    }
 
 
 def _pre_trigger_health_gate(client, workflow_name: str, org_code: str) -> dict | None:
-    """Check recent executions for Life Asia/TEBT failures before allowing a trigger.
+    """Pre-trigger gate for recent failed runs.
 
-    Scans the last 5 executions to find the most recent *terminal* (finished)
-    state.  If that terminal execution FAILED due to Life Asia or TEBT issues
-    (and is not older than 4 hours), runs BOTH health check workflows.
-
-    Returns:
-        None  – no block, gate is open
-        dict  – health checks passed; summary dict for the caller to attach
-    Raises:
-        _HealthGateBlockError – at least one health check failed; trigger blocked
+    We inspect the latest terminal execution and only gate when:
+    - status is failed/error
+    - failure is recent (within 4 hours)
+    - logs indicate Life Asia or TEBT related issue
     """
-    from datetime import datetime, timezone, timedelta
-    from tools.status_tools import (
-        _get_workflow_instances_compat,
-        _detect_related_issue,
-    )
-    from tools.log_tools import get_execution_logs
+    from tools.status_tools import _get_workflow_instances_compat
 
-    # ── 1. Fetch recent executions from the AE server (live API, not cache) ──
+    # â”€â”€ 1. Fetch recent executions from the AE server (live API, not cache) â”€â”€
     try:
         instances = _get_workflow_instances_compat(client, workflow_name, limit=5)
     except Exception as exc:
@@ -229,9 +266,9 @@ def _pre_trigger_health_gate(client, workflow_name: str, org_code: str) -> dict 
         return None  # Non-blocking: if we can't check, allow the trigger
 
     if not instances:
-        return None  # First-ever execution — nothing to check
+        return None  # First-ever execution â€” nothing to check
 
-    # ── 2. Find the most recent TERMINAL execution ───────────────────────────
+    # â”€â”€ 2. Find the most recent TERMINAL execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Terminal = finished states.  Skip QUEUED / IN_PROGRESS / RUNNING / PENDING
     # because those haven't produced a result yet.
     terminal_statuses = {
@@ -248,32 +285,13 @@ def _pre_trigger_health_gate(client, workflow_name: str, org_code: str) -> dict 
             break  # instances are sorted newest-first by AE API
 
     if latest_terminal is None:
-        return None  # All recent runs are still in-progress — skip gate
+        return None  # All recent runs are still in-progress â€” skip gate
 
     terminal_status = str(latest_terminal.get("status") or "").strip().upper()
     if terminal_status not in failure_statuses:
-        return None  # Most recent finished run was a success — no concern
+        return None  # Most recent finished run was a success â€” no concern
 
-    # ── 3. Staleness check — ignore failures older than 4 hours ──────────────
-    try:
-        created_raw = latest_terminal.get("createdDate") or latest_terminal.get("started_at")
-        if created_raw:
-            if isinstance(created_raw, (int, float)):
-                created_dt = datetime.fromtimestamp(created_raw / 1000, tz=timezone.utc)
-            else:
-                created_dt = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
-            age = datetime.now(timezone.utc) - created_dt
-            if age > timedelta(hours=4):
-                logger.info(
-                    "Health gate: failure for %s is %.1f hours old — skipping gate",
-                    workflow_name, age.total_seconds() / 3600,
-                )
-                return None
-    except Exception as exc:
-        logger.debug("Health gate: could not parse timestamp for staleness check: %s", exc)
-        # If we can't parse the timestamp, proceed with the gate anyway
-
-    # ── 4. Fetch logs of the failed execution to detect issue type ───────────
+    # Evaluate the exact failed execution before allowing a new trigger.
     execution_id = (
         latest_terminal.get("id")
         or latest_terminal.get("automationRequestId")
@@ -284,67 +302,35 @@ def _pre_trigger_health_gate(client, workflow_name: str, org_code: str) -> dict 
         return None
 
     try:
-        log_result = get_execution_logs(str(execution_id), tail=0)
-    except Exception as exc:
-        logger.warning("Health gate: log fetch failed for execution %s: %s", execution_id, exc)
-        return None  # Non-blocking
-
-    # ── 5. Detect if failure is Life Asia or TEBT related ────────────────────
-    issue_info = _detect_related_issue(log_result)
-    if not issue_info:
-        return None  # Not a Life Asia/TEBT issue — skip gate
-
-    issue_label = issue_info.get("issue_label", "")
-    logger.info(
-        "Health gate: execution %s of %s failed due to %s issue — running both health checks",
-        execution_id, workflow_name, issue_label,
-    )
-
-    # ── 6. Run BOTH health checks ────────────────────────────────────────────
-    health_results = _run_both_health_checks(client)
-
-    # If no health checks are configured at all, skip the gate
-    if not health_results:
-        logger.warning(
-            "Health gate: Life Asia/TEBT issue detected but no health check workflows configured"
+        result = _apply_related_issue_health_gate(
+            client,
+            execution_id=str(execution_id),
+            workflow_name=workflow_name,
+            org_code=org_code,
         )
+        if result:
+            logger.info("Health gate: related application is healthy for %s - allowing trigger", workflow_name)
+        return result
+    except _HealthGateBlockError:
+        raise
+    except Exception as exc:
+        logger.warning("Health gate: evaluation failed for execution %s: %s", execution_id, exc)
         return None
 
-    # ── 7. Build summary message ─────────────────────────────────────────────
-    lines = []
-    all_passed = True
-    for key, label in [("life_asia", "Life Asia"), ("tebt", "TEBT")]:
-        result = health_results.get(key)
-        if not result:
-            lines.append(f"  \u2022 {label} health check: \u26a0\ufe0f Not configured")
-            continue
-        passed = result.get("passed", False)
-        msg = result.get("message", "")
-        icon = "\u2705" if passed else "\u274c"
-        lines.append(f"  {icon} {msg}")
-        if not passed:
-            all_passed = False
 
-    health_summary = "\n".join(lines)
-    friendly = workflow_name.replace("_", " ").replace("-", " ").title()
-
-    if not all_passed:
-        raise _HealthGateBlockError(
-            f"The last execution of **{friendly}** failed due to a **{issue_label}** issue.\n\n"
-            f"I ran health checks before retrying:\n{health_summary}\n\n"
-            f"Please resolve the issue before retrying this workflow."
+def _pre_retry_health_gate(client, execution_id: str, workflow_name: str, org_code: str) -> dict | None:
+    try:
+        return _apply_related_issue_health_gate(
+            client,
+            execution_id=str(execution_id),
+            workflow_name=workflow_name,
+            org_code=org_code,
         )
-
-    # Both passed — return summary so caller can attach to the response
-    logger.info("Health gate: both checks passed for %s — allowing trigger", workflow_name)
-    return {
-        "health_gate_passed": True,
-        "health_summary": (
-            f"The last execution failed due to a **{issue_label}** issue, "
-            f"but health checks confirm systems are back up:\n{health_summary}"
-        ),
-        "results": health_results,
-    }
+    except _HealthGateBlockError:
+        raise
+    except Exception as exc:
+        logger.warning("Retry health gate failed for execution %s: %s", execution_id, exc)
+        return None
 
 
 def _resolve_cached_workflow_name_for_user(client, workflow_name: str, user_id: str = "", org_code: str = "") -> str:
@@ -663,7 +649,7 @@ def _guard_assigned_agents_running(
                 source_label="workflow mapping",
             )
 
-    # ── Single-agent fallback ──────────────────────────────────────────────
+    # â”€â”€ Single-agent fallback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # When the workflow-level mapping was skipped (unknown name) or returned
     # empty, fall back to the execution's own agent reference.  Even here,
     # if the resolved single agent is offline we still cross-check the
@@ -721,7 +707,7 @@ def _guard_assigned_agents_running(
             wf_assigned = _get_assigned_agents_for_workflow(client, resolved_wf)
             if wf_assigned and _running_assigned_agents(wf_assigned):
                 logger.info(
-                    "%s allowed for execution_id=%s workflow=%s — fallback agent %s is %s "
+                    "%s allowed for execution_id=%s workflow=%s â€” fallback agent %s is %s "
                     "but another workflow-assigned agent is running.",
                     action_label,
                     execution_id,
@@ -744,18 +730,18 @@ def _guard_assigned_agents_running(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # trigger_workflow helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _build_approval_message(workflow_name: str, parameters: dict, risk: str = "medium_risk") -> str:
     """
     Return a clean, card-style approval prompt instead of a raw dict dump.
 
     Example output
-    ──────────────
-    🤖 **Ready to trigger: Death_Claim**
-    🟡 Risk level: Medium
+    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    ðŸ¤– **Ready to trigger: Death_Claim**
+    ðŸŸ¡ Risk level: Medium
 
     | Parameter  | Value                                              |
     |------------|----------------------------------------------------|
@@ -768,7 +754,7 @@ def _build_approval_message(workflow_name: str, parameters: dict, risk: str = "m
         "medium_risk": "Medium",
         "high_risk":   "High",
     }
-    risk_display = risk_labels.get(risk, "🟡 Medium")
+    risk_display = risk_labels.get(risk, "ðŸŸ¡ Medium")
 
     if parameters:
         rows = "\n".join(f"| `{k}` | {v} |" for k, v in parameters.items())
@@ -820,7 +806,7 @@ def _friendly_status_message(
         return (
             f"**{workflow_name}** timed out waiting for a status update. "
             f"Request ID: `{req_id}`. "
-            "The bot may still be running — please verify in the AE portal."
+            "The bot may still be running â€” please verify in the AE portal."
         )
 
     if s == "NO_AGENT":
@@ -834,7 +820,7 @@ def _friendly_status_message(
                 f"Request ID: `{req_id}`. Please start or reconnect one of these agents, then retry."
             )
         return (
-            f"**{workflow_name}** could not start — no automation agent is currently available. "
+            f"**{workflow_name}** could not start â€” no automation agent is currently available. "
             f"Request ID: `{req_id}`. Please ask your administrator to start or reconnect an agent, then retry."
         )
 
@@ -853,13 +839,13 @@ def _friendly_status_message(
         )
     return (
         f"**{workflow_name}** has been queued. Request ID: `{req_id}`. "
-        "No active agent was detected — contact your administrator if it doesn't start soon."
+        "No active agent was detected â€” contact your administrator if it doesn't start soon."
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Remediation functions
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def restart_execution(execution_id: str,
                       workflow_name: str = "Unknown",
@@ -919,6 +905,25 @@ def restart_execution(execution_id: str,
     if agent_guard:
         return agent_guard
 
+    resolved_org = str(default_org_code()).strip()
+    retry_health_gate = None
+    try:
+        retry_health_gate = _pre_retry_health_gate(
+            client,
+            execution_id=str(execution_id),
+            workflow_name=workflow_name,
+            org_code=resolved_org,
+        )
+    except _HealthGateBlockError as hg_err:
+        return {
+            "success": False,
+            "blocked_reason": "health_check_failed",
+            "message": str(hg_err),
+            "error": str(hg_err),
+            "workflow_name": workflow_name,
+            "execution_id": execution_id,
+        }
+
     # 2. Check Protection
     if workflow_name != "Unknown" and workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
         return {
@@ -965,6 +970,11 @@ def restart_execution(execution_id: str,
             result["status"] = final_status
         if detail_msg:
             result["workflow_response_message"] = detail_msg
+        if retry_health_gate and isinstance(retry_health_gate, dict):
+            result["health_gate"] = retry_health_gate
+            hg_msg = str(retry_health_gate.get("health_summary") or "").strip()
+            if hg_msg:
+                result["message"] = f"{hg_msg}\n\n{result['message']}"
         return result
     except Exception as e:
         err_str = str(e)
@@ -1045,6 +1055,25 @@ def resubmit_execution(execution_id: str,
     if agent_guard:
         return agent_guard
 
+    resolved_org = str(default_org_code()).strip()
+    retry_health_gate = None
+    try:
+        retry_health_gate = _pre_retry_health_gate(
+            client,
+            execution_id=str(execution_id),
+            workflow_name=workflow_name,
+            org_code=resolved_org,
+        )
+    except _HealthGateBlockError as hg_err:
+        return {
+            "success": False,
+            "blocked_reason": "health_check_failed",
+            "message": str(hg_err),
+            "error": str(hg_err),
+            "workflow_name": workflow_name,
+            "execution_id": execution_id,
+        }
+
     try:
         resp = client.resubmit_request(
             execution_id, reason=reason, from_failure_point=from_failure_point
@@ -1088,6 +1117,11 @@ def resubmit_execution(execution_id: str,
             result["status"] = final_status
         if detail_msg:
             result["workflow_response_message"] = detail_msg
+        if retry_health_gate and isinstance(retry_health_gate, dict):
+            result["health_gate"] = retry_health_gate
+            hg_msg = str(retry_health_gate.get("health_summary") or "").strip()
+            if hg_msg:
+                result["message"] = f"{hg_msg}\n\n{result['message']}"
         return result
     except Exception as e:
         logger.error(f"Resubmit failed for {execution_id}: {e}")
@@ -1108,14 +1142,14 @@ def trigger_workflow(
 
     Improvements over v1
     --------------------
-    1. File-param guard fires FIRST — user never gets asked for text params they
+    1. File-param guard fires FIRST â€” user never gets asked for text params they
        can't supply if the workflow also needs a file upload.
     2. Fuzzy/alias name resolution with a helpful suggestion when the name is unknown.
     3. ALL missing parameters are collected in a single, clearly formatted question
        (type hints + examples) instead of one-at-a-time prompts.
     4. Clean card-style approval message (no raw dict dump).
     5. Every status code maps to a distinct, human-readable message.
-    6. Agent-status pre-check — ensures at least one assigned automation agent is
+    6. Agent-status pre-check â€” ensures at least one assigned automation agent is
        active before proceeding with parameter collection.
     """
     parameters = parameters or {}
@@ -1124,7 +1158,7 @@ def trigger_workflow(
     workflow_name = re.sub(r"\s*\(ID:\s*\d+\)\s*$", "", str(workflow_name or ""), flags=re.IGNORECASE).strip()
     client = get_ae_client()
 
-    # ── IMPROVEMENT 2: Smarter workflow name resolution ───────────────────────
+    # â”€â”€ IMPROVEMENT 2: Smarter workflow name resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     resolved_name = _resolve_cached_workflow_name_for_user(
         client,
         workflow_name,
@@ -1152,7 +1186,7 @@ def trigger_workflow(
                 pass
 
         if available:
-            wf_list = "\n".join(f"  • `{n}`" for n in available)
+            wf_list = "\n".join(f"  â€¢ `{n}`" for n in available)
             msg = _build_trigger_access_message(workflow_name, available)
         else:
             msg = _build_trigger_access_message(workflow_name)
@@ -1182,7 +1216,7 @@ def trigger_workflow(
                 user_id, resolved_org, require_execute=True, limit=15,
             )
             if available:
-                wf_list = "\n".join(f"  • `{n}`" for n in available)
+                wf_list = "\n".join(f"  â€¢ `{n}`" for n in available)
                 deny_msg = _build_trigger_access_message(resolved_name, available)
             else:
                 deny_msg = _build_trigger_access_message(resolved_name)
@@ -1203,8 +1237,8 @@ def trigger_workflow(
             ),
         }
 
-    # ── IMPROVEMENT 5: File-param guard fires BEFORE param collection ─────────
-    # AE-77: Check for "File" type parameters — file upload not supported in agentic chat.
+    # â”€â”€ IMPROVEMENT 5: File-param guard fires BEFORE param collection â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # AE-77: Check for "File" type parameters â€” file upload not supported in agentic chat.
     schema = client.get_cached_workflow_parameters(resolved_name)
     file_params = [
         p.get("name") for p in schema
@@ -1212,7 +1246,7 @@ def trigger_workflow(
         in {"file", "attachment", "upload"}
     ]
     if file_params:
-        logger.info(f"Workflow '{resolved_name}' requires file upload — rejecting agentic trigger.")
+        logger.info(f"Workflow '{resolved_name}' requires file upload â€” rejecting agentic trigger.")
         param_list = ", ".join(f"`{p}`" for p in file_params)
         return {
             "success": False,
@@ -1227,7 +1261,7 @@ def trigger_workflow(
             "workflow_name": resolved_name,
         }
 
-    # ── IMPROVEMENT 6: Agent status check ─────────────────────────────────────
+    # â”€â”€ IMPROVEMENT 6: Agent status check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Check if at least one agent assigned to this workflow is RUNNING/CONNECTED.
     # Also capture the running agent so we can tell AE which one to use.
     _picked_agent_id = ""
@@ -1263,7 +1297,7 @@ def trigger_workflow(
     except Exception as exc:
         logger.warning(f"Pre-trigger agent check failed for {resolved_name}: {exc}")
 
-    # ── IMPROVEMENT 6b: Pre-trigger health gate ───────────────────────────────
+    # â”€â”€ IMPROVEMENT 6b: Pre-trigger health gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # If the most recent execution of this workflow FAILED due to Life Asia or
     # TEBT issues, run BOTH health check workflows before allowing the trigger.
     _health_gate_summary = None
@@ -1280,7 +1314,7 @@ def trigger_workflow(
         logger.warning("Pre-trigger health gate failed for %s: %s", resolved_name, exc)
         # Non-blocking: if the gate itself errors, let the trigger proceed.
 
-    # ── IMPROVEMENT 7: In-progress guard (Concurrent execution check) ─────────
+    # â”€â”€ IMPROVEMENT 7: In-progress guard (Concurrent execution check) â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Before triggering, check if an instance of THIS workflow is already running.
     # Block the trigger if one is found to prevent duplicate executions.
     try:
@@ -1314,9 +1348,9 @@ def trigger_workflow(
         # Non-blocking: if the check fails (e.g. API error), we proceed with the trigger
         # to avoid blocking users due to monitoring tool failures.
 
-    # ── IMPROVEMENT 1: Batch parameter collection ─────────────────────────────
+    # â”€â”€ IMPROVEMENT 1: Batch parameter collection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     required = client.get_required_parameters(resolved_name)       # list[str]
-    param_schema_map = {p.get("name"): p for p in schema}         # name → schema entry
+    param_schema_map = {p.get("name"): p for p in schema}         # name â†’ schema entry
 
     missing = [p for p in required if not parameters.get(p)]
 
@@ -1327,7 +1361,7 @@ def trigger_workflow(
             p_type    = meta.get("type") or meta.get("uiControlType") or "text"
             p_example = meta.get("example") or meta.get("defaultValue") or ""
             example_str = f" _(e.g. `{p_example}`)_" if p_example else ""
-            param_lines.append(f"  • **{p}** `[{p_type}]`{example_str}")
+            param_lines.append(f"  â€¢ **{p}** `[{p_type}]`{example_str}")
 
         friendly_name = resolved_name.replace("_", " ").replace("-", " ").title()
         if len(missing) == 1:
@@ -1354,7 +1388,7 @@ def trigger_workflow(
             "missing_params": missing,
         }
 
-    # ── IMPROVEMENT 4: Pre-build clean approval message for the gate ──────────
+    # â”€â”€ IMPROVEMENT 4: Pre-build clean approval message for the gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # ApprovalGate middleware reads `approval_message` from the return dict.
     # We inject a formatted preview here so whatever the gate shows is human-friendly.
     approval_preview = _build_approval_message(
@@ -1363,7 +1397,7 @@ def trigger_workflow(
         risk="medium_risk",
     )
 
-    # ── Execute ───────────────────────────────────────────────────────────────
+    # â”€â”€ Execute â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         if not workflow_id:
             workflow_id = resolved_name
@@ -1405,7 +1439,7 @@ def trigger_workflow(
         if not req_id:
             logger.warning(f"T4 trigger for '{resolved_name}' succeeded but returned no Request ID.")
 
-        # ── Poll execution status ─────────────────────────────────────────────
+        # â”€â”€ Poll execution status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         final_status = raw.get("status") or raw.get("state") or "QUEUED"
         poll_raw = {}
         poll_result = {}  # always defined so later references are safe
@@ -1428,7 +1462,7 @@ def trigger_workflow(
         if not detail_msg and new_diag.get("summary"):
             detail_msg = str(new_diag.get("summary"))
 
-        # ── IMPROVEMENT 3: Terminal failure path ──────────────────────────────
+        # â”€â”€ IMPROVEMENT 3: Terminal failure path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         status_upper = str(final_status or "").upper()
         if status_upper in {"FAILURE", "ERROR"}:
             error_msg = (
@@ -1452,7 +1486,7 @@ def trigger_workflow(
                 "raw": poll_raw or raw,
             }
 
-        # ── IMPROVEMENT 3: Non-terminal / pending path ────────────────────────
+        # â”€â”€ IMPROVEMENT 3: Non-terminal / pending path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if status_upper == "WAITING_OTHER_PROCESS":
             accepted_prefix = (
                 f"Request ID `{req_id}` is already triggered and currently in **New** status."
@@ -1637,9 +1671,9 @@ def enable_schedule(schedule_id: str, reason: str = "") -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Register all remediation tools
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 tool_registry.register(
     ToolDefinition(
@@ -1711,7 +1745,7 @@ tool_registry.register(
             "restart fails and a fresh execution is needed."
         ),
         avoid_when=(
-            "User says 'restart' — use restart_execution instead."
+            "User says 'restart' â€” use restart_execution instead."
         ),
     ),
     resubmit_execution,
@@ -1784,7 +1818,7 @@ tool_registry.register(
         name="bulk_retry_failures",
         description=(
             "Retry all failed bot (workflow) executions within a time window. "
-            "Use with caution — high impact operation."
+            "Use with caution â€” high impact operation."
         ),
         category="remediation",
         tier="high_risk",
@@ -1860,3 +1894,4 @@ tool_registry.register(
 #     ),
 #     enable_schedule,
 # )
+

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from config.client_policy import format_client_message
 from config.settings import CONFIG
 from security.workflow_access import (
     can_execute_workflow,
@@ -340,7 +341,7 @@ def _detect_related_issue(log_result: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-def _build_related_health_check_summary(issue_info: dict[str, str], status: str) -> str:
+def _build_related_health_check_summary(issue_info: dict[str, str], status: str, org_code: str = "") -> str:
     issue_type = str(issue_info.get("issue_type") or "").strip().lower()
     normalized = str(status or "").strip().upper()
     success_statuses = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED"}
@@ -348,17 +349,53 @@ def _build_related_health_check_summary(issue_info: dict[str, str], status: str)
 
     if issue_type == "life_asia":
         if normalized in success_statuses:
-            return "Life Asia health check: ✅ System is up. Issue may be intermittent. Retry recommended."
+            return format_client_message(
+                "life_asia_health_up",
+                "Process failed due to Life Asia issue. System is operational. Please retry the workflow.",
+                org_code=org_code,
+                application="Life Asia",
+                status=status,
+            )
         if normalized in failure_statuses:
-            return "Life Asia health check: ❌ System is down. Please investigate system connectivity."
-        return f"Life Asia health check is running. Current status: {status}."
+            return format_client_message(
+                "life_asia_health_down",
+                "Process failed due to Life Asia issue. System is currently unavailable. Please try again later.",
+                org_code=org_code,
+                application="Life Asia",
+                status=status,
+            )
+        return format_client_message(
+            "life_asia_health_running",
+            "Life Asia health check is still running. Current status: {status}.",
+            org_code=org_code,
+            application="Life Asia",
+            status=status,
+        )
 
     if issue_type == "tebt":
         if normalized in success_statuses:
-            return "TEBT health check: ✅ Portal accessible. Check bot credentials or session issue."
+            return format_client_message(
+                "tebt_health_up",
+                "Process failed due to TEBT issue. System is operational. Please retry the workflow.",
+                org_code=org_code,
+                application="TEBT",
+                status=status,
+            )
         if normalized in failure_statuses:
-            return "TEBT health check: ❌ Login service down. Please check credentials/server."
-        return f"TEBT health check is running. Current status: {status}."
+            return format_client_message(
+                "tebt_health_down",
+                "Process failed due to TEBT issue. System is currently unavailable. Please try again later.",
+                org_code=org_code,
+                application="TEBT",
+                status=status,
+            )
+        return format_client_message(
+            "tebt_health_running",
+            "TEBT health check is still running. Current status: {status}.",
+            org_code=org_code,
+            application="TEBT",
+            status=status,
+        )
 
     return f"Related health check status: {status}."
 
@@ -366,12 +403,13 @@ def _build_related_health_check_summary(issue_info: dict[str, str], status: str)
 def _run_related_health_check(
     client,
     issue_info: dict[str, str],
+    org_code: str = "",
 ) -> dict[str, Any]:
     workflow_name = str(issue_info.get("workflow_name") or "").strip()
     if not workflow_name:
         return {}
 
-    resolved_org = str(default_org_code()).strip()
+    resolved_org = str(org_code or default_org_code()).strip()
     workflow_id = ""
     getter = getattr(client, "get_cached_workflow_id", None)
     if callable(getter):
@@ -435,13 +473,14 @@ def _run_related_health_check(
         "request_id": request_id,
         "status": final_status,
         "used_admin_scope": bool(CONFIG.get("RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)),
-        "message": _build_related_health_check_summary(issue_info, final_status),
+        "message": _build_related_health_check_summary(issue_info, final_status, org_code=resolved_org),
         "raw": poll_raw or raw,
     }
 
 
 def _maybe_add_related_issue_health_check(
     latest: dict[str, Any],
+    org_code: str = "",
 ) -> dict[str, Any] | None:
     if not bool(CONFIG.get("ENABLE_RELATED_ISSUE_HEALTH_CHECK", False)):
         return None
@@ -468,7 +507,7 @@ def _maybe_add_related_issue_health_check(
 
     client = get_ae_client()
     try:
-        health_result = _run_related_health_check(client, issue_info)
+        health_result = _run_related_health_check(client, issue_info, org_code=org_code)
     except Exception as exc:
         logger.warning(
             "Related health check trigger failed for issue=%s workflow=%s: %s",
@@ -665,7 +704,8 @@ def check_workflow_status(
     else:
         msg = f"Global status summary for all bots (Last 24 hours)."
 
-    related_issue_check = _maybe_add_related_issue_health_check(latest) if query_name else None
+    resolved_org = str(org_code or default_org_code()).strip()
+    related_issue_check = _maybe_add_related_issue_health_check(latest, org_code=resolved_org) if query_name else None
     if related_issue_check and related_issue_check.get("message"):
         issue_label = str(related_issue_check.get("issue_label") or "").strip()
         health_check_label = str(related_issue_check.get("health_check_label") or "Related health check").strip()

@@ -60,7 +60,7 @@ def test_check_workflow_status_appends_life_asia_health_check(monkeypatch):
     assert "The absolute latest execution for bot" in result["message"]
     assert "Latest failure logs suggest a **Life Asia** issue." in result["message"]
     assert "Triggered **Life Asia health check** via admin scope." in result["message"]
-    assert "Life Asia health check: ❌ System is down. Please investigate system connectivity." in result["message"]
+    assert "Process failed due to Life Asia issue. System is currently unavailable. Please try again later." in result["message"]
     assert result["related_issue_check"]["workflow_name"] == "TEBT_Health_Check"
     assert result["related_issue_check"]["used_admin_scope"] is True
     assert client.executed[0]["workflow_name"] == "TEBT_Health_Check"
@@ -87,6 +87,6 @@ def test_check_workflow_status_appends_tebt_health_check(monkeypatch):
 
     assert "Latest failure logs suggest a **TEBT** issue." in result["message"]
     assert "Triggered **TEBT health check** via admin scope." in result["message"]
-    assert "TEBT health check: ✅ Portal accessible. Check bot credentials or session issue." in result["message"]
+    assert "Process failed due to TEBT issue. System is operational. Please retry the workflow." in result["message"]
     assert result["related_issue_check"]["workflow_name"] == "Life_Asia_Health_Check"
     assert client.executed[0]["workflow_name"] == "Life_Asia_Health_Check"

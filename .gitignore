@@ -52,6 +52,7 @@ Thumbs.db
 # GCP credentials
 *.json
 !rag/data/**/*.json
+!config/client_policies/*.json
 
 # AI Studio Local
 AI_Studio_Local/

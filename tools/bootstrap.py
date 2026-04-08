@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import logging
 
+from rag.index_all import index_tool_docs
 from rag.engine import get_rag_engine
 from state.agent_catalog import get_agent_catalog
 from tools.registry import tool_registry
@@ -66,7 +67,7 @@ def initialize_tooling(app_logger: logging.Logger | None = None) -> dict:
     try:
         rag = get_rag_engine()
         tool_docs = tool_registry.get_all_rag_documents()
-        rag.index_tools(tool_docs)
+        index_tool_docs()
         summary["rag_indexed"] = True
         summary["catalog_size"] = len(tool_docs)
         logger.info("Ops Agent initialized - tools indexed into RAG")

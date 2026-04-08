@@ -1,0 +1,9 @@
+{
+  "id": "tooldoc-retry-health-gate",
+  "title": "Retry Health Gate Guidance",
+  "content": "Retry and retrigger requests for failed workflows must not run blindly. Before retrying a failure that may involve Life Asia or TEBT, first inspect the latest failed execution evidence, classify the related application, and validate the related health check. If the health check is down, block the retry. If the health check is healthy, communicate that clearly and continue.\n\nPreferred diagnostic entry point: check_workflow_status for the affected workflow or request.\n\nRequired user-facing style: business-friendly, short, and action-oriented.",
+  "metadata": {
+    "category": "tool_documentation",
+    "tags": ["retry", "health gate", "status", "diagnostics"]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "client_name": "Default Client Policy",
+  "prompt": {
+    "title": "Client Policy",
+    "append_system_rules": [
+      "For workflow failures, prefer evidence from the latest execution status and logs over generic error text.",
+      "If the latest failed run suggests a Life Asia or TEBT issue, use check_workflow_status first so the related health check can run.",
+      "Before any retry or retrigger request, re-check the latest failure evidence and validate related application health.",
+      "Do not retry when the related application health check is down, unavailable, or under maintenance.",
+      "When health is good, clearly tell the user the application is healthy before proceeding with the retry."
+    ],
+    "response_notes": [
+      "Use business-friendly language and avoid low-level technical wording unless the user asks for it.",
+      "Always explain what failed, current system status, and the next action in one clear response."
+    ]
+  },
+  "messages": {
+    "life_asia_health_up": "Process failed due to Life Asia issue. System is operational. Please retry the workflow.",
+    "life_asia_health_down": "Process failed due to Life Asia issue. System is currently unavailable. Please try again later.",
+    "life_asia_health_running": "Life Asia health check is still running. Current status: {status}.",
+    "tebt_health_up": "Process failed due to TEBT issue. System is operational. Please retry the workflow.",
+    "tebt_health_down": "Process failed due to TEBT issue. System is currently unavailable. Please try again later.",
+    "tebt_health_running": "TEBT health check is still running. Current status: {status}.",
+    "retry_blocked_unhealthy": "{application} system is currently unavailable or under maintenance. Please try again later.",
+    "retry_allowed_healthy": "{application} is healthy. Retrying workflow now..."
+  }
+}

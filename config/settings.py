@@ -142,6 +142,7 @@ CONFIG = {
     "LOG_DIR": os.environ.get("LOG_DIR", "logs"),
     "LOG_LEVEL": os.environ.get("LOG_LEVEL", "INFO"),
     "LOG_JSON": os.environ.get("LOG_JSON", "true").lower() == "true",
+    "CLIENT_POLICY_DIR": os.environ.get("CLIENT_POLICY_DIR", "config/client_policies").strip() or "config/client_policies",
 
     # Agent management UI / catalog
     "AGENT_CATALOG_PATH": os.environ.get(

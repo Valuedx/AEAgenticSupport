@@ -20,6 +20,7 @@ from google.genai import types
 
 from agents.approval_gate import ApprovalGate, ApprovalIntent
 from agents.escalation import EscalationAgent
+from config.client_policy import build_client_prompt_addendum
 from config.llm_client import llm_client
 from config.metrics import metrics_collector
 from config.settings import CONFIG
@@ -79,6 +80,14 @@ class Orchestrator:
             if value:
                 return str(value).strip()
         return str(get_ae_client().default_org_code or "").strip()
+
+    @staticmethod
+    def _state_client_prompt_addendum(state: ConversationState) -> str:
+        metadata = state.user_metadata if isinstance(state.user_metadata, dict) else {}
+        return build_client_prompt_addendum(
+            org_code=Orchestrator._state_org_code(state),
+            metadata=metadata,
+        )
 
     @staticmethod
     def _build_pending_action_summary(tool_name: str, tool_args: dict) -> str:
@@ -2354,6 +2363,10 @@ config, notification, general, meta, agent_read, agent_diag.
 You have a subset of tools loaded. Use discover_tools to find others.
 FORBIDDEN: Never respond with SOP steps like 'Step 1: Check workflow status...' when the user has given you a specific ID to look up. Call the tool instead.
 """
+
+        client_prompt = self._state_client_prompt_addendum(state)
+        if client_prompt:
+            base_prompt += "\n" + client_prompt + "\n"
 
         persona = ""
         if state.user_role == "business":

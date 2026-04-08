@@ -1,0 +1,18 @@
+{
+  "client_name": "AEGEMS Client Policy",
+  "prompt": {
+    "title": "AEGEMS Workflow Policy",
+    "append_system_rules": [
+      "For AEGEMS, workflow retry decisions must follow the failure-log and health-check flow before any retry action.",
+      "If Life Asia or TEBT is involved, always confirm the related application health before retrying the workflow."
+    ],
+    "response_notes": [
+      "Keep the wording concise and business-friendly for operations users.",
+      "When a retry is blocked, mention the dependent application is unavailable and ask the user to try later."
+    ]
+  },
+  "messages": {
+    "retry_blocked_unhealthy": "{application} is currently unavailable for AEGEMS. Please try again later.",
+    "retry_allowed_healthy": "{application} is healthy for AEGEMS. Retrying workflow now..."
+  }
+}
