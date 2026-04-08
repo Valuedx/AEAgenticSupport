@@ -240,6 +240,52 @@ class TestAutomationEdgeClient(unittest.TestCase):
             mock_sleep.assert_called_once_with(18)
         client.close()
 
+    def test_restart_request_prefers_global_workflowinstances_path(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            path = request.url.path
+            calls.append(path)
+
+            if path == "/aeengine/rest/authenticate":
+                return httpx.Response(200, json={"token": "tok-1"})
+            if path == "/aeengine/rest/workflowinstances/2612242/restart":
+                return httpx.Response(200, json={"success": True, "status": "QUEUED"})
+            if path == "/aeengine/rest/ORG1/workflowinstances/2612242/restart":
+                return httpx.Response(400, json={"message": "Bad Request", "errorCode": "AE-1005"})
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+        result = client.restart_request("2612242", reason="test")
+
+        non_auth_calls = [path for path in calls if path != "/aeengine/rest/authenticate"]
+        self.assertEqual(non_auth_calls[0], "/aeengine/rest/workflowinstances/2612242/restart")
+        self.assertTrue(result["success"])
+        client.close()
+
+    def test_resubmit_request_prefers_global_workflowinstances_path(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            path = request.url.path
+            calls.append(path)
+
+            if path == "/aeengine/rest/authenticate":
+                return httpx.Response(200, json={"token": "tok-1"})
+            if path == "/aeengine/rest/workflowinstances/2612237/resubmit":
+                return httpx.Response(200, json={"success": True, "status": "QUEUED"})
+            if path == "/aeengine/rest/ORG1/workflowinstances/2612237/resubmit":
+                return httpx.Response(400, json={"message": "Bad Request", "errorCode": "AE-1005"})
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+        result = client.resubmit_request("2612237", reason="test", from_failure_point=True)
+
+        non_auth_calls = [path for path in calls if path != "/aeengine/rest/authenticate"]
+        self.assertEqual(non_auth_calls[0], "/aeengine/rest/workflowinstances/2612237/resubmit")
+        self.assertTrue(result["success"])
+        client.close()
+
     def test_execute_workflow_payload_contract(self):
         captured = {"payload": None, "header": ""}
 
@@ -861,6 +907,11 @@ class TestAutomationEdgeClient(unittest.TestCase):
     def test_workflow_lookup_specificity_distinguishes_followup_sentence_from_explicit_name(self):
         client = AutomationEdgeClient()
 
+        self.assertFalse(
+            client.is_specific_workflow_lookup_query(
+                "try to retrigger"
+            )
+        )
         self.assertFalse(
             client.is_specific_workflow_lookup_query(
                 "retrigger this bot i have added input file"

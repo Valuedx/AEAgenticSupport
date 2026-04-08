@@ -205,6 +205,119 @@ def test_failed_execution_generic_retrigger_rewrites_resubmit_to_restart():
     }
 
 
+def test_failed_execution_rewrite_prefers_latest_status_execution_id_over_older_history():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.log_tool_call(
+        "restart_execution",
+        {"execution_id": "2611427"},
+        {
+            "success": False,
+            "execution_id": "2611427",
+            "workflow_name": "timesheet_report_generation_v5",
+            "status": "FAILED",
+        },
+        False,
+    )
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "workflow_name": "timesheet_report_generation_v5",
+            "latest_status": "Failure",
+            "latest_execution_id": "2612306",
+            "latest_execution": {
+                "id": "2612306",
+                "bot_name": "timesheet_report_generation_v5",
+                "status": "Failure",
+            },
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._rewrite_failed_execution_followup(
+        user_message="restart workflow",
+        state=state,
+        tool_name="restart_execution",
+        tool_args={},
+    )
+
+    assert tool_name == "restart_execution"
+    assert tool_args == {
+        "execution_id": "2612306",
+        "workflow_name": "timesheet_report_generation_v5",
+    }
+
+
+def test_retry_arg_alignment_overrides_stale_retry_id_when_user_did_not_specify_one():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "workflow_name": "timesheet_report_generation_v5",
+            "latest_status": "Failure",
+            "latest_execution_id": "2612306",
+            "latest_execution": {
+                "id": "2612306",
+                "bot_name": "timesheet_report_generation_v5",
+                "status": "Failure",
+            },
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._align_retry_tool_args_with_recent_failed_context(
+        user_message="restart workflow",
+        state=state,
+        tool_name="restart_execution",
+        tool_args={"execution_id": "2611427", "workflow_name": "timesheet_report_generation_v5"},
+    )
+
+    assert tool_name == "restart_execution"
+    assert tool_args == {
+        "execution_id": "2612306",
+        "workflow_name": "timesheet_report_generation_v5",
+    }
+
+
+def test_retry_arg_alignment_keeps_explicit_requested_execution_id():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "workflow_name": "timesheet_report_generation_v5",
+            "latest_status": "Failure",
+            "latest_execution_id": "2612306",
+            "latest_execution": {
+                "id": "2612306",
+                "bot_name": "timesheet_report_generation_v5",
+                "status": "Failure",
+            },
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._align_retry_tool_args_with_recent_failed_context(
+        user_message="restart execution 2611427",
+        state=state,
+        tool_name="restart_execution",
+        tool_args={"execution_id": "2611427", "workflow_name": "timesheet_report_generation_v5"},
+    )
+
+    assert tool_name == "restart_execution"
+    assert tool_args == {
+        "execution_id": "2611427",
+        "workflow_name": "timesheet_report_generation_v5",
+    }
+
+
 def test_failed_execution_explicit_resubmit_from_start_keeps_resubmit():
     orchestrator = Orchestrator()
     state = ConversationState()

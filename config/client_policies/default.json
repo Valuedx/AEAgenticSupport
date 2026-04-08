@@ -15,12 +15,16 @@
     ]
   },
   "messages": {
-    "life_asia_health_up": "Process failed due to Life Asia issue. System is operational. Please retry the workflow.",
-    "life_asia_health_down": "Process failed due to Life Asia issue. System is currently unavailable. Please try again later.",
+    "life_asia_health_up": "Life Asia is currently up and running.",
+    "life_asia_health_down": "Life Asia is currently unavailable.",
     "life_asia_health_running": "Life Asia health check is still running. Current status: {status}.",
-    "tebt_health_up": "Process failed due to TEBT issue. System is operational. Please retry the workflow.",
-    "tebt_health_down": "Process failed due to TEBT issue. System is currently unavailable. Please try again later.",
+    "tebt_health_up": "TEBT is currently up and running.",
+    "tebt_health_down": "TEBT is currently unavailable.",
     "tebt_health_running": "TEBT health check is still running. Current status: {status}.",
+    "related_issue_status_up": "{application} is currently up and running. This execution is still marked as failed, so the issue appears temporary or specific to that run.",
+    "related_issue_status_down": "{application} is currently unavailable, so this execution failed because the dependent application is down.",
+    "related_issue_status_running": "{application} health check is still running. Current status: {status}.",
+    "related_issue_status_unknown": "I could not confirm the current {application} status right now.",
     "retry_blocked_unhealthy": "{application} system is currently unavailable or under maintenance. Please try again later.",
     "retry_allowed_healthy": "{application} is healthy. Retrying workflow now..."
   }

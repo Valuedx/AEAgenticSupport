@@ -91,6 +91,33 @@ def test_orchestrator_format_completion_message_recovers_content_only_json_repor
     assert response.startswith("### Log Analysis")
 
 
+def test_orchestrator_format_completion_message_recovers_local_mcp_json_string_result():
+    orchestrator = Orchestrator()
+    data = {
+        "result": (
+            '{'
+            '"success": true, '
+            '"action": "restart_failed", '
+            '"request_id": "22880", '
+            '"new_request_id": null, '
+            '"status": null, '
+            '"reason": "Input file placed, restarting workflow", '
+            '"raw": {'
+            '"message": "Request [22880] has been restarted", '
+            '"success": true'
+            '}'
+            '}'
+        )
+    }
+
+    response = orchestrator._format_completion_message("ae.request.restart_failed", data)
+
+    assert "Action Completed" in response
+    assert "22880" in response
+    assert "restarted" in response.lower()
+    assert '"action": "restart_failed"' not in response
+
+
 def test_build_action_failure_response_preserves_structured_agent_log_timeout_details():
     orchestrator = Orchestrator()
 
@@ -196,7 +223,7 @@ def test_format_completion_message_prompt_blocks_unavailable_ticket_status_sugge
     assert "After a ticket is created, do not suggest checking status or updates" in captured["prompt"]
 
 
-def test_format_completion_message_failure_suggests_create_support_ticket():
+def test_format_completion_message_failure_suggests_support_ticket_in_plain_language():
     orchestrator = Orchestrator()
 
     response = orchestrator._format_completion_message(
@@ -212,7 +239,8 @@ def test_format_completion_message_failure_suggests_create_support_ticket():
     )
 
     assert "Unable to Complete Action" in response
-    assert "create_support_ticket" in response
+    assert "support ticket" in response.lower()
+    assert "create_support_ticket" not in response
 
 
 def test_recent_tool_result_fallback_prefers_new_request_id_over_old_request_id():

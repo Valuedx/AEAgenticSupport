@@ -86,7 +86,8 @@ def test_orchestrator_failure_message_lists_assigned_agents():
     assert "Assigned agents" in response
     assert "agent-timesheet-01 (STOPPED)" in response
     assert "agent-timesheet-02 (DISCONNECTED)" in response
-    assert "create_support_ticket" in response
+    assert "support ticket" in response.lower()
+    assert "create_support_ticket" not in response
 
 
 def test_get_execution_status_reports_other_process_running_when_new():
@@ -261,6 +262,39 @@ def test_get_execution_status_surfaces_completed_workflow_response_message():
     assert result["status"] == "Complete"
     assert result["message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
     assert result["workflow_response_message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+
+
+def test_get_execution_status_surfaces_related_app_failure_summary():
+    mock_client = MagicMock()
+    mock_client.get_execution_status.return_value = {
+        "id": "22887",
+        "status": "Failure",
+        "workflowName": "Life_Asia_Workflow",
+        "createdDate": "2026-04-08T13:45:47+00:00",
+    }
+
+    with patch("tools.status_tools.get_ae_client", return_value=mock_client), patch(
+        "tools.status_tools._maybe_add_related_issue_health_check",
+        return_value={
+            "issue_type": "life_asia",
+            "issue_label": "Life Asia",
+            "health_check_label": "Life Asia health check",
+            "workflow_name": "Life_Asia_Health_Check",
+            "status": "FAILED",
+            "request_id": "HC-002",
+            "message": "Life Asia is currently unavailable.",
+            "failure_reason": "Life Asia connection timeout.",
+            "application_status": "down",
+        },
+    ):
+        result = status_tools.get_execution_status("22887")
+
+    assert result["status"] == "Failure"
+    assert "Status: Failed." in result["message"]
+    assert "Likely cause: Life Asia connection timeout." in result["message"]
+    assert "Life Asia is currently unavailable" in result["message"]
+    assert result["failure_reason"] == "Life Asia connection timeout."
+    assert result["related_issue_check"]["application_status"] == "down"
 
 
 def test_t4_execute_and_poll_surfaces_completed_workflow_response_message():

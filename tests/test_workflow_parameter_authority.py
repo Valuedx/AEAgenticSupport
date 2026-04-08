@@ -163,7 +163,8 @@ def test_preflight_requires_exact_accessible_workflow_before_asking_for_params(m
         state,
     )
 
-    assert "exact workflow" in response.lower()
+    assert "workflow" in response.lower()
+    assert "available to your account" in response.lower()
     assert "Test_Demo" in response
     assert "empid" not in response
 
@@ -210,6 +211,55 @@ def test_preflight_checks_execute_access_before_param_collection(monkeypatch):
 
     assert "exact workflow" in response.lower() or "workflow list" in response.lower()
     assert "output path" not in response.lower()
+
+
+def test_preflight_skips_workflow_resolution_for_retry_followup_after_recent_failure(monkeypatch):
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.user_id = "webchat:kirtibala.gujar"
+    state.user_metadata = {"org_code": "AEGEMS"}
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "workflow_name": "timesheet_report_generation_v5",
+            "latest_status": "Failure",
+            "latest_execution_id": "2612306",
+            "latest_execution": {
+                "id": "2612306",
+                "bot_name": "timesheet_report_generation_v5",
+                "status": "Failure",
+            },
+        },
+        True,
+    )
+
+    class StubClient:
+        default_org_code = "AEGEMS"
+
+        @staticmethod
+        def is_specific_workflow_lookup_query(text):
+            raise AssertionError("workflow lookup specificity should not run for retry follow-up preflight")
+
+        @staticmethod
+        def resolve_cached_workflow_name(workflow_name, **kwargs):
+            raise AssertionError("workflow resolution should not run for retry follow-up preflight")
+
+    monkeypatch.setattr(orchestrator, "_is_execution_request", lambda message: True)
+    monkeypatch.setattr("agents.orchestrator.get_ae_client", lambda: StubClient())
+    monkeypatch.setattr("agents.orchestrator.llm_client.chat", lambda *args, **kwargs: "YES")
+    monkeypatch.setattr(
+        "agents.orchestrator.tool_registry.execute",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("discover_tools should not run for retry follow-up preflight")),
+    )
+
+    response = orchestrator._preflight_workflow_param_collection(
+        "try to retrigger",
+        state,
+    )
+
+    assert response is None
 
 
 def test_referential_followup_reuses_recent_workflow_context_before_fuzzy_lookup(monkeypatch):

@@ -83,6 +83,33 @@ def test_resubmit_execution_allows_failed_status():
     assert result["success"] is True
 
 
+def test_resubmit_execution_accepts_scoped_user_context():
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {"status": "FAILED", "workflowName": "Claims_Processing_Daily"}
+
+        def get_workflow_agents(self):
+            return []
+
+        def resubmit_request(self, execution_id, reason="", from_failure_point=True):
+            return {"message": "resubmitted", "success": True, "automationRequestId": execution_id}
+
+        def poll_execution_status(self, execution_id, poll_interval_sec=2, max_attempts=15):
+            return {"status": "QUEUED", "raw": {"status": "QUEUED"}}
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._get_request_payload",
+        return_value={},
+    ):
+        result = resubmit_execution(
+            execution_id="22024",
+            user_id="webchat:kirtibala.gujar",
+            org_code="AEGEMS",
+        )
+
+    assert result["success"] is True
+
+
 def test_resubmit_execution_surfaces_new_request_id_from_ae_response():
     class StubClient:
         def get_execution_status(self, execution_id):

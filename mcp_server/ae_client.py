@@ -316,8 +316,8 @@ class AEClient:
 
     def resubmit_request(self, request_id: str, reason: str = "") -> dict:
         return self._try_paths("POST", [
-            f"/{self.org}/workflowinstances/{request_id}/resubmit",
             f"/workflowinstances/{request_id}/resubmit",
+            f"/{self.org}/workflowinstances/{request_id}/resubmit",
         ], json_body={"reason": reason, "fromFailurePoint": True})
 
     def add_request_comment(self, request_id: str, comment: str) -> dict:
@@ -334,8 +334,8 @@ class AEClient:
 
     def resubmit_request_from_start(self, request_id: str, reason: str = "") -> dict:
         return self._try_paths("POST", [
-            f"/{self.org}/workflowinstances/{request_id}/resubmit",
             f"/workflowinstances/{request_id}/resubmit",
+            f"/{self.org}/workflowinstances/{request_id}/resubmit",
         ], json_body={"reason": reason, "fromFailurePoint": False})
 
     def enable_workflow(self, workflow_id: str, reason: str = "") -> dict:

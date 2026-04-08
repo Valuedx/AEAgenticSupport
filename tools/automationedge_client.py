@@ -44,7 +44,8 @@ class AutomationEdgeClient:
         "have", "has", "had", "am", "is", "are", "was", "were", "be", "been",
         "bot", "workflow", "process", "job", "agent", "automation",
         "automationedge", "ae", "trigger", "run", "start", "execute",
-        "launch", "submit", "rerun", "retry", "kick", "off", "for",
+        "launch", "submit", "rerun", "retry", "restart", "resubmit",
+        "retrigger", "kick", "off", "for", "try", "again",
         "to", "of", "on", "in", "with", "and", "now",
     }
 
@@ -473,8 +474,8 @@ class AutomationEdgeClient:
         when the restart limit of 10 has been reached.
         """
         paths = [
-            f"/{self.default_org_code}/workflowinstances/{execution_id}/restart" if self.default_org_code else None,
             f"/workflowinstances/{execution_id}/restart",
+            f"/{self.default_org_code}/workflowinstances/{execution_id}/restart" if self.default_org_code else None,
         ]
         paths = [p for p in paths if p]
         last_exc = None
@@ -539,8 +540,8 @@ class AutomationEdgeClient:
     def resubmit_request(self, request_id: str, reason: str = "", from_failure_point: bool = True) -> dict:
         """Resubmit a failed instance (either from failure point or start)."""
         paths = [
-            f"/{self.default_org_code}/workflowinstances/{request_id}/resubmit" if self.default_org_code else None,
             f"/workflowinstances/{request_id}/resubmit",
+            f"/{self.default_org_code}/workflowinstances/{request_id}/resubmit" if self.default_org_code else None,
         ]
         paths = [p for p in paths if p]
         payload = {"reason": reason, "fromFailurePoint": from_failure_point}

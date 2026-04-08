@@ -249,11 +249,10 @@ def _apply_related_issue_health_gate(
 
 
 def _pre_trigger_health_gate(client, workflow_name: str, org_code: str) -> dict | None:
-    """Pre-trigger gate for recent failed runs.
+    """Pre-trigger gate for the latest failed run.
 
     We inspect the latest terminal execution and only gate when:
     - status is failed/error
-    - failure is recent (within 4 hours)
     - logs indicate Life Asia or TEBT related issue
     """
     from tools.status_tools import _get_workflow_instances_compat
@@ -851,9 +850,11 @@ def restart_execution(execution_id: str,
                       workflow_name: str = "Unknown",
                       from_checkpoint: bool = True,
                       reason: str = "Restarted by support agent",
+                      user_id: str = "",
                       requested_by: str = None,
                       case_id: str = None,
-                      dry_run: bool = False) -> dict:
+                      dry_run: bool = False,
+                      org_code: str = "") -> dict:
     """Restart a failed execution."""
     if workflow_name != "Unknown" and workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
         return {
@@ -905,7 +906,7 @@ def restart_execution(execution_id: str,
     if agent_guard:
         return agent_guard
 
-    resolved_org = str(default_org_code()).strip()
+    resolved_org = str(org_code or default_org_code()).strip()
     retry_health_gate = None
     try:
         retry_health_gate = _pre_retry_health_gate(
@@ -989,7 +990,9 @@ def restart_execution(execution_id: str,
                 resubmit_resp = resubmit_execution(
                     execution_id=execution_id,
                     from_failure_point=True,
-                    reason=f"{reason} (auto-resubmit: restart limit AE-2624 reached)"
+                    reason=f"{reason} (auto-resubmit: restart limit AE-2624 reached)",
+                    user_id=user_id,
+                    org_code=org_code,
                 )
                 return {
                     **resubmit_resp,
@@ -1024,7 +1027,9 @@ def restart_execution(execution_id: str,
 
 def resubmit_execution(execution_id: str,
                        from_failure_point: bool = True,
-                       reason: str = "Resubmitted by support agent") -> dict:
+                       reason: str = "Resubmitted by support agent",
+                       user_id: str = "",
+                       org_code: str = "") -> dict:
     """Resubmit a failed execution as a NEW run."""
     client = get_ae_client()
     status_resp = None
@@ -1055,7 +1060,7 @@ def resubmit_execution(execution_id: str,
     if agent_guard:
         return agent_guard
 
-    resolved_org = str(default_org_code()).strip()
+    resolved_org = str(org_code or default_org_code()).strip()
     retry_health_gate = None
     try:
         retry_health_gate = _pre_retry_health_gate(
@@ -1690,9 +1695,17 @@ tool_registry.register(
                 "type": "string",
                 "description": "Failed execution ID (request id)",
             },
+            "org_code": {
+                "type": "string",
+                "description": "Tenant org code used for scoped policy and health-check resolution.",
+            },
             "workflow_name": {
                 "type": "string",
                 "description": "Workflow name (optional if execution_id is known)",
+            },
+            "user_id": {
+                "type": "string",
+                "description": "User id from conversation context for scoped retry handling.",
             },
             "from_checkpoint": {
                 "type": "boolean",
@@ -1729,6 +1742,14 @@ tool_registry.register(
             "execution_id": {
                 "type": "string",
                 "description": "The failed execution ID (request id) to resubmit",
+            },
+            "user_id": {
+                "type": "string",
+                "description": "User id from conversation context for scoped retry handling.",
+            },
+            "org_code": {
+                "type": "string",
+                "description": "Tenant org code used for scoped policy and health-check resolution.",
             },
             "from_failure_point": {
                 "type": "boolean",
@@ -1879,7 +1900,6 @@ tool_registry.register(
 #     ),
 #     disable_schedule,
 # )
-
 # tool_registry.register(
 #     ToolDefinition(
 #         name="ae.schedule.enable",

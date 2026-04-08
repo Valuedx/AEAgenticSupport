@@ -31,7 +31,7 @@ def test_restart_execution_blocks_when_related_app_health_check_fails():
             "health_check_label": "Life Asia health check",
             "workflow_name": "TEBT_Health_Check",
             "status": "FAILED",
-            "message": "Process failed due to Life Asia issue. System is currently unavailable. Please try again later.",
+            "message": "Life Asia is currently unavailable.",
         },
     ):
         result = remediation_tools.restart_execution(execution_id="22024")
@@ -73,7 +73,7 @@ def test_resubmit_execution_allows_retry_when_related_app_health_check_passes():
             "health_check_label": "TEBT health check",
             "workflow_name": "Life_Asia_Health_Check",
             "status": "COMPLETE",
-            "message": "Process failed due to TEBT issue. System is operational. Please retry the workflow.",
+            "message": "TEBT is currently up and running.",
         },
     ):
         result = remediation_tools.resubmit_execution(execution_id="22024")
@@ -81,3 +81,45 @@ def test_resubmit_execution_allows_retry_when_related_app_health_check_passes():
     assert result["success"] is True
     assert result["health_gate"]["health_gate_passed"] is True
     assert "Retrying workflow now" in result["message"]
+
+
+def test_restart_execution_uses_explicit_org_code_for_retry_health_gate():
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {"status": "FAILED", "workflowName": "Claims_Process"}
+
+        def get_workflow_agents(self):
+            return []
+
+        def restart_request(self, execution_id, reason=""):
+            return {"success": True, "automationRequestId": execution_id}
+
+        def poll_execution_status(self, execution_id, poll_interval_sec=2, max_attempts=15):
+            return {"status": "QUEUED", "raw": {"status": "QUEUED"}}
+
+    captured: dict[str, str] = {}
+
+    def fake_pre_retry_health_gate(client, execution_id, workflow_name, org_code):
+        captured["org_code"] = org_code
+        return {
+            "health_gate_passed": True,
+            "issue_type": "tebt",
+            "issue_label": "TEBT",
+            "health_summary": "TEBT is currently up and running.\n\nTEBT is healthy. Retrying workflow now...",
+            "health_result": {"status": "COMPLETE", "passed": True},
+        }
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._get_request_payload",
+        return_value={},
+    ), patch(
+        "tools.remediation_tools._pre_retry_health_gate",
+        side_effect=fake_pre_retry_health_gate,
+    ), patch(
+        "tools.remediation_tools.default_org_code",
+        return_value="DEFAULT",
+    ):
+        result = remediation_tools.restart_execution(execution_id="22024", org_code="AEGEMS")
+
+    assert result["success"] is True
+    assert captured["org_code"] == "AEGEMS"

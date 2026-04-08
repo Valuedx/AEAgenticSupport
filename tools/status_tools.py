@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
-
+import re
 from config.client_policy import format_client_message
 from config.settings import CONFIG
 from security.workflow_access import (
@@ -341,6 +341,203 @@ def _detect_related_issue(log_result: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
+def _normalize_related_issue_sentence(value: Any) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    text = text.strip(" .,:;")
+    if not text:
+        return ""
+    if len(text) > 220:
+        text = text[:217].rsplit(" ", 1)[0].rstrip(" ,;:")
+        if not text:
+            return ""
+        text += "..."
+    if text[-1] not in ".!?":
+        text += "."
+    return text
+
+
+def _extract_related_issue_reason(log_result: dict[str, Any], issue_info: dict[str, str]) -> str:
+    if not isinstance(log_result, dict):
+        return ""
+
+    issue_label = str(issue_info.get("issue_label") or "Related application").strip()
+    issue_type = str(issue_info.get("issue_type") or "").strip().lower()
+    context_tokens = {
+        "connect",
+        "connection",
+        "timeout",
+        "down",
+        "unavailable",
+        "socket",
+        "host",
+        "service",
+        "login",
+        "portal",
+        "credential",
+        "password",
+        "auth",
+        "authentication",
+        "session",
+        "sign in",
+        "signin",
+    }
+    markers = {issue_label.lower()}
+    if issue_type == "life_asia":
+        markers.update({"life asia", "life_asia", "lifeasia"})
+    elif issue_type == "tebt":
+        markers.add("tebt")
+
+    candidates: list[str] = []
+    primary_error = log_result.get("primary_error")
+    if isinstance(primary_error, dict):
+        for key in ("error_message", "error_label", "component"):
+            value = primary_error.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+
+    for group in log_result.get("error_groups") or []:
+        if isinstance(group, dict):
+            value = group.get("error_message")
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+
+    for block in log_result.get("error_blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        value = block.get("error_message")
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+        for line in block.get("lines") or []:
+            if isinstance(line, str) and line.strip():
+                candidates.append(line.strip())
+
+    for key in ("report", "error", "message", "note"):
+        value = log_result.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+
+    seen: set[str] = set()
+    cleaned_candidates: list[str] = []
+    for candidate in candidates:
+        normalized = _normalize_related_issue_sentence(candidate)
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned_candidates.append(normalized)
+
+    for candidate in cleaned_candidates:
+        lowered = candidate.lower()
+        if any(marker in lowered for marker in markers):
+            return candidate
+
+    for candidate in cleaned_candidates:
+        lowered = candidate.lower()
+        if any(token in lowered for token in context_tokens):
+            if issue_label and issue_label.lower() not in lowered:
+                return _normalize_related_issue_sentence(f"{issue_label} issue: {candidate}")
+            return candidate
+
+    if issue_label:
+        return _normalize_related_issue_sentence(f"{issue_label} related issue.")
+    return cleaned_candidates[0] if cleaned_candidates else ""
+
+
+def _classify_related_health_status(status: str, *, has_request_id: bool = True) -> str:
+    normalized = str(status or "").strip().upper()
+    success_statuses = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED"}
+    failure_statuses = {"FAILURE", "FAILED", "DOWN", "TERMINATED", "CANCELLED"}
+    if normalized in success_statuses:
+        return "up"
+    if normalized in failure_statuses:
+        return "down"
+    if normalized == "ERROR" and not has_request_id:
+        return "unknown"
+    if normalized:
+        return "pending"
+    return "unknown"
+
+
+def _build_related_issue_status_message(
+    display_name: str,
+    latest_ts: datetime | None,
+    related_issue_check: dict[str, Any],
+    *,
+    org_code: str = "",
+) -> str:
+    issue_label = str(related_issue_check.get("issue_label") or "Related application").strip()
+    failure_reason = _normalize_related_issue_sentence(related_issue_check.get("failure_reason") or "")
+    health_status = str(related_issue_check.get("status") or "").strip()
+    health_state = str(related_issue_check.get("application_status") or "").strip().lower()
+    if not health_state:
+        health_state = _classify_related_health_status(
+            health_status,
+            has_request_id=bool(str(related_issue_check.get("request_id") or "").strip()),
+        )
+
+    if latest_ts:
+        intro = f"Status: Failed. The latest run for **{display_name}** failed on {_format_display_time(latest_ts)}."
+    else:
+        intro = f"Status: Failed. The latest run for **{display_name}** failed recently."
+
+    parts = [intro]
+    if failure_reason:
+        parts.append(f"Likely cause: {failure_reason}")
+    else:
+        parts.append(f"Likely cause: {issue_label} related issue.")
+
+    if health_state == "up":
+        parts.append(
+            format_client_message(
+                "related_issue_status_up",
+                "{application} is currently up and running. This execution is still marked as failed, so the issue appears temporary or specific to that run.",
+                org_code=org_code,
+                application=issue_label,
+                workflow_name=display_name,
+                status=health_status,
+            )
+        )
+    elif health_state == "down":
+        parts.append(
+            format_client_message(
+                "related_issue_status_down",
+                "{application} is currently unavailable, so this execution failed because the dependent application is down.",
+                org_code=org_code,
+                application=issue_label,
+                workflow_name=display_name,
+                status=health_status,
+            )
+        )
+    elif health_state == "pending":
+        parts.append(
+            format_client_message(
+                "related_issue_status_running",
+                "{application} health check is still running. Current status: {status}.",
+                org_code=org_code,
+                application=issue_label,
+                workflow_name=display_name,
+                status=health_status or "UNKNOWN",
+            )
+        )
+    else:
+        parts.append(
+            format_client_message(
+                "related_issue_status_unknown",
+                "I could not confirm the current {application} status right now.",
+                org_code=org_code,
+                application=issue_label,
+                workflow_name=display_name,
+                status=health_status,
+            )
+        )
+
+    return " ".join(part.strip() for part in parts if str(part or "").strip())
+
+
 def _build_related_health_check_summary(issue_info: dict[str, str], status: str, org_code: str = "") -> str:
     issue_type = str(issue_info.get("issue_type") or "").strip().lower()
     normalized = str(status or "").strip().upper()
@@ -351,7 +548,7 @@ def _build_related_health_check_summary(issue_info: dict[str, str], status: str,
         if normalized in success_statuses:
             return format_client_message(
                 "life_asia_health_up",
-                "Process failed due to Life Asia issue. System is operational. Please retry the workflow.",
+                "Life Asia is currently up and running.",
                 org_code=org_code,
                 application="Life Asia",
                 status=status,
@@ -359,7 +556,7 @@ def _build_related_health_check_summary(issue_info: dict[str, str], status: str,
         if normalized in failure_statuses:
             return format_client_message(
                 "life_asia_health_down",
-                "Process failed due to Life Asia issue. System is currently unavailable. Please try again later.",
+                "Life Asia is currently unavailable.",
                 org_code=org_code,
                 application="Life Asia",
                 status=status,
@@ -376,7 +573,7 @@ def _build_related_health_check_summary(issue_info: dict[str, str], status: str,
         if normalized in success_statuses:
             return format_client_message(
                 "tebt_health_up",
-                "Process failed due to TEBT issue. System is operational. Please retry the workflow.",
+                "TEBT is currently up and running.",
                 org_code=org_code,
                 application="TEBT",
                 status=status,
@@ -384,7 +581,7 @@ def _build_related_health_check_summary(issue_info: dict[str, str], status: str,
         if normalized in failure_statuses:
             return format_client_message(
                 "tebt_health_down",
-                "Process failed due to TEBT issue. System is currently unavailable. Please try again later.",
+                "TEBT is currently unavailable.",
                 org_code=org_code,
                 application="TEBT",
                 status=status,
@@ -504,6 +701,7 @@ def _maybe_add_related_issue_health_check(
     issue_info = _detect_related_issue(log_result)
     if not issue_info:
         return None
+    failure_reason = _extract_related_issue_reason(log_result, issue_info)
 
     client = get_ae_client()
     try:
@@ -524,8 +722,15 @@ def _maybe_add_related_issue_health_check(
             "status": "ERROR",
             "used_admin_scope": bool(CONFIG.get("RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)),
             "message": f"{issue_info.get('health_check_label', 'Related health check')} could not be triggered: {exc}",
+            "failure_reason": failure_reason,
+            "application_status": "unknown",
         }
 
+    health_result["failure_reason"] = failure_reason
+    health_result["application_status"] = _classify_related_health_status(
+        str(health_result.get("status") or ""),
+        has_request_id=bool(str(health_result.get("request_id") or "").strip()),
+    )
     return health_result
 
 
@@ -553,7 +758,7 @@ def check_workflow_status(
                 or not is_read_enforced()
                 or _is_visible_workflow_record(client, instance, user_id, org_code)
             ):
-                return _format_single_instance_response(instance, client=client)
+                return _format_single_instance_response(instance, client=client, org_code=org_code)
             if instance and (user_id or is_read_enforced()):
                 return {
                     "workflow_name": query_name,
@@ -707,11 +912,12 @@ def check_workflow_status(
     resolved_org = str(org_code or default_org_code()).strip()
     related_issue_check = _maybe_add_related_issue_health_check(latest, org_code=resolved_org) if query_name else None
     if related_issue_check and related_issue_check.get("message"):
-        issue_label = str(related_issue_check.get("issue_label") or "").strip()
-        health_check_label = str(related_issue_check.get("health_check_label") or "Related health check").strip()
-        if issue_label:
-            msg += f" Latest failure logs suggest a **{issue_label}** issue."
-        msg += f" Triggered **{health_check_label}** via admin scope. {related_issue_check['message']}"
+        msg = _build_related_issue_status_message(
+            display_name,
+            latest_ts,
+            related_issue_check,
+            org_code=resolved_org,
+        )
 
     result = {
         "bot_name": display_name,
@@ -738,10 +944,12 @@ def check_workflow_status(
         result["other_workflow_name"] = latest_diag.get("other_workflow_name") or ""
     if related_issue_check:
         result["related_issue_check"] = related_issue_check
+        if related_issue_check.get("failure_reason"):
+            result["failure_reason"] = related_issue_check.get("failure_reason")
     return result
 
 
-def _format_single_instance_response(instance: dict, client=None) -> dict:
+def _format_single_instance_response(instance: dict, client=None, org_code: str = "") -> dict:
     """Helper to format a single T4 instance into the standard status response."""
     client = client or get_ae_client()
     request_id = _extract_execution_ref(instance)
@@ -765,6 +973,16 @@ def _format_single_instance_response(instance: dict, client=None) -> dict:
     elif detail_msg and str(status or "").strip().upper() in {"COMPLETE", "FAILURE", "ERROR"}:
         msg = detail_msg
 
+    resolved_org = str(org_code or default_org_code()).strip()
+    related_issue_check = _maybe_add_related_issue_health_check(instance, org_code=resolved_org)
+    if related_issue_check and related_issue_check.get("message"):
+        msg = _build_related_issue_status_message(
+            bot_name,
+            ts,
+            related_issue_check,
+            org_code=resolved_org,
+        )
+
     result = {
         "bot_name": bot_name,
         "workflow_name": bot_name,
@@ -787,6 +1005,10 @@ def _format_single_instance_response(instance: dict, client=None) -> dict:
         result["assigned_agents"] = diagnosis.get("assigned_agents") or []
         result["other_execution_id"] = diagnosis.get("other_execution_id") or ""
         result["other_workflow_name"] = diagnosis.get("other_workflow_name") or ""
+    if related_issue_check:
+        result["related_issue_check"] = related_issue_check
+        if related_issue_check.get("failure_reason"):
+            result["failure_reason"] = related_issue_check.get("failure_reason")
     return result
 
 
@@ -1370,6 +1592,7 @@ def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "
     workflow_name = _extract_workflow_ref(resp)
     diagnosis = _get_new_status_diagnosis(client, resp, execution_id=execution_id)
     start_time = resp.get("startTime") or resp.get("createdDate")
+    start_ts = _parse_timestamp(start_time)
     detail_msg = _extract_workflow_response_message(resp)
     message = (
         str(diagnosis.get("summary"))
@@ -1384,6 +1607,16 @@ def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "
             )
         )
     )
+
+    resolved_org = str(org_code or default_org_code()).strip()
+    related_issue_check = _maybe_add_related_issue_health_check(resp, org_code=resolved_org)
+    if related_issue_check and related_issue_check.get("message"):
+        message = _build_related_issue_status_message(
+            workflow_name or "this workflow",
+            start_ts,
+            related_issue_check,
+            org_code=resolved_org,
+        )
     
     # Enrich the response for LLM decision making
     result = {
@@ -1417,6 +1650,10 @@ def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "
         result["assigned_agents"] = diagnosis.get("assigned_agents") or []
         result["other_execution_id"] = diagnosis.get("other_execution_id") or ""
         result["other_workflow_name"] = diagnosis.get("other_workflow_name") or ""
+    if related_issue_check:
+        result["related_issue_check"] = related_issue_check
+        if related_issue_check.get("failure_reason"):
+            result["failure_reason"] = related_issue_check.get("failure_reason")
     return result
 
 

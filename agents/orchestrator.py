@@ -397,6 +397,8 @@ class Orchestrator:
                 "discover_tools",
                 "check_workflow_status",
                 "list_recent_failures",
+                "restart_execution",
+                "resubmit_execution",
                 "trigger_workflow",
                 "t4_execute_and_poll",
                 "ae.workflow.list",
@@ -1361,6 +1363,12 @@ class Orchestrator:
                             tool_name=tool_name,
                             tool_args=tool_args,
                         )
+                        tool_name, tool_args = self._align_retry_tool_args_with_recent_failed_context(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
                         turn_tools, active_tool_names = self._ensure_turn_tool_active(
                             turn_tools,
                             cast(set[str], active_tool_names),
@@ -1976,13 +1984,58 @@ class Orchestrator:
         )
         if "support ticket" in combined or "create_support_ticket" in combined:
             return ""
-        return (
-            "\n\n**Next step:** If you'd like, I can raise a support ticket for this issue "
-            "using `create_support_ticket`."
-        )
+        return "\n\n**Next step:** If you'd like, I can raise a support ticket for this issue."
 
     def _format_completion_message(self, tool_name: str, data: dict) -> str:
         """Create a clean, human-readable summary of the tool result with LLM-generated suggestions."""
+
+        def _parse_json_text(value: Any) -> dict[str, Any] | None:
+            text = str(value or "").strip()
+            if not text or text[0] not in "[{":
+                return None
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return None
+            return dict(parsed) if isinstance(parsed, dict) else {"result": parsed}
+
+        def _natural_success_message(tool_name: str, payload: dict[str, Any]) -> str:
+            safe_payload = {
+                key: value
+                for key, value in (payload or {}).items()
+                if key not in {"raw", "_mcp_content", "_mcp_meta", "_mcp_is_error"}
+            }
+            raw_payload = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+            if raw_payload:
+                raw_message = str(raw_payload.get("message") or raw_payload.get("report") or "").strip()
+                if raw_message:
+                    return raw_message
+            try:
+                prompt = (
+                    "Turn this successful tool result into a short, natural chatbot reply. "
+                    "Do not output JSON. Do not output field names. Do not output code blocks. "
+                    "Do not output raw object dumps. Do not add unwanted extra text, headings, bullets, or explanations. "
+                    "Return only the final user-facing response in plain chat language. "
+                    "Keep it to 1 or 2 sentences. Mention the request ID only if it is useful.\n\n"
+                    f"Tool: {tool_name}\n"
+                    f"Result: {json.dumps(safe_payload, default=str)}"
+                )
+                text = str(
+                    llm_client.chat(
+                        prompt,
+                        system=(
+                            "You write concise, natural success confirmations for chatbot users. "
+                            "Never return JSON, markdown code fences, headings, bullets, or unnecessary extra text."
+                        ),
+                        max_tokens=5000,
+                    )
+                    or ""
+                ).strip()
+                if text and text[0] not in "[{":
+                    return text
+            except Exception:
+                pass
+            return ""
 
         # ── Normalise: MCP tools often serialise their dict return value to a
         # JSON string over the transport layer. Parse it back so the guards below
@@ -1995,6 +2048,22 @@ class Orchestrator:
                     data = _parsed
             except Exception:
                 pass
+
+        while isinstance(data, dict):
+            nested_text = None
+            for key in ("result", "data", "payload", "response"):
+                candidate = data.get(key)
+                if isinstance(candidate, str):
+                    parsed_candidate = _parse_json_text(candidate)
+                    if parsed_candidate:
+                        nested_text = dict(parsed_candidate)
+                        for meta_key in ("_mcp_content", "_mcp_meta", "_mcp_is_error"):
+                            if meta_key in data and meta_key not in nested_text:
+                                nested_text[meta_key] = data[meta_key]
+                        break
+            if not nested_text:
+                break
+            data = nested_text
 
         while isinstance(data, dict):
             nested = None
@@ -2134,9 +2203,26 @@ class Orchestrator:
                         text_blocks.append(text)
             if text_blocks:
                 candidate_report = "\n\n".join(text_blocks).strip()
-                if len(candidate_report) > 50:
+                parsed_candidate = _parse_json_text(candidate_report)
+                if parsed_candidate:
+                    merged = dict(parsed_candidate)
+                    for meta_key in ("_mcp_content", "_mcp_meta", "_mcp_is_error"):
+                        if meta_key in data and meta_key not in merged:
+                            merged[meta_key] = data[meta_key]
+                    data = merged
+                elif len(candidate_report) > 50:
                     report = candidate_report
-        msg = (data.get("message") if isinstance(data, dict) else None) or f"I've successfully completed the {tool_name} action."
+        raw_payload = data.get("raw") if isinstance(data, dict) and isinstance(data.get("raw"), dict) else {}
+        derived_message = ""
+        if isinstance(raw_payload, dict):
+            derived_message = str(raw_payload.get("message") or raw_payload.get("report") or "").strip()
+        if not derived_message and isinstance(data, dict) and not data.get("message"):
+            derived_message = _natural_success_message(tool_name, data)
+        msg = (
+            (data.get("message") if isinstance(data, dict) else None)
+            or derived_message
+            or f"I've successfully completed the {tool_name} action."
+        )
 
         # 🎯 PRIORITY: If the tool provides a detailed report (Markdown), show it CLEANLY.
         # No "Action Completed" banner, no secondary suggestions unless requested.
@@ -2177,14 +2263,11 @@ class Orchestrator:
             status_prev = str(status or "").lower()
             is_failure = any(term in status_prev for term in ("fail", "error", "abort", "reject", "cancel", "invalid"))
 
-            ticket_tool = "create_support_ticket"
-            
             global_ticket_instruction = (
                 "CRITICAL: If the result indicates any failure, issue, blocked action, "
                 "or agent not running (stopped/offline/unavailable), at least ONE suggestion "
-                f"MUST be for creating a support ticket using `{ticket_tool}`. "
-                "If it's a technical error, suggest an 'Incident' type. "
-                "If it's a service gap, suggest a 'Request' type."
+                "MUST be for raising a support ticket in plain business language. "
+                "Do not mention internal tool names, function names, or parameter names in the user-facing suggestion."
             )
             error_instruction = ""
             if is_failure:
@@ -2193,7 +2276,7 @@ class Orchestrator:
                 # Even on success, maybe they want to raise a service request?
                 error_instruction = (
                     f"{global_ticket_instruction} "
-                    f"If there is no issue in this result, you can still suggest `{ticket_tool}` as an optional Request-type follow-up."
+                    "If there is no issue in this result, a support ticket suggestion can still be optional."
                 )
 
             context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {str(msg)[:200]}"
@@ -2322,7 +2405,7 @@ Rules:
     - Use a DIFFERENT heading each time — rotate naturally among: "Here are a few options:", "You might also want to:", "Suggested next actions:", "Can I help with anything else?", "What's your next step?" — NEVER repeat the same heading in consecutive turns.
     - Keep suggestions relevant to the context (e.g., after a failure: offer log analysis; after a restart: offer status monitoring).
     - Match the persona: technical users get tool-specific options; business users get plain-language options.
-    - For ANY failure, issue, blocked action, or agent-not-running condition (including agent STOPPED/OFFLINE/UNAVAILABLE), at least one suggestion MUST be to raise a support ticket using `create_support_ticket`.
+    - For ANY failure, issue, blocked action, or agent-not-running condition (including agent STOPPED/OFFLINE/UNAVAILABLE), at least one suggestion MUST mention raising a support ticket in plain language. Do not mention internal tool names unless the user explicitly asks for them.
     - This rule applies across all workflows and all tools; do not rely on workflow-specific hardcoding.
     - Do NOT hardcode workflow names, bot names, ticket patterns, agent names, tenant names, organization names, or customer-specific rules. Use only the live tool data and the current conversation context.
 14. **TERMINOLOGY & STATUS-FIRST RULE**: "Bots" and "Workflows" are synonymous. If a user asks about a bot (even by a "friendly" or "natural language" name like 'Email Bot JD'), you MUST call `check_workflow_status` as your FIRST action unless they explicitly say "run", "start", or "trigger". Never assume the user wants to execute a bot just because they mentioned its name.
@@ -2342,7 +2425,8 @@ Rules:
 21. **AGENT STATUS DISCOVERY**: Always use `ae.agent.list_all` for any general agent status query to see all Running, Stopped, and Offline agents.
 22. **STRICT AGENT ENFORCEMENT**: You MUST call `ae.agent.list_all` (or `list_running`) to discover numeric IDs and verify `RUNNING` status BEFORE suggesting or triggering any diagnostic action (logs, RDP, etc.). NEVER call diagnostics if the agent is `STOPPED`.
 23. **PRECISION ID RESOLUTION**: When calling agent-related tools, always use the numeric `agent_id` (e.g. "2928") resolved from the agent list, rather than the search name (e.g. "vaishnavi.malusare..."), to ensure 100% precision.
-24. **RELATED SYSTEM HEALTH CHECKS**: If the user asks for a process status, failure reason, or health check and the failing run may be related to Life Asia connectivity or TEBT login/portal problems, call `check_workflow_status` first. That tool may automatically inspect the latest failure evidence and run the configured related-system health check via admin scope. If the tool response includes a related issue check/result, you MUST surface that result clearly to the user.
+24. **RELATED SYSTEM HEALTH CHECKS**: If the user asks for a process status, failure reason, or health check and the failing run may be related to Life Asia connectivity or TEBT login/portal problems, call `check_workflow_status` first. That tool may automatically inspect the latest failure evidence and run the configured related-system health check via admin scope. If the tool response includes a related issue check/result, you MUST surface that result clearly to the user. When the workflow status is failed, keep the workflow status as "Failed" even if the related application is currently healthy. Describe application health separately from workflow status. If the user asks why it failed, provide the application-related reason in simple business language.
+24a. **GENERIC RETRY FOLLOW-UP RULE**: If the user sends a short retry follow-up after a failed execution was already discussed, treat it as a follow-up to the most recent failed execution. Do NOT treat the follow-up phrase itself as a workflow name.
 25. **MEANINGFUL FIRST-LINE RULE**: Start every final reply with the answer, outcome, or current status. Do NOT open with internal narration such as "This looks related", "I would like to perform", "I'll track it", or raw tool names.
 26. **CHAT-NOT-SYSTEM RULE**: Write like a helpful teammate in chat. Avoid raw field dumps such as `workflow_name`, `user_id`, `org_code`, JSON-like parameter blocks, or internal tool names unless the user explicitly needs that level of detail.
 27. **APPROVAL & INPUT REQUEST STYLE**: When asking for confirmation or missing information, explain what will happen, why it matters, and what you need from the user in clean, user-friendly language. Avoid robotic approval or parameter-collection wording.
@@ -2351,7 +2435,7 @@ Rules:
 30. **FILE-MISSING FAILURE RULE**: If a workflow failed because a required file is missing/unavailable, do NOT suggest questions like "Can I check the file?" or similar exploratory follow-up questions. File handling through chat is not supported. Give direct, action-based guidance only:
     - State that the required file is not available in the shared location.
     - Ask the user to upload/place the file in the expected location and retry the workflow.
-    - Optionally suggest raising a support ticket via `create_support_ticket`.
+    - Optionally suggest raising a support ticket in plain language.
     - Do not suggest unsupported file-check operations.
 31. **NEW-STATE DIAGNOSIS ORDER**: When a user asks why an execution is in NEW/QUEUED/PENDING state, diagnose in this order:
     - First verify whether the workflow's assigned agent is running.
@@ -2554,6 +2638,13 @@ CRITICAL RULES:
         # AE-102: Strictly respect execution intent.
         # If the LLM says NOT_EXECUTE, don't proactively start param collection/blocking.
         if not execution_intent:
+            return None
+
+        if self._is_retry_followup_for_recent_failure(msg, state):
+            logger.info(
+                "Skipping workflow preflight for retry follow-up message=%r because recent failed execution context is available",
+                msg[:120],
+            )
             return None
 
         client = get_ae_client()
@@ -3907,17 +3998,28 @@ CRITICAL RULES:
             if not isinstance(result, dict):
                 continue
 
-            status = str(result.get("status") or result.get("state") or "").upper()
+            latest_execution = result.get("latest_execution") or {}
+            status = str(
+                result.get("latest_status")
+                or result.get("status")
+                or result.get("state")
+                or (latest_execution.get("status") if isinstance(latest_execution, dict) else "")
+                or ""
+            ).upper()
             error_text = str(result.get("error") or result.get("message") or "").lower()
             hint_text = str(result.get("hint") or "").lower()
             workflow_name = str(
                 result.get("workflow_name")
+                or (latest_execution.get("bot_name") if isinstance(latest_execution, dict) else "")
                 or (call.get("params") or {}).get("workflow_name")
                 or ""
             ).strip()
             execution_id = str(
+                result.get("latest_execution_id")
+                or
                 result.get("execution_id")
                 or result.get("request_id")
+                or (latest_execution.get("id") if isinstance(latest_execution, dict) else "")
                 or (call.get("params") or {}).get("execution_id")
                 or (call.get("params") or {}).get("request_id")
                 or ""
@@ -3949,13 +4051,24 @@ CRITICAL RULES:
             if not isinstance(result, dict):
                 continue
 
-            status = str(result.get("status") or result.get("state") or "").upper()
+            latest_execution = result.get("latest_execution") or {}
+            status = str(
+                result.get("latest_status")
+                or result.get("status")
+                or result.get("state")
+                or (latest_execution.get("status") if isinstance(latest_execution, dict) else "")
+                or ""
+            ).upper()
             workflow_name = str(
                 result.get("workflow_name")
+                or (latest_execution.get("bot_name") if isinstance(latest_execution, dict) else "")
                 or (call.get("params") or {}).get("workflow_name")
                 or ""
             ).strip()
             execution_id = str(
+                result.get("latest_execution_id")
+                or (latest_execution.get("id") if isinstance(latest_execution, dict) else "")
+                or
                 result.get("source_execution_id")
                 or result.get("original_execution_id")
                 or result.get("execution_id")
@@ -3997,6 +4110,60 @@ CRITICAL RULES:
             return True
         return False
 
+    def _is_retry_followup_for_recent_failure(
+        self,
+        user_message: str,
+        state: ConversationState,
+    ) -> bool:
+        recent = self._get_recent_failed_execution_context(state)
+        if not recent:
+            return False
+
+        lower = str(user_message or "").strip().lower()
+        if not lower:
+            return False
+
+        if self._extract_user_mentioned_execution_id(lower):
+            return True
+
+        client = get_ae_client()
+        looks_like_specific_workflow = False
+        checker = getattr(client, "is_specific_workflow_lookup_query", None)
+        if callable(checker):
+            try:
+                looks_like_specific_workflow = bool(checker(lower))
+            except Exception:
+                looks_like_specific_workflow = False
+
+        try:
+            verdict = llm_client.chat(
+                (
+                    "A recent failed execution is already known in the conversation.\n"
+                    f"Recent failed workflow: {recent.get('workflow_name')}\n"
+                    f"Recent failed execution ID: {recent.get('execution_id')}\n"
+                    f'User message: "{user_message}"\n\n'
+                    "Does the user want to retry or rerun that already-known failed execution, "
+                    "rather than naming a new workflow to execute?\n"
+                    "Reply with exactly one word: YES or NO."
+                ),
+                system=(
+                    "You classify short operational follow-up messages. "
+                    "YES means the user is referring to the already-known failed execution. "
+                    "NO means the user is naming or asking for a different workflow execution."
+                ),
+                temperature=0.0,
+                max_tokens=5,
+            ).strip().upper()
+            if verdict.startswith("YES"):
+                return True
+            if verdict.startswith("NO"):
+                return False
+        except Exception as exc:
+            logger.debug("Retry follow-up classification failed for %r: %s", user_message[:80], exc)
+
+        word_count = len([token for token in re.split(r"\s+", lower) if token])
+        return not looks_like_specific_workflow and word_count <= 4
+
     @staticmethod
     def _extract_requested_execution_id(user_message: str, tool_args: dict) -> str:
         args = tool_args or {}
@@ -4005,6 +4172,12 @@ CRITICAL RULES:
             if value and value.isdigit():
                 return value
 
+        message = str(user_message or "")
+        match = re.search(r"\b\d{4,}\b", message)
+        return match.group(0) if match else ""
+
+    @staticmethod
+    def _extract_user_mentioned_execution_id(user_message: str) -> str:
         message = str(user_message or "")
         match = re.search(r"\b\d{4,}\b", message)
         return match.group(0) if match else ""
@@ -4095,7 +4268,7 @@ CRITICAL RULES:
         if not workflow_name:
             return clean_tool, tool_args
 
-        requested_execution_id = self._extract_requested_execution_id(user_message, tool_args)
+        requested_execution_id = self._extract_user_mentioned_execution_id(user_message)
         recent_execution_id = str(recent.get("execution_id") or "").strip()
         if (
             requested_execution_id
@@ -4167,7 +4340,7 @@ CRITICAL RULES:
         if not workflow_name or not execution_id:
             return clean_tool, tool_args
 
-        requested_execution_id = self._extract_requested_execution_id(user_message, tool_args)
+        requested_execution_id = self._extract_user_mentioned_execution_id(user_message)
         if requested_execution_id and requested_execution_id != execution_id:
             logger.info(
                 "Skipping failed-execution rewrite for %s because requested execution=%s differs from recent failed execution=%s",
@@ -4224,7 +4397,7 @@ CRITICAL RULES:
         if not workflow_name or not execution_id:
             return tool_name, tool_args
 
-        requested_execution_id = self._extract_requested_execution_id(user_message, tool_args)
+        requested_execution_id = self._extract_user_mentioned_execution_id(user_message)
         if requested_execution_id and requested_execution_id != execution_id:
             logger.info(
                 "Skipping trigger-followup rewrite because requested execution=%s differs from recent failed execution=%s",
@@ -4262,6 +4435,41 @@ CRITICAL RULES:
                 "workflow_name": workflow_name,
             },
         )
+
+    def _align_retry_tool_args_with_recent_failed_context(
+        self,
+        *,
+        user_message: str,
+        state: ConversationState,
+        tool_name: str,
+        tool_args: dict,
+    ) -> tuple[str, dict]:
+        clean_tool = str(tool_name or "").strip().lower()
+        if clean_tool not in {"restart_execution", "resubmit_execution"}:
+            return tool_name, tool_args
+
+        requested_execution_id = self._extract_user_mentioned_execution_id(user_message)
+        if requested_execution_id:
+            return tool_name, tool_args
+
+        recent = self._get_recent_failed_execution_context(state)
+        workflow_name = str(recent.get("workflow_name") or "").strip()
+        execution_id = str(recent.get("execution_id") or "").strip()
+        if not workflow_name or not execution_id:
+            return tool_name, tool_args
+
+        aligned_args = dict(tool_args or {})
+        aligned_args["execution_id"] = execution_id
+        if clean_tool == "restart_execution":
+            aligned_args["workflow_name"] = workflow_name
+
+        logger.info(
+            "Aligned %s approval/action context to latest failed execution=%s workflow=%s",
+            clean_tool,
+            execution_id,
+            workflow_name,
+        )
+        return tool_name, aligned_args
 
     def _get_sop_troubleshooting_steps(self, query: str) -> list[str]:
         """Extract short SOP-like action steps for user-facing recovery guidance."""
