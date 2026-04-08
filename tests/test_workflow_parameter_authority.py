@@ -303,6 +303,98 @@ def test_referential_followup_reuses_recent_workflow_context_before_fuzzy_lookup
     assert resolved == "timesheet_report_generation_v5"
 
 
+def test_recent_workflow_reference_prefers_active_issue_memory_over_older_session_values(monkeypatch):
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.conversation_id = "conv-issue-scope"
+    state.user_id = "webchat:kirtibala.gujar"
+    state.user_metadata = {"org_code": "AEGEMS"}
+    state.affected_workflows = ["Payroll_Process"]
+    state.tool_call_log.append(
+        {
+            "tool": "check_workflow_status",
+            "params": {"workflow_name": "Payroll_Process"},
+            "result": {"workflow_name": "Payroll_Process", "latest_status": "Failure"},
+            "success": True,
+        }
+    )
+
+    class StubTracker:
+        @staticmethod
+        def get_active_issue():
+            return type(
+                "Issue",
+                (),
+                {
+                    "workflows_involved": ["Claims_Process"],
+                    "execution_ids": ["22024"],
+                },
+            )()
+
+    class StubClient:
+        default_org_code = "AEGEMS"
+
+        @staticmethod
+        def resolve_cached_workflow_name(workflow_name, **kwargs):
+            normalized = str(workflow_name or "").strip()
+            if normalized in {"Claims_Process", "Payroll_Process"}:
+                return normalized
+            return ""
+
+    monkeypatch.setattr(orchestrator, "_get_issue_tracker", lambda conversation_id, user_id="": StubTracker())
+    monkeypatch.setattr("agents.orchestrator.get_ae_client", lambda: StubClient())
+
+    resolved = orchestrator._resolve_recent_workflow_reference(state)
+
+    assert resolved == "Claims_Process"
+
+
+def test_recent_workflow_reference_prefers_current_pending_flow_over_active_issue_memory(monkeypatch):
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.conversation_id = "conv-pending-flow"
+    state.user_id = "webchat:kirtibala.gujar"
+    state.user_metadata = {"org_code": "AEGEMS"}
+    state.param_collection = {"workflow_name": "Claims_Process_Current"}
+    state.pending_action = {
+        "tool": "restart_execution",
+        "args": {"workflow_name": "Claims_Process_Pending"},
+    }
+
+    class StubTracker:
+        @staticmethod
+        def get_active_issue():
+            return type(
+                "Issue",
+                (),
+                {
+                    "workflows_involved": ["Claims_Process_Old"],
+                    "execution_ids": ["22024"],
+                },
+            )()
+
+    class StubClient:
+        default_org_code = "AEGEMS"
+
+        @staticmethod
+        def resolve_cached_workflow_name(workflow_name, **kwargs):
+            normalized = str(workflow_name or "").strip()
+            if normalized in {
+                "Claims_Process_Current",
+                "Claims_Process_Pending",
+                "Claims_Process_Old",
+            }:
+                return normalized
+            return ""
+
+    monkeypatch.setattr(orchestrator, "_get_issue_tracker", lambda conversation_id, user_id="": StubTracker())
+    monkeypatch.setattr("agents.orchestrator.get_ae_client", lambda: StubClient())
+
+    resolved = orchestrator._resolve_recent_workflow_reference(state)
+
+    assert resolved == "Claims_Process_Current"
+
+
 def test_referential_followup_without_context_does_not_fuzzy_match_generic_input_file_text(monkeypatch):
     orchestrator = Orchestrator()
     state = ConversationState()

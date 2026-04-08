@@ -49,6 +49,10 @@ class Issue:
     workflows_involved: list[str] = field(default_factory=list)
     error_signatures: list[str] = field(default_factory=list)
     execution_ids: list[str] = field(default_factory=list)
+    last_failed_workflow_name: str = ""
+    last_failed_execution_id: str = ""
+    last_completed_workflow_name: str = ""
+    last_completed_execution_id: str = ""
     root_cause: str = ""
     resolution: str = ""
     created_at: str = field(
@@ -506,6 +510,52 @@ If no issue_id applies: CLASSIFICATION|none"""
             if exec_id not in self.issues[issue_id].execution_ids:
                 self.issues[issue_id].execution_ids.append(exec_id)
                 self._persist_issue(self.issues[issue_id])
+
+    def set_last_failed_execution(
+        self,
+        issue_id: str,
+        workflow_name: str,
+        exec_id: str,
+    ) -> None:
+        if issue_id not in self.issues:
+            return
+
+        issue = self.issues[issue_id]
+        changed = False
+        clean_workflow = str(workflow_name or "").strip()
+        clean_exec_id = str(exec_id or "").strip()
+        if clean_workflow and issue.last_failed_workflow_name != clean_workflow:
+            issue.last_failed_workflow_name = clean_workflow
+            changed = True
+        if clean_exec_id and issue.last_failed_execution_id != clean_exec_id:
+            issue.last_failed_execution_id = clean_exec_id
+            changed = True
+        if changed:
+            issue.touch()
+            self._persist_issue(issue)
+
+    def set_last_completed_execution(
+        self,
+        issue_id: str,
+        workflow_name: str,
+        exec_id: str,
+    ) -> None:
+        if issue_id not in self.issues:
+            return
+
+        issue = self.issues[issue_id]
+        changed = False
+        clean_workflow = str(workflow_name or "").strip()
+        clean_exec_id = str(exec_id or "").strip()
+        if clean_workflow and issue.last_completed_workflow_name != clean_workflow:
+            issue.last_completed_workflow_name = clean_workflow
+            changed = True
+        if clean_exec_id and issue.last_completed_execution_id != clean_exec_id:
+            issue.last_completed_execution_id = clean_exec_id
+            changed = True
+        if changed:
+            issue.touch()
+            self._persist_issue(issue)
 
     def get_issue_findings(self, issue_id: str) -> list[dict]:
         if issue_id in self.issues:

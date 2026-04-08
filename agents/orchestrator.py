@@ -1541,10 +1541,40 @@ class Orchestrator:
                                     cast(Any, result.error)[:100],
                                 )
                             if isinstance(result.data, dict):
-                                eid = result.data.get("execution_id") or result.data.get("request_id")
-                                if eid:
-                                    tracker.add_execution_id_to_issue(
-                                        active_issue.issue_id, str(eid)
+                                execution_refs = [
+                                    result.data.get("latest_execution_id"),
+                                    (result.data.get("latest_execution") or {}).get("id")
+                                    if isinstance(result.data.get("latest_execution"), dict)
+                                    else "",
+                                    result.data.get("execution_id"),
+                                    result.data.get("request_id"),
+                                    result.data.get("source_execution_id"),
+                                    result.data.get("original_execution_id"),
+                                    result.data.get("new_execution_id"),
+                                    result.data.get("new_request_id"),
+                                ]
+                                for eid in execution_refs:
+                                    clean_eid = str(eid or "").strip()
+                                    if clean_eid:
+                                        tracker.add_execution_id_to_issue(
+                                            active_issue.issue_id, clean_eid
+                                        )
+                                issue_execution_context = self._extract_issue_execution_context(
+                                    tool_name=tool_name,
+                                    tool_args=tool_args,
+                                    result_data=result.data,
+                                )
+                                if issue_execution_context.get("kind") == "failed":
+                                    tracker.set_last_failed_execution(
+                                        active_issue.issue_id,
+                                        str(issue_execution_context.get("workflow_name") or ""),
+                                        str(issue_execution_context.get("execution_id") or ""),
+                                    )
+                                elif issue_execution_context.get("kind") == "completed":
+                                    tracker.set_last_completed_execution(
+                                        active_issue.issue_id,
+                                        str(issue_execution_context.get("workflow_name") or ""),
+                                        str(issue_execution_context.get("execution_id") or ""),
                                     )
 
                         # Handle "Ask Again" pattern from Tool Result
@@ -3364,6 +3394,9 @@ CRITICAL RULES:
             if isinstance(pending_args, dict):
                 add_candidate(pending_args.get("workflow_name") or pending_args.get("workflow"))
 
+        for workflow_name in reversed(self._get_active_issue_memory(state).get("workflow_names") or []):
+            add_candidate(workflow_name)
+
         for workflow_name in reversed(state.affected_workflows or []):
             add_candidate(workflow_name)
 
@@ -3992,7 +4025,144 @@ CRITICAL RULES:
         return msg
 
     @staticmethod
-    def _get_recent_completed_execution_context(state: ConversationState) -> dict:
+    def _extract_issue_execution_context(
+        *,
+        tool_name: str,
+        tool_args: dict,
+        result_data: dict,
+    ) -> dict[str, str]:
+        if not isinstance(result_data, dict):
+            return {}
+
+        latest_execution = result_data.get("latest_execution") or {}
+        latest_execution = latest_execution if isinstance(latest_execution, dict) else {}
+        status = str(
+            result_data.get("latest_status")
+            or result_data.get("status")
+            or result_data.get("state")
+            or latest_execution.get("status")
+            or ""
+        ).upper()
+        error_text = str(result_data.get("error") or result_data.get("message") or "").lower()
+        hint_text = str(result_data.get("hint") or "").lower()
+        combined_hint = f"{error_text} {hint_text}"
+        workflow_name = str(
+            result_data.get("workflow_name")
+            or latest_execution.get("bot_name")
+            or (tool_args or {}).get("workflow_name")
+            or ""
+        ).strip()
+        execution_id = str(
+            result_data.get("latest_execution_id")
+            or latest_execution.get("id")
+            or result_data.get("source_execution_id")
+            or result_data.get("original_execution_id")
+            or result_data.get("execution_id")
+            or result_data.get("request_id")
+            or (tool_args or {}).get("execution_id")
+            or (tool_args or {}).get("request_id")
+            or ""
+        ).strip()
+        if not workflow_name or not execution_id:
+            return {}
+
+        if status in {"FAILURE", "FAILED", "ERROR"}:
+            return {
+                "kind": "failed",
+                "workflow_name": workflow_name,
+                "execution_id": execution_id,
+            }
+
+        is_completed_guard = status == "COMPLETED" or (
+            "completed" in error_text
+            and (
+                "trigger a new execution instead" in combined_hint
+                or "fresh run" in combined_hint
+                or "use fresh run" in combined_hint
+            )
+        )
+        if is_completed_guard:
+            return {
+                "kind": "completed",
+                "workflow_name": workflow_name,
+                "execution_id": execution_id,
+            }
+
+        return {}
+
+    def _get_active_issue_memory(self, state: ConversationState) -> dict[str, Any]:
+        if not state.conversation_id:
+            return {
+                "workflow_names": [],
+                "execution_ids": [],
+                "last_failed": {},
+                "last_completed": {},
+            }
+
+        try:
+            tracker = self._get_issue_tracker(state.conversation_id, state.user_id)
+            issue = tracker.get_active_issue() if tracker else None
+        except Exception as exc:
+            logger.debug(
+                "Could not load active issue memory for conversation_id=%s: %s",
+                state.conversation_id,
+                exc,
+            )
+            return {
+                "workflow_names": [],
+                "execution_ids": [],
+                "last_failed": {},
+                "last_completed": {},
+            }
+
+        if not issue:
+            return {
+                "workflow_names": [],
+                "execution_ids": [],
+                "last_failed": {},
+                "last_completed": {},
+            }
+
+        workflow_names = [
+            str(name or "").strip()
+            for name in (getattr(issue, "workflows_involved", None) or [])
+            if str(name or "").strip()
+        ]
+        execution_ids = [
+            str(value or "").strip()
+            for value in (getattr(issue, "execution_ids", None) or [])
+            if str(value or "").strip()
+        ]
+        last_failed = {
+            "workflow_name": str(getattr(issue, "last_failed_workflow_name", "") or "").strip(),
+            "execution_id": str(getattr(issue, "last_failed_execution_id", "") or "").strip(),
+        }
+        last_completed = {
+            "workflow_name": str(getattr(issue, "last_completed_workflow_name", "") or "").strip(),
+            "execution_id": str(getattr(issue, "last_completed_execution_id", "") or "").strip(),
+        }
+        return {
+            "workflow_names": workflow_names,
+            "execution_ids": execution_ids,
+            "last_failed": last_failed if any(last_failed.values()) else {},
+            "last_completed": last_completed if any(last_completed.values()) else {},
+        }
+
+    def _get_recent_completed_execution_context(self, state: ConversationState) -> dict:
+        issue_memory = self._get_active_issue_memory(state)
+        last_completed = issue_memory.get("last_completed") or {}
+        preferred_workflows = {
+            value.casefold()
+            for value in issue_memory.get("workflow_names") or []
+            if str(value or "").strip()
+        }
+        if str(last_completed.get("workflow_name") or "").strip():
+            preferred_workflows.add(str(last_completed.get("workflow_name") or "").strip().casefold())
+        preferred_execution_ids = set()
+        if str(last_completed.get("execution_id") or "").strip():
+            preferred_execution_ids.add(str(last_completed.get("execution_id") or "").strip())
+        fallback: dict[str, str] | None = None
+
         for call in reversed(state.tool_call_log[-10:]):
             result = call.get("result") or {}
             if not isinstance(result, dict):
@@ -4037,15 +4207,42 @@ CRITICAL RULES:
                 )
             )
             if is_completed_guard and workflow_name:
-                return {
+                candidate = {
                     "workflow_name": workflow_name,
                     "execution_id": execution_id,
                 }
+                if execution_id and execution_id in preferred_execution_ids:
+                    return candidate
+                if workflow_name.casefold() in preferred_workflows:
+                    return candidate
+                if not fallback:
+                    fallback = candidate
 
-        return {}
+        if (
+            str(last_completed.get("workflow_name") or "").strip()
+            and str(last_completed.get("execution_id") or "").strip()
+        ):
+            return {
+                "workflow_name": str(last_completed.get("workflow_name") or "").strip(),
+                "execution_id": str(last_completed.get("execution_id") or "").strip(),
+            }
+        return fallback or {}
 
-    @staticmethod
-    def _get_recent_failed_execution_context(state: ConversationState) -> dict:
+    def _get_recent_failed_execution_context(self, state: ConversationState) -> dict:
+        issue_memory = self._get_active_issue_memory(state)
+        last_failed = issue_memory.get("last_failed") or {}
+        preferred_workflows = {
+            value.casefold()
+            for value in issue_memory.get("workflow_names") or []
+            if str(value or "").strip()
+        }
+        if str(last_failed.get("workflow_name") or "").strip():
+            preferred_workflows.add(str(last_failed.get("workflow_name") or "").strip().casefold())
+        preferred_execution_ids = set()
+        if str(last_failed.get("execution_id") or "").strip():
+            preferred_execution_ids.add(str(last_failed.get("execution_id") or "").strip())
+        fallback: dict[str, str] | None = None
+
         for call in reversed(state.tool_call_log[-10:]):
             result = call.get("result") or {}
             if not isinstance(result, dict):
@@ -4079,12 +4276,26 @@ CRITICAL RULES:
             ).strip()
 
             if status in {"FAILURE", "FAILED", "ERROR"} and workflow_name and execution_id:
-                return {
+                candidate = {
                     "workflow_name": workflow_name,
                     "execution_id": execution_id,
                 }
+                if execution_id and execution_id in preferred_execution_ids:
+                    return candidate
+                if workflow_name.casefold() in preferred_workflows:
+                    return candidate
+                if not fallback:
+                    fallback = candidate
 
-        return {}
+        if (
+            str(last_failed.get("workflow_name") or "").strip()
+            and str(last_failed.get("execution_id") or "").strip()
+        ):
+            return {
+                "workflow_name": str(last_failed.get("workflow_name") or "").strip(),
+                "execution_id": str(last_failed.get("execution_id") or "").strip(),
+            }
+        return fallback or {}
 
     @staticmethod
     def _is_explicit_resubmit_request(user_message: str, tool_name: str, tool_args: dict) -> bool:

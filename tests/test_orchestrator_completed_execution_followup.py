@@ -205,6 +205,103 @@ def test_failed_execution_generic_retrigger_rewrites_resubmit_to_restart():
     }
 
 
+def test_recent_failed_execution_context_prefers_active_issue_memory_over_unrelated_session_history(monkeypatch):
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.conversation_id = "conv-issue-scope"
+    state.user_id = "webchat:kirtibala.gujar"
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "Claims_Process"},
+        {
+            "success": True,
+            "workflow_name": "Claims_Process",
+            "latest_status": "Failure",
+            "latest_execution_id": "22024",
+            "latest_execution": {
+                "id": "22024",
+                "bot_name": "Claims_Process",
+                "status": "Failure",
+            },
+        },
+        True,
+    )
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "Payroll_Process"},
+        {
+            "success": True,
+            "workflow_name": "Payroll_Process",
+            "latest_status": "Failure",
+            "latest_execution_id": "99999",
+            "latest_execution": {
+                "id": "99999",
+                "bot_name": "Payroll_Process",
+                "status": "Failure",
+            },
+        },
+        True,
+    )
+
+    class StubTracker:
+        @staticmethod
+        def get_active_issue():
+            return type(
+                "Issue",
+                (),
+                {
+                    "workflows_involved": ["Claims_Process"],
+                    "execution_ids": ["22024"],
+                },
+            )()
+
+    monkeypatch.setattr(orchestrator, "_get_issue_tracker", lambda conversation_id, user_id="": StubTracker())
+
+    recent = orchestrator._get_recent_failed_execution_context(state)
+
+    assert recent == {
+        "workflow_name": "Claims_Process",
+        "execution_id": "22024",
+    }
+
+
+def test_recent_execution_context_uses_categorized_issue_memory_when_history_is_unavailable(monkeypatch):
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.conversation_id = "conv-memory-only"
+    state.user_id = "webchat:kirtibala.gujar"
+
+    class StubTracker:
+        @staticmethod
+        def get_active_issue():
+            return type(
+                "Issue",
+                (),
+                {
+                    "workflows_involved": ["Claims_Process"],
+                    "execution_ids": ["22024", "22025"],
+                    "last_failed_workflow_name": "Claims_Process",
+                    "last_failed_execution_id": "22024",
+                    "last_completed_workflow_name": "Claims_Process",
+                    "last_completed_execution_id": "22025",
+                },
+            )()
+
+    monkeypatch.setattr(orchestrator, "_get_issue_tracker", lambda conversation_id, user_id="": StubTracker())
+
+    failed_recent = orchestrator._get_recent_failed_execution_context(state)
+    completed_recent = orchestrator._get_recent_completed_execution_context(state)
+
+    assert failed_recent == {
+        "workflow_name": "Claims_Process",
+        "execution_id": "22024",
+    }
+    assert completed_recent == {
+        "workflow_name": "Claims_Process",
+        "execution_id": "22025",
+    }
+
+
 def test_failed_execution_rewrite_prefers_latest_status_execution_id_over_older_history():
     orchestrator = Orchestrator()
     state = ConversationState()
