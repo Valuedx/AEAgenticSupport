@@ -174,3 +174,113 @@ def test_explicit_different_execution_id_does_not_rewrite_to_trigger_workflow():
 
     assert tool_name == "resubmit_execution"
     assert tool_args == {"execution_id": "2582540"}
+
+
+def test_failed_execution_generic_retrigger_rewrites_resubmit_to_restart():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "execution_id": "2611283",
+            "workflow_name": "timesheet_report_generation_v5",
+            "status": "Failure",
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._rewrite_failed_execution_followup(
+        user_message="retrigger this bot",
+        state=state,
+        tool_name="resubmit_execution",
+        tool_args={"execution_id": "2611283"},
+    )
+
+    assert tool_name == "restart_execution"
+    assert tool_args == {
+        "execution_id": "2611283",
+        "workflow_name": "timesheet_report_generation_v5",
+    }
+
+
+def test_failed_execution_explicit_resubmit_from_start_keeps_resubmit():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "execution_id": "2611283",
+            "workflow_name": "timesheet_report_generation_v5",
+            "status": "Failure",
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._rewrite_failed_execution_followup(
+        user_message="resubmit from start",
+        state=state,
+        tool_name="resubmit_execution",
+        tool_args={"execution_id": "2611283", "from_failure_point": False},
+    )
+
+    assert tool_name == "resubmit_execution"
+    assert tool_args == {"execution_id": "2611283", "from_failure_point": False}
+
+
+def test_failed_execution_trigger_workflow_followup_rewrites_to_resubmit():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "execution_id": "2611752",
+            "workflow_name": "timesheet_report_generation_v5",
+            "status": "Failure",
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._rewrite_trigger_followup_from_failed_context(
+        user_message="resubmit request again i have added this file",
+        state=state,
+        tool_name="trigger_workflow",
+        tool_args={"workflow_name": "resubmit request again i have added this file", "parameters": {}},
+    )
+
+    assert tool_name == "resubmit_execution"
+    assert tool_args == {"execution_id": "2611752", "from_failure_point": True}
+
+
+def test_failed_execution_trigger_workflow_followup_rewrites_to_restart():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "timesheet_report_generation_v5"},
+        {
+            "success": True,
+            "execution_id": "2611752",
+            "workflow_name": "timesheet_report_generation_v5",
+            "status": "Failure",
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._rewrite_trigger_followup_from_failed_context(
+        user_message="retry this bot again",
+        state=state,
+        tool_name="trigger_workflow",
+        tool_args={"workflow_name": "timesheet_report_generation_v5", "parameters": {}},
+    )
+
+    assert tool_name == "restart_execution"
+    assert tool_args == {
+        "execution_id": "2611752",
+        "workflow_name": "timesheet_report_generation_v5",
+    }

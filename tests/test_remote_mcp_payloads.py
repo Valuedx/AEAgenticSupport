@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from agents.orchestrator import Orchestrator
 from tools.mcp_tools import _extract_remote_error_message, _normalize_remote_call_result
+from state.conversation_state import ConversationState
 
 
 def test_normalize_remote_call_result_unwraps_nested_result_dict():
@@ -212,3 +213,38 @@ def test_format_completion_message_failure_suggests_create_support_ticket():
 
     assert "Unable to Complete Action" in response
     assert "create_support_ticket" in response
+
+
+def test_recent_tool_result_fallback_prefers_new_request_id_over_old_request_id():
+    state = ConversationState()
+    state.log_tool_call(
+        "resubmit_execution",
+        {"execution_id": "2611582"},
+        {
+            "success": True,
+            "message": "Execution has been resubmitted.",
+            "request_id": "2611582",
+            "new_request_id": "2611600",
+            "workflow_name": "timesheet_report_generation_v5",
+            "status": "New",
+        },
+        True,
+    )
+
+    response = Orchestrator._build_recent_tool_result_fallback_response(state)
+
+    assert "2611600" in response
+    assert "2611582" not in response
+
+
+def test_has_hold_resume_reminder_detects_hold_message():
+    text = (
+        "The request is on hold.\n"
+        "Reply **continue** to review it again, or **drop it** to cancel."
+    )
+    assert Orchestrator._has_hold_resume_reminder(text) is True
+
+
+def test_has_hold_resume_reminder_false_for_regular_text():
+    text = "I can create a support ticket now."
+    assert Orchestrator._has_hold_resume_reminder(text) is False

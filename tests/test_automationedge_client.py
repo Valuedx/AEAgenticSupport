@@ -717,6 +717,42 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertIn("restart the agent", diagnosis["summary"].lower())
         client.close()
 
+    def test_diagnose_new_execution_prioritizes_agent_unavailable_before_other_process(self):
+        client = self._client_with_transport(lambda request: httpx.Response(404, json={}))
+
+        with patch.object(
+            client,
+            "get_workflow_agents",
+            return_value=[
+                {
+                    "workflow": {"name": "timesheet_report_generation_v5"},
+                    "agents": [{"agentName": "agent-timesheet-01", "agentState": "STOPPED"}],
+                }
+            ],
+        ), patch.object(
+            client,
+            "get_running_instances",
+            return_value=[
+                {
+                    "id": "2590200",
+                    "status": "InProgress",
+                    "workflowName": "Payroll_Process",
+                    "agentName": "agent-timesheet-01",
+                }
+            ],
+        ):
+            diagnosis = client.diagnose_new_execution(
+                {
+                    "id": "2590291",
+                    "status": "New",
+                    "workflowName": "timesheet_report_generation_v5",
+                }
+            )
+
+        self.assertEqual(diagnosis["reason"], "agent_unavailable")
+        self.assertIn("not running", diagnosis["summary"].lower())
+        client.close()
+
     def test_poll_execution_status_refreshes_workflow_response_from_recent_instances(self):
         calls = {"status_get": 0, "recent_list": 0}
         workflow_response = json.dumps(

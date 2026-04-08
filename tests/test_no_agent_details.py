@@ -180,8 +180,10 @@ def test_trigger_workflow_reports_other_process_running_when_poll_detects_it():
     with patch("tools.remediation_tools.get_ae_client", return_value=mock_client):
         result = remediation_tools.trigger_workflow("timesheet_report_generation_v5", {})
 
-    assert result["success"] is False
+    assert result["success"] is True
+    assert result["status"] == "New"
     assert result["diagnosis"] == "other_process_running"
+    assert "already triggered" in result["message"]
     assert "another process is currently running" in result["message"]
     assert result["other_execution_id"] == "2590200"
 
@@ -210,6 +212,38 @@ def test_trigger_workflow_surfaces_completed_workflow_response_message():
     assert result["success"] is True
     assert result["message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
     assert result["workflow_response_message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+
+
+def test_trigger_workflow_refreshes_completed_payload_when_poll_message_missing():
+    mock_client = MagicMock()
+    mock_client.resolve_cached_workflow_name.return_value = "timesheet_report_generation_v5"
+    mock_client.get_cached_workflow_info.return_value = ("9109", [])
+    mock_client.get_cached_workflow_parameters.return_value = []
+    mock_client.get_required_parameters.return_value = []
+    mock_client.get_workflow_agents.return_value = []
+    mock_client.get_running_instances.return_value = []
+    mock_client.execute_workflow.return_value = {"id": "2609419", "status": "New"}
+    mock_client.poll_execution_status.return_value = {
+        "status": "Complete",
+        "raw": {
+            "status": "Complete",
+            "workflowName": "timesheet_report_generation_v5",
+        },
+    }
+    mock_client.refresh_execution_payload.return_value = {
+        "id": "2609419",
+        "status": "Complete",
+        "workflowName": "timesheet_report_generation_v5",
+        "workflowResponse": _timesheet_workflow_response(),
+    }
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=mock_client):
+        result = remediation_tools.trigger_workflow("timesheet_report_generation_v5", {})
+
+    assert result["success"] is True
+    assert result["message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+    assert result["workflow_response_message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+    mock_client.refresh_execution_payload.assert_called_once()
 
 
 def test_get_execution_status_surfaces_completed_workflow_response_message():
@@ -254,3 +288,39 @@ def test_t4_execute_and_poll_surfaces_completed_workflow_response_message():
     assert result["success"] is True
     assert "The timesheet file has been shared with you. Kindly check your mailbox." in result["message"]
     assert result["workflow_response_message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+
+
+def test_t4_execute_and_poll_waiting_other_process_is_not_reported_as_trigger_failure():
+    mock_client = MagicMock()
+    mock_client.resolve_cached_workflow_name.return_value = "timesheet_report_generation_v5"
+    mock_client.get_cached_workflow_parameters.return_value = []
+    mock_client.get_required_parameters.return_value = []
+    mock_client.execute_workflow.return_value = {"id": "2590291", "status": "New"}
+    mock_client.poll_execution_status.return_value = {
+        "status": "waiting_other_process",
+        "raw": {
+            "newExecutionDiagnosis": {
+                "reason": "other_process_running",
+                "summary": (
+                    "Execution `2590291` for **timesheet_report_generation_v5** is still **New** "
+                    "because another process is currently running: **Payroll_Process** "
+                    "(Execution ID: `2590200`, status: `InProgress`). Please wait some time and check again."
+                ),
+                "other_execution_id": "2590200",
+                "other_workflow_name": "Payroll_Process",
+            }
+        },
+    }
+
+    with patch("tools.status_tools.get_ae_client", return_value=mock_client):
+        result = status_tools.t4_execute_and_poll(
+            workflow_name="timesheet_report_generation_v5",
+            workflow_id="9109",
+            params={},
+        )
+
+    assert result["success"] is True
+    assert result["status"] == "New"
+    assert "already triggered" in result["message"]
+    assert result["diagnosis"] == "other_process_running"
+    assert result["other_execution_id"] == "2590200"

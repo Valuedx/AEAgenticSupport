@@ -126,6 +126,35 @@ def test_status_messages_use_display_timezone_for_latest_execution():
     assert "2026-04-08 12:20:00 AM IST" in result["message"]
 
 
+def test_check_workflow_status_new_state_does_not_push_log_fetch_hint():
+    class StubClient:
+        def resolve_cached_workflow_name(self, workflow_name, user_id="", org_code=""):
+            return workflow_name
+
+        def get_workflow_instances(self, workflow_name, limit=300, status_filter=None):
+            return [
+                {
+                    "id": "2611527",
+                    "automationRequestId": "2611527",
+                    "workflowName": workflow_name,
+                    "status": "New",
+                    "createdDate": "2026-04-08T04:10:00+00:00",
+                }
+            ]
+
+    client = StubClient()
+    with patch("tools.status_tools.get_ae_client", return_value=client), patch.dict(
+        status_tools.CONFIG,
+        {"DISPLAY_TIMEZONE": "Asia/Kolkata"},
+        clear=False,
+    ):
+        result = status_tools.check_workflow_status("timesheet_report_generation_v5")
+
+    assert "status is '**New**'" in result["message"]
+    assert "fetch logs if needed" not in result["message"]
+    assert "assigned agent is running" in result["message"]
+
+
 def test_list_recent_failures_uses_completed_time_for_failure_summary():
     class StubClient:
         default_org_code = ""

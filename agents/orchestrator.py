@@ -84,7 +84,9 @@ class Orchestrator:
     def _build_pending_action_summary(tool_name: str, tool_args: dict) -> str:
         args = tool_args or {}
         target = (
-            args.get("process_name")
+            args.get("new_request_id")
+            or args.get("new_execution_id")
+            or args.get("process_name")
             or args.get("title")
             or args.get("workflow_name")
             or args.get("agent_name")
@@ -95,6 +97,17 @@ class Orchestrator:
             or "unknown"
         )
         return f"{tool_name} on {target}"
+
+    @staticmethod
+    def _has_hold_resume_reminder(text: str) -> bool:
+        normalized = str(text or "").lower()
+        if not normalized:
+            return False
+        return (
+            "on hold" in normalized
+            and "continue" in normalized
+            and ("drop it" in normalized or "cancel" in normalized)
+        )
 
     @staticmethod
     def _collect_exception_messages(exc: BaseException) -> list[str]:
@@ -150,7 +163,9 @@ class Orchestrator:
             details: list[str] = []
             workflow_name = str(result.get("workflow_name") or "").strip()
             request_id = str(
-                result.get("execution_id")
+                result.get("new_execution_id")
+                or result.get("new_request_id")
+                or result.get("execution_id")
                 or result.get("request_id")
                 or ""
             ).strip()
@@ -822,6 +837,8 @@ class Orchestrator:
                         f"Reply **continue** to review it again, or **drop it** to cancel."
                     )
                     state.save()
+                    if self._has_hold_resume_reminder(inner):
+                        return inner
                     return inner + reminder
 
                 response = self._handle_approval_response(
@@ -1323,6 +1340,18 @@ class Orchestrator:
                             tool_name=tool_name,
                             tool_args=tool_args,
                         )
+                        tool_name, tool_args = self._rewrite_failed_execution_followup(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
+                        tool_name, tool_args = self._rewrite_trigger_followup_from_failed_context(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
                         turn_tools, active_tool_names = self._ensure_turn_tool_active(
                             turn_tools,
                             cast(set[str], active_tool_names),
@@ -1395,6 +1424,18 @@ class Orchestrator:
                         tool_name, tool_args = self._rewrite_call_ae_api_tool(tool_name, tool_args)
 
                         tool_name, tool_args = self._rewrite_completed_execution_followup(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
+                        tool_name, tool_args = self._rewrite_failed_execution_followup(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
+                        tool_name, tool_args = self._rewrite_trigger_followup_from_failed_context(
                             user_message=user_message,
                             state=state,
                             tool_name=tool_name,
@@ -2121,24 +2162,29 @@ class Orchestrator:
             return response
 
         # Ask the LLM to generate 2 context-aware suggestions for what the user might want to do next.
-        # If there's an error/failure, we MUST suggest creating a support ticket.
+        # Prompt-level rule: for any issue/failure/blocked/agent-stopped scenario,
+        # one suggestion must be ticket creation.
         try:
             status_prev = str(status or "").lower()
             is_failure = any(term in status_prev for term in ("fail", "error", "abort", "reject", "cancel", "invalid"))
 
             ticket_tool = "create_support_ticket"
             
+            global_ticket_instruction = (
+                "CRITICAL: If the result indicates any failure, issue, blocked action, "
+                "or agent not running (stopped/offline/unavailable), at least ONE suggestion "
+                f"MUST be for creating a support ticket using `{ticket_tool}`. "
+                "If it's a technical error, suggest an 'Incident' type. "
+                "If it's a service gap, suggest a 'Request' type."
+            )
             error_instruction = ""
             if is_failure:
-                error_instruction = (
-                    "CRITICAL: The previous action failed or encountered an error. "
-                    f"At least ONE of your suggestions MUST be for creating a support ticket using `{ticket_tool}`. "
-                    f"If it's a technical error, suggest an 'Incident' type. If it's a service gap, suggest a 'Request' type."
-                )
+                error_instruction = global_ticket_instruction
             else:
                 # Even on success, maybe they want to raise a service request?
                 error_instruction = (
-                    f"If the user might need follow-up assistance, you can suggest using `{ticket_tool}` with a 'Request' type."
+                    f"{global_ticket_instruction} "
+                    f"If there is no issue in this result, you can still suggest `{ticket_tool}` as an optional Request-type follow-up."
                 )
 
             context_summary = f"Tool: {tool_name}. Status: {status or 'unknown'}. Workflow: {workflow or 'unknown'}. Result: {str(msg)[:200]}"
@@ -2149,6 +2195,10 @@ class Orchestrator:
                     f"{error_instruction}\n"
                     "Do not hardcode workflow names, bot names, agent names, tenant names, org names, or special-case business rules. "
                     "Base every suggestion only on the current tool result and the conversation context provided here. "
+                    "Do not phrase suggestions as questions. Use direct action statements only. "
+                    "If the result indicates a missing/unavailable file, do not suggest checking files via chat. "
+                    "Instead suggest uploading/placing the required file in the expected location, then retrying the workflow, "
+                    "and optionally raising a support ticket. "
                     "Never suggest checking ticket status, checking ticket updates, tracking ticket progress, or any other unsupported ticket follow-up feature unless that capability was explicitly completed or confirmed in this conversation. "
                     "After a ticket is created, do not suggest checking status or updates for that ticket.\n"
                     "Return ONLY 2 bullet lines starting with '- '. No preamble, no explanation.\n\n"
@@ -2245,7 +2295,7 @@ Rules:
 5. Every tool call is audited.
 6. Read tool descriptions carefully. They may include use/avoid guidance,
    required parameters, and example arguments. Follow those hints exactly.
-7. Always prioritize `check_workflow_status` for ANY query about a bot's state, performance, or history. Followed by `get_execution_logs` for deep analysis.
+7. Always prioritize `check_workflow_status` for ANY query about a bot's state, performance, or history. Use `get_execution_logs` for deeper analysis only when the execution is terminal (Failure/Error/Complete) and log evidence is actually needed. Do NOT use `get_execution_logs` as the first step for NEW/QUEUED/PENDING state diagnosis.
 8. If no typed tool fits, use the general-purpose escape hatches:
    - call_ae_api: hit any AE REST endpoint directly
    - query_database: run read-only SQL against the ops database
@@ -2263,6 +2313,8 @@ Rules:
     - Use a DIFFERENT heading each time — rotate naturally among: "Here are a few options:", "You might also want to:", "Suggested next actions:", "Can I help with anything else?", "What's your next step?" — NEVER repeat the same heading in consecutive turns.
     - Keep suggestions relevant to the context (e.g., after a failure: offer log analysis; after a restart: offer status monitoring).
     - Match the persona: technical users get tool-specific options; business users get plain-language options.
+    - For ANY failure, issue, blocked action, or agent-not-running condition (including agent STOPPED/OFFLINE/UNAVAILABLE), at least one suggestion MUST be to raise a support ticket using `create_support_ticket`.
+    - This rule applies across all workflows and all tools; do not rely on workflow-specific hardcoding.
     - Do NOT hardcode workflow names, bot names, ticket patterns, agent names, tenant names, organization names, or customer-specific rules. Use only the live tool data and the current conversation context.
 14. **TERMINOLOGY & STATUS-FIRST RULE**: "Bots" and "Workflows" are synonymous. If a user asks about a bot (even by a "friendly" or "natural language" name like 'Email Bot JD'), you MUST call `check_workflow_status` as your FIRST action unless they explicitly say "run", "start", or "trigger". Never assume the user wants to execute a bot just because they mentioned its name.
 15. **PROACTIVE PARAMETER DISCOVERY**: When `discover_tools` returns a workflow with `[ORCHESTRATOR_MAPPING]` in its description:
@@ -2287,6 +2339,16 @@ Rules:
 27. **APPROVAL & INPUT REQUEST STYLE**: When asking for confirmation or missing information, explain what will happen, why it matters, and what you need from the user in clean, user-friendly language. Avoid robotic approval or parameter-collection wording.
 28. **NO EMAIL / LETTER FORMATTING**: Unless the user explicitly asks for an email, memo, or letter, never format a response with subject lines, salutations, sign-offs, placeholder names, or drafted-mail structure.
 29. **MINIMUM-NECESSARY FOLLOW-UP RULE**: When you need more information, ask only for the minimum missing detail required to continue and briefly explain why you need it.
+30. **FILE-MISSING FAILURE RULE**: If a workflow failed because a required file is missing/unavailable, do NOT suggest questions like "Can I check the file?" or similar exploratory follow-up questions. File handling through chat is not supported. Give direct, action-based guidance only:
+    - State that the required file is not available in the shared location.
+    - Ask the user to upload/place the file in the expected location and retry the workflow.
+    - Optionally suggest raising a support ticket via `create_support_ticket`.
+    - Do not suggest unsupported file-check operations.
+31. **NEW-STATE DIAGNOSIS ORDER**: When a user asks why an execution is in NEW/QUEUED/PENDING state, diagnose in this order:
+    - First verify whether the workflow's assigned agent is running.
+    - If agent is running, then check whether another execution/process is already running and causing wait.
+    - Do not fetch execution logs for this diagnosis path by default.
+32. **AGENT-LOG AVAILABILITY RULE**: If an agent is STOPPED/OFFLINE/UNAVAILABLE, do NOT attempt `analyze_agent_logs` because logs cannot be extracted from a non-running agent. Clearly tell the user to start/reconnect the agent first, then retry diagnostics.
 Available tool categories: status, logs, file, remediation, dependency,
 config, notification, general, meta, agent_read, agent_diag.
 You have a subset of tools loaded. Use discover_tools to find others.
@@ -2347,7 +2409,8 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
             # Expanded keys to catch Agent IDs and generic IDs
             interesting_keys = {
                 "execution_id", "workflow_name", "workflow", "request_id", 
-                "agent_id", "agentid", "uuid", "id", "name"
+                "new_execution_id", "new_request_id",
+                "agent_id", "agentid", "uuid", "id", "name", "status", "latest_status", "agent_state"
             }
             extracted: dict[str, str] = {}
             for call in recent_calls:
@@ -2377,6 +2440,8 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
                             canonical_k = k.lower()
                             if canonical_k in {"agentid", "uuid"}:
                                 canonical_k = "agent_id"
+                            if canonical_k in {"new_execution_id", "new_request_id"}:
+                                canonical_k = "request_id"
                             
                             # Check for 'id' mapping if the tool name suggests it's an agent tool
                             tool_called = str(call.get("tool") or call.get("tool_name") or "").lower()
@@ -2392,8 +2457,9 @@ IMPORTANT: Scope your investigation to the currently focused issue."""
 The following technical values were found in the most recent tool calls.
 Use them directly when investigating instead of asking the user to repeat them:
 {ctx_lines}
-CRITICAL: If an `execution_id` or `request_id` is listed above and the user asks "why" or "explain", call `get_execution_logs` immediately.
-CRITICAL: If an `agent_id` is listed above and the user asks for logs, says "yes/ok", or PROVIDES A DATE RANGE, you MUST call `analyze_agent_logs` with that `agent_id` immediately. Do NOT ask for the agent ID again."""
+CRITICAL: If an `execution_id` or `request_id` is listed above and the status is terminal (Failure/Error/Complete), and the user asks "why" or "explain", call `get_execution_logs`.
+CRITICAL: If status is NEW/QUEUED/PENDING, do NOT call `get_execution_logs` first. Diagnose using status tools (agent running check, then other-process-running check).
+CRITICAL: If an `agent_id` is listed above and the user asks for logs, says "yes/ok", or provides a date range, call `analyze_agent_logs` ONLY when that agent is RUNNING/CONNECTED. If agent state is STOPPED/OFFLINE/UNAVAILABLE, do NOT call logs; explain that log extraction is not possible until the agent is running."""
 
         # Build the current display time context and matching greeting
         _, _greeting, _now_str, _tz_label = self._get_display_time_context()
@@ -3864,6 +3930,61 @@ CRITICAL RULES:
         return {}
 
     @staticmethod
+    def _get_recent_failed_execution_context(state: ConversationState) -> dict:
+        for call in reversed(state.tool_call_log[-10:]):
+            result = call.get("result") or {}
+            if not isinstance(result, dict):
+                continue
+
+            status = str(result.get("status") or result.get("state") or "").upper()
+            workflow_name = str(
+                result.get("workflow_name")
+                or (call.get("params") or {}).get("workflow_name")
+                or ""
+            ).strip()
+            execution_id = str(
+                result.get("source_execution_id")
+                or result.get("original_execution_id")
+                or result.get("execution_id")
+                or result.get("request_id")
+                or (call.get("params") or {}).get("execution_id")
+                or (call.get("params") or {}).get("request_id")
+                or ""
+            ).strip()
+
+            if status in {"FAILURE", "FAILED", "ERROR"} and workflow_name and execution_id:
+                return {
+                    "workflow_name": workflow_name,
+                    "execution_id": execution_id,
+                }
+
+        return {}
+
+    @staticmethod
+    def _is_explicit_resubmit_request(user_message: str, tool_name: str, tool_args: dict) -> bool:
+        clean_tool = str(tool_name or "").strip().lower()
+        if "resubmit" not in clean_tool:
+            return False
+
+        lower = str(user_message or "").lower()
+        explicit_terms = (
+            "resubmit",
+            "from start",
+            "from failure",
+            "from failure point",
+            "fresh run",
+            "new execution",
+            "new run",
+            "run from scratch",
+            "from scratch",
+        )
+        if any(term in lower for term in explicit_terms):
+            return True
+        if "from_failure_point" in (tool_args or {}) and bool(tool_args.get("from_failure_point")) is False:
+            return True
+        return False
+
+    @staticmethod
     def _extract_requested_execution_id(user_message: str, tool_args: dict) -> str:
         args = tool_args or {}
         for key in ("execution_id", "request_id", "id"):
@@ -3991,6 +4112,141 @@ CRITICAL RULES:
                     source_execution_id=recent_execution_id,
                     state=state,
                 ),
+            },
+        )
+
+    def _rewrite_failed_execution_followup(
+        self,
+        *,
+        user_message: str,
+        state: ConversationState,
+        tool_name: str,
+        tool_args: dict,
+    ) -> tuple[str, dict]:
+        clean_tool = str(tool_name or "").strip()
+        if (
+            not clean_tool
+            or (
+                "resubmit" not in clean_tool.lower()
+                and "restart" not in clean_tool.lower()
+            )
+        ):
+            return clean_tool, tool_args
+
+        if self._is_explicit_resubmit_request(user_message, clean_tool, tool_args):
+            return clean_tool, tool_args
+
+        lower_msg = str(user_message or "").lower()
+        generic_retry_terms = (
+            "retrigger",
+            "trigger again",
+            "run again",
+            "retry",
+            "restart",
+            "rerun",
+        )
+        if not any(term in lower_msg for term in generic_retry_terms):
+            return clean_tool, tool_args
+
+        recent = self._get_recent_failed_execution_context(state)
+        workflow_name = str(recent.get("workflow_name") or "").strip()
+        execution_id = str(recent.get("execution_id") or "").strip()
+        if not workflow_name or not execution_id:
+            return clean_tool, tool_args
+
+        requested_execution_id = self._extract_requested_execution_id(user_message, tool_args)
+        if requested_execution_id and requested_execution_id != execution_id:
+            logger.info(
+                "Skipping failed-execution rewrite for %s because requested execution=%s differs from recent failed execution=%s",
+                clean_tool,
+                requested_execution_id,
+                execution_id,
+            )
+            return clean_tool, tool_args
+
+        logger.info(
+            "Rewriting failed-execution follow-up from %s to restart_execution for workflow=%s execution=%s",
+            clean_tool,
+            workflow_name,
+            execution_id,
+        )
+        return (
+            "restart_execution",
+            {
+                "execution_id": execution_id,
+                "workflow_name": workflow_name,
+            },
+        )
+
+    def _rewrite_trigger_followup_from_failed_context(
+        self,
+        *,
+        user_message: str,
+        state: ConversationState,
+        tool_name: str,
+        tool_args: dict,
+    ) -> tuple[str, dict]:
+        clean_tool = str(tool_name or "").strip().lower()
+        if clean_tool != "trigger_workflow":
+            return tool_name, tool_args
+
+        lower_msg = str(user_message or "").lower()
+        retry_terms = (
+            "resubmit",
+            "restart",
+            "retry",
+            "retrigger",
+            "run again",
+            "again",
+            "from start",
+            "from scratch",
+            "from failure",
+        )
+        if not any(term in lower_msg for term in retry_terms):
+            return tool_name, tool_args
+
+        recent = self._get_recent_failed_execution_context(state)
+        workflow_name = str(recent.get("workflow_name") or "").strip()
+        execution_id = str(recent.get("execution_id") or "").strip()
+        if not workflow_name or not execution_id:
+            return tool_name, tool_args
+
+        requested_execution_id = self._extract_requested_execution_id(user_message, tool_args)
+        if requested_execution_id and requested_execution_id != execution_id:
+            logger.info(
+                "Skipping trigger-followup rewrite because requested execution=%s differs from recent failed execution=%s",
+                requested_execution_id,
+                execution_id,
+            )
+            return tool_name, tool_args
+
+        explicit_restart = any(term in lower_msg for term in ("restart", "retry", "retrigger"))
+        explicit_resubmit = any(term in lower_msg for term in ("resubmit", "from start", "from scratch", "from failure"))
+        if explicit_resubmit and not explicit_restart:
+            from_failure_point = not any(term in lower_msg for term in ("from start", "from scratch"))
+            logger.info(
+                "Rewriting trigger_workflow follow-up to resubmit_execution for failed execution=%s workflow=%s",
+                execution_id,
+                workflow_name,
+            )
+            return (
+                "resubmit_execution",
+                {
+                    "execution_id": execution_id,
+                    "from_failure_point": from_failure_point,
+                },
+            )
+
+        logger.info(
+            "Rewriting trigger_workflow follow-up to restart_execution for failed execution=%s workflow=%s",
+            execution_id,
+            workflow_name,
+        )
+        return (
+            "restart_execution",
+            {
+                "execution_id": execution_id,
+                "workflow_name": workflow_name,
             },
         )
 

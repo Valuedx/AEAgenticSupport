@@ -652,7 +652,14 @@ def check_workflow_status(
         msg = f"The absolute latest execution for bot '**{display_name}**' was {time_str} and its status is '**{latest_status}**'."
         if latest_ts and latest_ts < cutoff:
             msg += f" (Note: This run is older than 24 hours)."
-        msg += f" You can use execution ID `{latest.get('id') or latest.get('automationRequestId')}` to fetch logs if needed."
+        normalized_latest_status = str(latest_status or "").strip().upper()
+        if normalized_latest_status in {"FAILURE", "FAILED", "ERROR", "COMPLETE", "COMPLETED"}:
+            msg += f" You can use execution ID `{latest.get('id') or latest.get('automationRequestId')}` to fetch logs if needed."
+        elif normalized_latest_status in {"NEW", "QUEUED", "PENDING"}:
+            msg += (
+                " The request is still waiting. I will first verify whether the assigned agent is running and, "
+                "if it is running, whether another process is already in progress."
+            )
         if latest_diag.get("summary"):
             msg = str(latest_diag.get("summary"))
     else:
@@ -1262,11 +1269,15 @@ def t4_execute_and_poll(
             )
         ),
         "waiting_other_process": (
-            str(diagnosis.get("summary"))
+            (
+                f"Request ID `{request_id}` is already triggered and currently in **New** status. "
+                f"{str(diagnosis.get('summary'))}"
+            ).strip()
             if diagnosis.get("summary")
             else (
-                f"'{workflow_name}' is still waiting in NEW status because another process is currently running. "
-                f"Request ID: `{request_id}`. Please wait some time and check again."
+                f"Request ID `{request_id}` is already triggered and currently in **New** status. "
+                f"'{workflow_name}' is still waiting because another process is currently running. "
+                "Please wait some time and check again."
             )
         ),
         "timeout": "Execution timed out waiting for a result.",
@@ -1277,13 +1288,14 @@ def t4_execute_and_poll(
         ),
     }
 
+    result_status = "New" if status == "waiting_other_process" else status
     result = {
-        "success": status == "Complete",
-        "status": status,
+        "success": status in {"Complete", "waiting_other_process"},
+        "status": result_status,
         "request_id": str(request_id),
         "workflow_name": workflow_name,
         "message": status_messages.get(status, f"Status: {status}"),
-        "error": status_messages.get(status, f"Status: {status}") if status in {"no_agent", "waiting_other_process"} else "",
+        "error": status_messages.get(status, f"Status: {status}") if status == "no_agent" else "",
         "agent_name": _primary_assigned_agent_name(assigned_agents),
         "assigned_agents": assigned_agents,
         "diagnosis": diagnosis.get("reason") or "",

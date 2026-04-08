@@ -2,6 +2,13 @@ from tools.remediation_tools import restart_execution, resubmit_execution
 from unittest.mock import patch
 
 
+def _timesheet_workflow_response():
+    return (
+        '{"message":"The timesheet file has been shared with you. Kindly check your mailbox.",'
+        '"error":null,"currentStatus":null,"outputParameters":[]}'
+    )
+
+
 def test_restart_execution_blocks_completed_status_and_does_not_call_restart():
     class StubClient:
         def get_execution_status(self, execution_id):
@@ -74,6 +81,105 @@ def test_resubmit_execution_allows_failed_status():
         result = resubmit_execution(execution_id="22024")
 
     assert result["success"] is True
+
+
+def test_resubmit_execution_surfaces_new_request_id_from_ae_response():
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {"status": "FAILED", "workflowName": "timesheet_report_generation_v5"}
+
+        def get_workflow_agents(self):
+            return []
+
+        def list_agents(self):
+            return [{"agentName": "agent-timesheet-01", "agentState": "RUNNING"}]
+
+        def resubmit_request(self, execution_id, reason="", from_failure_point=True):
+            return {
+                "source": "AutomationEdge HelpDesk",
+                "automationRequestId": 2611436,
+                "success": True,
+                "responseCode": "RequestCreated",
+                "oldRequestId": 2611283,
+            }
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._get_request_payload",
+        return_value={"workflowName": "timesheet_report_generation_v5", "agentName": "agent-timesheet-01"},
+    ):
+        result = resubmit_execution(execution_id="2611283")
+
+    assert result["success"] is True
+    assert result["execution_id"] == "2611436"
+    assert result["request_id"] == "2611436"
+    assert result["source_execution_id"] == "2611283"
+    assert result["new_execution_id"] == "2611436"
+    assert "New Request ID: `2611436`" in result["message"]
+
+
+def test_restart_execution_surfaces_completed_workflow_response_message_after_poll():
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {"status": "FAILED", "workflowName": "timesheet_report_generation_v5"}
+
+        def restart_request(self, execution_id, reason=""):
+            return {"success": True, "message": "restart accepted"}
+
+        def poll_execution_status(self, execution_id, poll_interval_sec=2, max_attempts=15):
+            return {
+                "status": "Complete",
+                "raw": {
+                    "status": "Complete",
+                    "workflowName": "timesheet_report_generation_v5",
+                    "workflowResponse": _timesheet_workflow_response(),
+                },
+            }
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._get_request_payload",
+        return_value={},
+    ):
+        result = restart_execution(execution_id="2611283")
+
+    assert result["success"] is True
+    assert result["status"] == "Complete"
+    assert result["message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+    assert result["workflow_response_message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+
+
+def test_resubmit_execution_surfaces_completed_workflow_response_message_after_poll():
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {"status": "FAILED", "workflowName": "timesheet_report_generation_v5"}
+
+        def resubmit_request(self, execution_id, reason="", from_failure_point=True):
+            return {
+                "success": True,
+                "automationRequestId": 2611436,
+                "oldRequestId": 2611283,
+            }
+
+        def poll_execution_status(self, execution_id, poll_interval_sec=2, max_attempts=15):
+            return {
+                "status": "Complete",
+                "raw": {
+                    "status": "Complete",
+                    "workflowName": "timesheet_report_generation_v5",
+                    "workflowResponse": _timesheet_workflow_response(),
+                },
+            }
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._get_request_payload",
+        return_value={},
+    ):
+        result = resubmit_execution(execution_id="2611283")
+
+    assert result["success"] is True
+    assert result["execution_id"] == "2611436"
+    assert result["status"] == "Complete"
+    assert result["message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
+    assert result["workflow_response_message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
 
 
 def test_restart_execution_blocks_when_assigned_agents_are_not_running():

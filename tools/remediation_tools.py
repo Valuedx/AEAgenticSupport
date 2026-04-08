@@ -39,6 +39,85 @@ def _extract_workflow_response_message(record: dict | None) -> str:
         return ""
 
 
+def _extract_new_execution_ref(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(
+        payload.get("new_execution_id")
+        or payload.get("newExecutionId")
+        or payload.get("new_request_id")
+        or payload.get("newRequestId")
+        or payload.get("automationRequestId")
+        or payload.get("requestId")
+        or payload.get("executionId")
+        or payload.get("id")
+        or ""
+    ).strip()
+
+
+def _resolve_execution_status_context(
+    client,
+    execution_id: str,
+    *,
+    workflow_name: str = "",
+    poll_interval_sec: int = 2,
+    max_attempts: int = 15,
+    poll_result: dict | None = None,
+) -> dict:
+    """Get status/raw/message for an execution with terminal payload enrichment.
+
+    This keeps logic generic and reusable across trigger/restart/resubmit flows
+    without workflow-specific hardcoding.
+    """
+    request_id = str(execution_id or "").strip()
+    if not request_id:
+        return {"status": "", "raw": {}, "detail_msg": "", "poll_result": {}}
+
+    result = poll_result if isinstance(poll_result, dict) else {}
+    if not result and hasattr(client, "poll_execution_status"):
+        try:
+            result = client.poll_execution_status(
+                execution_id=request_id,
+                poll_interval_sec=poll_interval_sec,
+                max_attempts=max_attempts,
+            )
+        except Exception as exc:
+            logger.warning("Status poll failed for execution %s: %s", request_id, exc)
+            result = {}
+
+    status = str((result or {}).get("status") or "").strip()
+    raw = (result or {}).get("raw")
+    raw = raw if isinstance(raw, dict) else {}
+    detail_msg = _extract_workflow_response_message(raw)
+
+    if (
+        str(status).upper() == "COMPLETE"
+        and not detail_msg
+        and hasattr(client, "refresh_execution_payload")
+    ):
+        try:
+            refreshed = client.refresh_execution_payload(
+                request_id,
+                record=raw or None,
+                workflow_name=workflow_name,
+            )
+            if isinstance(refreshed, dict):
+                raw = refreshed
+                detail_msg = _extract_workflow_response_message(raw)
+                refreshed_status = str(raw.get("status") or "").strip()
+                if refreshed_status:
+                    status = refreshed_status
+        except Exception as exc:
+            logger.debug("Terminal payload refresh failed for execution %s: %s", request_id, exc)
+
+    return {
+        "status": status,
+        "raw": raw,
+        "detail_msg": detail_msg,
+        "poll_result": result if isinstance(result, dict) else {},
+    }
+
+
 def _build_trigger_access_message(
     workflow_name: str,
     available: list[str] | None = None,
@@ -761,7 +840,8 @@ def _friendly_status_message(
 
     if s == "WAITING_OTHER_PROCESS":
         return detail_msg or (
-            f"**{workflow_name}** is still in NEW status because another process is currently running. "
+            f"**{workflow_name}** request is already created and currently in **New** status "
+            f"because another process is currently running. "
             f"Request ID: `{req_id}`. Please wait some time and check again."
         )
 
@@ -862,13 +942,30 @@ def restart_execution(execution_id: str,
                 "raw": resp
             }
 
-        return {
+        status_context = _resolve_execution_status_context(
+            client,
+            str(execution_id),
+            workflow_name=workflow_name,
+            poll_interval_sec=2,
+            max_attempts=15,
+        )
+        final_status = status_context.get("status") or ""
+        poll_raw = status_context.get("raw") or {}
+        detail_msg = status_context.get("detail_msg") or ""
+
+        result = {
             "success": True,
-            "message": resp.get("message") or f"Request {execution_id} has been restarted",
+            "message": detail_msg or resp.get("message") or f"Request {execution_id} has been restarted",
             "execution_id": execution_id,
+            "request_id": execution_id,
             "workflow_name": workflow_name,
-            "raw": resp
+            "raw": poll_raw or resp,
         }
+        if final_status:
+            result["status"] = final_status
+        if detail_msg:
+            result["workflow_response_message"] = detail_msg
+        return result
     except Exception as e:
         err_str = str(e)
         # AE-2624: T4 restart limit reached (max 10 restarts per instance)
@@ -953,14 +1050,45 @@ def resubmit_execution(execution_id: str,
             execution_id, reason=reason, from_failure_point=from_failure_point
         )
         mode = "from failure point" if from_failure_point else "from start"
-        return {
+        new_request_id = _extract_new_execution_ref(resp)
+        message = resp.get("message")
+        if not message:
+            if new_request_id and new_request_id != str(execution_id):
+                message = (
+                    f"Execution `{execution_id}` has been resubmitted ({mode}) as a new run. "
+                    f"New Request ID: `{new_request_id}`."
+                )
+            else:
+                message = f"Request {execution_id} has been resubmitted ({mode})"
+        request_ref = str(new_request_id or execution_id or "").strip()
+        status_context = _resolve_execution_status_context(
+            client,
+            request_ref,
+            workflow_name=workflow_name,
+            poll_interval_sec=2,
+            max_attempts=15,
+        )
+        final_status = status_context.get("status") or ""
+        poll_raw = status_context.get("raw") or {}
+        detail_msg = status_context.get("detail_msg") or ""
+
+        result = {
             "success": True,
-            "message": resp.get("message") or f"Request {execution_id} has been resubmitted ({mode})",
-            "execution_id": execution_id,
+            "message": detail_msg or message,
+            "execution_id": request_ref,
+            "request_id": request_ref,
+            "source_execution_id": execution_id,
+            "original_execution_id": execution_id,
+            "new_execution_id": new_request_id or "",
             "workflow_name": workflow_name,
             "from_failure_point": from_failure_point,
-            "raw": resp
+            "raw": poll_raw or resp,
         }
+        if final_status:
+            result["status"] = final_status
+        if detail_msg:
+            result["workflow_response_message"] = detail_msg
+        return result
     except Exception as e:
         logger.error(f"Resubmit failed for {execution_id}: {e}")
         return {
@@ -1282,20 +1410,20 @@ def trigger_workflow(
         poll_raw = {}
         poll_result = {}  # always defined so later references are safe
 
+        detail_msg = ""
         if req_id:
-            try:
-                poll_result = client.poll_execution_status(
-                    execution_id=str(req_id),
-                    poll_interval_sec=2,
-                    max_attempts=15,
-                )
-                final_status = poll_result.get("status", final_status)
-                poll_raw = poll_result.get("raw") or {}
-            except Exception as poll_exc:
-                logger.warning("Status poll failed for %s (%s): %s", resolved_name, req_id, poll_exc)
+            status_context = _resolve_execution_status_context(
+                client,
+                str(req_id),
+                workflow_name=resolved_name,
+                poll_interval_sec=2,
+                max_attempts=15,
+            )
+            poll_result = status_context.get("poll_result") or {}
+            final_status = status_context.get("status") or final_status
+            poll_raw = status_context.get("raw") or {}
+            detail_msg = status_context.get("detail_msg") or ""
 
-        # Pull friendly details from workflowResponse if available
-        detail_msg = _extract_workflow_response_message(poll_raw)
         new_diag = poll_raw.get("newExecutionDiagnosis") if isinstance(poll_raw, dict) and isinstance(poll_raw.get("newExecutionDiagnosis"), dict) else {}
         if not detail_msg and new_diag.get("summary"):
             detail_msg = str(new_diag.get("summary"))
@@ -1326,18 +1454,23 @@ def trigger_workflow(
 
         # ── IMPROVEMENT 3: Non-terminal / pending path ────────────────────────
         if status_upper == "WAITING_OTHER_PROCESS":
-            pending_msg = _friendly_status_message(
-                status=final_status,
-                workflow_name=resolved_name,
-                req_id=req_id,
-                detail_msg=detail_msg,
+            accepted_prefix = (
+                f"Request ID `{req_id}` is already triggered and currently in **New** status."
             )
+            if detail_msg:
+                pending_msg = f"{accepted_prefix} {detail_msg}"
+            else:
+                pending_msg = _friendly_status_message(
+                    status=final_status,
+                    workflow_name=resolved_name,
+                    req_id=req_id,
+                    detail_msg=detail_msg,
+                )
             return {
-                "success": False,
+                "success": True,
                 "execution_id": req_id,
                 "workflow_name": resolved_name,
-                "status": final_status,
-                "error": pending_msg,
+                "status": "New",
                 "message": pending_msg,
                 "request_id": req_id,
                 "raw": poll_raw or raw,

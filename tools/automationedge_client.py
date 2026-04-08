@@ -2264,6 +2264,45 @@ class AutomationEdgeClient:
             if isinstance(agent, dict) and str(agent.get("agentId") or agent.get("id") or agent.get("uuid") or "").strip()
         }
 
+        # Diagnose NEW requests in this order:
+        # 1) agent availability, 2) other-process running.
+        running_assigned_agents = [
+            agent for agent in assigned_agents
+            if self._is_running_agent_state(agent.get("agentState") or agent.get("state"))
+        ]
+        if assigned_agents and not running_assigned_agents:
+            assigned_summary = self._assigned_agent_summary(assigned_agents) or "No assigned agents found"
+            return {
+                "reason": "agent_unavailable",
+                "execution_id": current_execution_id,
+                "workflow_name": workflow_name,
+                "assigned_agents": assigned_agents,
+                "summary": (
+                    f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is still **{raw_status or 'New'}** "
+                    f"because its assigned agent is not running ({assigned_summary}). "
+                    "Please restart the agent and try again."
+                ),
+            }
+
+        if not running_assigned_agents:
+            try:
+                live_agents = self.check_agent_status() or []
+            except Exception as exc:
+                logger.debug("Could not inspect live agent status for NEW request %s: %s", current_execution_id, exc)
+                live_agents = []
+
+            if not any(self._is_running_agent_state(agent.get("agentState") or agent.get("state")) for agent in live_agents):
+                return {
+                    "reason": "agent_unavailable",
+                    "execution_id": current_execution_id,
+                    "workflow_name": workflow_name,
+                    "assigned_agents": assigned_agents,
+                    "summary": (
+                        f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is still **{raw_status or 'New'}** "
+                        "and no active automation agent was detected. Please restart the agent and try again."
+                    ),
+                }
+
         try:
             active_instances = self.get_running_instances("") or []
         except Exception as exc:
@@ -2304,42 +2343,6 @@ class AutomationEdgeClient:
                     f"because another process is currently running: **{instance_workflow}** "
                     f"(Execution ID: `{instance_id or 'unknown'}`, status: `{instance.get('status') or 'Unknown'}`){agent_suffix}. "
                     "Please wait some time and check again."
-                ),
-            }
-
-        running_assigned_agents = [
-            agent for agent in assigned_agents
-            if self._is_running_agent_state(agent.get("agentState") or agent.get("state"))
-        ]
-        if assigned_agents and not running_assigned_agents:
-            assigned_summary = self._assigned_agent_summary(assigned_agents) or "No assigned agents found"
-            return {
-                "reason": "agent_unavailable",
-                "execution_id": current_execution_id,
-                "workflow_name": workflow_name,
-                "assigned_agents": assigned_agents,
-                "summary": (
-                    f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is still **{raw_status or 'New'}** "
-                    f"because its assigned agent is not running ({assigned_summary}). "
-                    "Please restart the agent and try again."
-                ),
-            }
-
-        try:
-            live_agents = self.check_agent_status() or []
-        except Exception as exc:
-            logger.debug("Could not inspect live agent status for NEW request %s: %s", current_execution_id, exc)
-            live_agents = []
-
-        if not any(self._is_running_agent_state(agent.get("agentState") or agent.get("state")) for agent in live_agents):
-            return {
-                "reason": "agent_unavailable",
-                "execution_id": current_execution_id,
-                "workflow_name": workflow_name,
-                "assigned_agents": assigned_agents,
-                "summary": (
-                    f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is still **{raw_status or 'New'}** "
-                    "and no active automation agent was detected. Please restart the agent and try again."
                 ),
             }
 
