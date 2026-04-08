@@ -606,6 +606,179 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertTrue(any(path.endswith("/download/1537.zip") for _, path in calls))
         client.close()
 
+    def test_get_execution_logs_handles_direct_zip_poll_response(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            path = request.url.path
+            calls.append((request.method, path))
+
+            if path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "tok-1"})
+
+            if "/logs" in path and "debuglogs" not in path:
+                return httpx.Response(400, json={"error": "Not supported on T4 directly"})
+
+            if path.endswith("/workflowinstances/22853"):
+                return httpx.Response(
+                    200,
+                    json={"status": "Complete", "startTime": 1000, "endTime": 2000},
+                )
+
+            if path.endswith("/agent/debuglogs") and request.method == "GET":
+                return httpx.Response(200, json={"data": []})
+
+            if path.endswith("/agent/debuglogs") and request.method == "POST":
+                return httpx.Response(200, json={"id": 145})
+
+            if path.endswith("/agent/debuglogs/145"):
+                return httpx.Response(
+                    200,
+                    content=b"ZIP_DATA",
+                    headers={"Content-Type": "application/zip"},
+                )
+
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+
+        with patch("time.sleep"):
+            result = client.get_execution_logs("22853")
+
+        self.assertTrue(result.get("is_zip"))
+        self.assertEqual(result.get("log_zip_content"), b"ZIP_DATA")
+        self.assertTrue(any(path.endswith("/agent/debuglogs/145") for _, path in calls))
+        client.close()
+
+    def test_diagnose_new_execution_detects_other_running_process(self):
+        client = self._client_with_transport(lambda request: httpx.Response(404, json={}))
+
+        with patch.object(
+            client,
+            "get_workflow_agents",
+            return_value=[
+                {
+                    "workflow": {"name": "timesheet_report_generation_v5"},
+                    "agents": [{"agentName": "agent-timesheet-01", "agentState": "RUNNING"}],
+                }
+            ],
+        ), patch.object(
+            client,
+            "get_running_instances",
+            return_value=[
+                {
+                    "id": "2590200",
+                    "status": "InProgress",
+                    "workflowName": "Payroll_Process",
+                    "agentName": "agent-timesheet-01",
+                }
+            ],
+        ):
+            diagnosis = client.diagnose_new_execution(
+                {
+                    "id": "2590291",
+                    "status": "New",
+                    "workflowName": "timesheet_report_generation_v5",
+                }
+            )
+
+        self.assertEqual(diagnosis["reason"], "other_process_running")
+        self.assertEqual(diagnosis["other_execution_id"], "2590200")
+        self.assertEqual(diagnosis["other_workflow_name"], "Payroll_Process")
+        self.assertIn("Please wait some time", diagnosis["summary"])
+        client.close()
+
+    def test_diagnose_new_execution_detects_agent_unavailable(self):
+        client = self._client_with_transport(lambda request: httpx.Response(404, json={}))
+
+        with patch.object(
+            client,
+            "get_workflow_agents",
+            return_value=[
+                {
+                    "workflow": {"name": "timesheet_report_generation_v5"},
+                    "agents": [{"agentName": "agent-timesheet-01", "agentState": "STOPPED"}],
+                }
+            ],
+        ), patch.object(client, "get_running_instances", return_value=[]), patch.object(
+            client,
+            "check_agent_status",
+            return_value=[],
+        ):
+            diagnosis = client.diagnose_new_execution(
+                {
+                    "id": "2590291",
+                    "status": "New",
+                    "workflowName": "timesheet_report_generation_v5",
+                }
+            )
+
+        self.assertEqual(diagnosis["reason"], "agent_unavailable")
+        self.assertIn("restart the agent", diagnosis["summary"].lower())
+        client.close()
+
+    def test_poll_execution_status_refreshes_workflow_response_from_recent_instances(self):
+        calls = {"status_get": 0, "recent_list": 0}
+        workflow_response = json.dumps(
+            {
+                "message": "The timesheet file has been shared with you. Kindly check your mailbox.",
+                "error": None,
+                "currentStatus": None,
+                "outputParameters": [],
+            }
+        )
+
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("/authenticate"):
+                return httpx.Response(200, json={"token": "abc-123"})
+
+            if request.url.path.endswith("/workflowinstances/2609419"):
+                calls["status_get"] += 1
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 2609419,
+                        "status": "Complete",
+                        "workflowName": "timesheet_report_generation_v5",
+                    },
+                )
+
+            if request.method == "POST" and request.url.path.endswith("/workflowinstances"):
+                calls["recent_list"] += 1
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {
+                                "id": 2609419,
+                                "status": "Complete",
+                                "workflowName": "timesheet_report_generation_v5",
+                                "workflowResponse": workflow_response,
+                            }
+                        ]
+                    },
+                )
+
+            return httpx.Response(404, json={})
+
+        client = self._client_with_transport(handler)
+
+        with patch("time.sleep"):
+            result = client.poll_execution_status("2609419", poll_interval_sec=0, max_attempts=1)
+
+        self.assertEqual(result["status"], "Complete")
+        self.assertEqual(
+            result["raw"].get("workflowResponseMessage"),
+            "The timesheet file has been shared with you. Kindly check your mailbox.",
+        )
+        self.assertEqual(
+            result["raw"].get("workflowResponseParsed", {}).get("message"),
+            "The timesheet file has been shared with you. Kindly check your mailbox.",
+        )
+        self.assertGreaterEqual(calls["status_get"], 1)
+        self.assertGreaterEqual(calls["recent_list"], 1)
+        client.close()
+
     def test_get_required_parameters_fallback(self):
         """Verify that get_required_parameters falls back to all parameters if none are marked required."""
         client = AutomationEdgeClient()
@@ -648,6 +821,25 @@ class TestAutomationEdgeClient(unittest.TestCase):
             with patch.object(client, "get_cached_workflow_parameters", return_value=schema_catalogue):
                 required_cat = client.get_required_parameters("WF_Cat")
                 self.assertEqual(required_cat, ["param1"])
+
+    def test_workflow_lookup_specificity_distinguishes_followup_sentence_from_explicit_name(self):
+        client = AutomationEdgeClient()
+
+        self.assertFalse(
+            client.is_specific_workflow_lookup_query(
+                "retrigger this bot i have added input file"
+            )
+        )
+        self.assertTrue(
+            client.is_specific_workflow_lookup_query(
+                "daily claims processing bot"
+            )
+        )
+        self.assertTrue(
+            client.is_specific_workflow_lookup_query(
+                "timesheet_report_generation_v5"
+            )
+        )
 
     @patch("tools.automationedge_client.is_read_enforced", return_value=True)
     @patch("rag.engine.get_rag_engine")

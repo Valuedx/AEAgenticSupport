@@ -354,7 +354,13 @@ def test_agent_analyze_logs_surfaces_recurring_error_summary_when_many_error_lin
         with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
             with patch("mcp_server.tools.agent_tools.llm_client.chat", return_value=ai_markdown) as mock_llm:
                 with patch("time.sleep", return_value=None):
-                    result = asyncio.run(agent_analyze_logs(agent_id="2963"))
+                    result = asyncio.run(
+                        agent_analyze_logs(
+                            agent_id="2963",
+                            from_date="2026-03-30T00:00:00",
+                            to_date="2026-03-30T23:59:59",
+                        )
+                    )
 
     assert result["success"] is True
     assert result["total_error_lines"] == 12
@@ -369,4 +375,47 @@ def test_agent_analyze_logs_surfaces_recurring_error_summary_when_many_error_lin
     assert result["report"].count("`2026-03-30T23:57:") == 12
     assert result["message"].startswith("Found 12 error lines across 1 file(s).")
     assert "Top issues:" in result["message"]
+    mock_llm.assert_called_once()
+
+
+def test_agent_analyze_logs_falls_back_when_ai_summary_is_incomplete():
+    mock_client = MagicMock()
+    mock_client.list_agents.return_value = [
+        {
+            "agentId": "2963",
+            "uuid": "385f365f-deb0-4a02-ba81-e01936816786",
+            "agentName": "adarsh@GPSR61UB-00105",
+            "agentState": "RUNNING",
+        }
+    ]
+    mock_client.request_agent_debug_logs.return_value = {"id": 1520}
+    mock_client.get_agent_debug_logs.return_value = {
+        "status": "COMPLETE",
+        "logFileLink": "1520_ag_logdownload.zip",
+    }
+    mock_client.get.return_value = _build_zip_with_repeated_errors_same_day()
+
+    truncated_ai = (
+        "Summary:\n"
+        "The AutomationEdge agent is consistently failing to connect to the server "
+        "t4.automationedge.com due to an `"
+    )
+
+    with patch.dict(os.environ, {"AE_AGENT_LOG_AI_SUMMARY_ENABLED": "true"}):
+        with patch("mcp_server.tools.agent_tools.get_ae_client", return_value=mock_client):
+            with patch("mcp_server.tools.agent_tools.llm_client.chat", return_value=truncated_ai) as mock_llm:
+                with patch("time.sleep", return_value=None):
+                    result = asyncio.run(
+                        agent_analyze_logs(
+                            agent_id="2963",
+                            from_date="2026-03-30T00:00:00",
+                            to_date="2026-03-30T23:59:59",
+                        )
+                    )
+
+    assert result["success"] is True
+    assert "### 🤖 AI Diagnostic Summary" not in result["report"]
+    assert "### Issue Explanation" in result["report"]
+    assert "### Suggested Actions" in result["report"]
+    assert "due to an `" not in result["report"]
     mock_llm.assert_called_once()

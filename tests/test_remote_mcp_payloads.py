@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from agents.orchestrator import Orchestrator
 from tools.mcp_tools import _extract_remote_error_message, _normalize_remote_call_result
 
@@ -145,3 +147,68 @@ def test_build_action_failure_response_for_completed_restart_skips_retry_prompt(
 
     assert "Fresh Run" in response
     assert "Would you like me to retry" not in response
+
+
+def test_format_completion_message_skips_suggestions_after_ticket_creation():
+    orchestrator = Orchestrator()
+
+    with patch("agents.orchestrator.llm_client.chat") as mock_chat:
+        response = orchestrator._format_completion_message(
+            "create_support_ticket",
+            {
+                "success": True,
+                "ticket_id": "HDFC-1001",
+                "message": "Support ticket HDFC-1001 has been created successfully.",
+            },
+        )
+
+    assert "Action Completed" in response
+    assert "Support ticket HDFC-1001 has been created successfully." in response
+    assert "Here are a few options" not in response
+    assert "Suggested next actions" not in response
+    mock_chat.assert_not_called()
+
+
+def test_format_completion_message_prompt_blocks_unavailable_ticket_status_suggestions():
+    orchestrator = Orchestrator()
+    captured = {}
+
+    def fake_chat(prompt, **kwargs):
+        captured["prompt"] = prompt
+        return "- Review the workflow outcome.\n- Share the result with the requester."
+
+    with patch("agents.orchestrator.llm_client.chat", side_effect=fake_chat):
+        response = orchestrator._format_completion_message(
+            "trigger_workflow",
+            {
+                "success": True,
+                "workflow_name": "timesheet_report_generation_v5",
+                "request_id": "2609419",
+                "status": "Complete",
+                "message": "The timesheet file has been shared with you. Kindly check your mailbox.",
+            },
+        )
+
+    assert "Action Completed" in response
+    assert "Do not hardcode workflow names" in captured["prompt"]
+    assert "Never suggest checking ticket status" in captured["prompt"]
+    assert "After a ticket is created, do not suggest checking status or updates" in captured["prompt"]
+
+
+def test_format_completion_message_failure_suggests_create_support_ticket():
+    orchestrator = Orchestrator()
+
+    response = orchestrator._format_completion_message(
+        "t4_execute_and_poll",
+        {
+            "success": False,
+            "error": "No automation agent was available to start the workflow.",
+            "status": "NO_AGENT",
+            "assigned_agents": [
+                {"agentName": "agent-timesheet-01", "agentState": "STOPPED"},
+            ],
+        },
+    )
+
+    assert "Unable to Complete Action" in response
+    assert "create_support_ticket" in response

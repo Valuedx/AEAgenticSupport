@@ -11,8 +11,9 @@ from difflib import SequenceMatcher
 import json
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import cast, Any, List, Optional
+from zoneinfo import ZoneInfo
 
 
 from google.genai import types
@@ -21,6 +22,7 @@ from agents.approval_gate import ApprovalGate, ApprovalIntent
 from agents.escalation import EscalationAgent
 from config.llm_client import llm_client
 from config.metrics import metrics_collector
+from config.settings import CONFIG
 from gateway.progress import ProgressCallback, create_noop_progress
 from rag.engine import get_rag_engine
 from security.workflow_access import can_execute_workflow, is_execute_enforced
@@ -44,6 +46,30 @@ class Orchestrator:
         self.approval_gate = ApprovalGate()
         self.escalation = EscalationAgent()
         self.issue_trackers: dict[str, IssueTracker] = {}
+
+    @staticmethod
+    def _get_display_time_context() -> tuple[datetime, str, str, str]:
+        tz_name = str(CONFIG.get("DISPLAY_TIMEZONE") or "Asia/Kolkata").strip() or "Asia/Kolkata"
+        try:
+            display_tz = ZoneInfo(tz_name)
+        except Exception:
+            display_tz = timezone(timedelta(hours=5, minutes=30))
+            tz_name = "Asia/Kolkata"
+
+        now_local = datetime.now(display_tz)
+        hour = now_local.hour
+        if hour < 12:
+            greeting = "Good morning"
+        elif hour < 17:
+            greeting = "Good afternoon"
+        elif hour < 21:
+            greeting = "Good evening"
+        else:
+            greeting = "Good night"
+
+        label = "IST" if tz_name in {"Asia/Kolkata", "Asia/Calcutta"} else tz_name
+        now_str = now_local.strftime("%A, %d %B %Y  %I:%M %p") + f" {label}"
+        return now_local, greeting, now_str, label
 
     @staticmethod
     def _state_org_code(state: ConversationState) -> str:
@@ -672,19 +698,31 @@ class Orchestrator:
             extracted["to_date"] = str(to_date)
         return extracted
 
+    @staticmethod
+    def _canonicalize_tool_name(tool_name: str) -> str:
+        clean = str(tool_name or "").strip()
+        alias_map = {
+            "ae.ticket.create": "create_support_ticket",
+        }
+        return alias_map.get(clean, clean)
+
+    @classmethod
+    def _is_support_ticket_tool(cls, tool_name: str) -> bool:
+        return cls._canonicalize_tool_name(tool_name) in {"create_support_ticket", "create_incident_ticket"}
+
     def _rewrite_call_ae_api_tool(self, tool_name: str, tool_args: dict) -> tuple[str, dict]:
         if tool_name != "call_ae_api":
-            return tool_name, tool_args
+            return self._canonicalize_tool_name(tool_name), tool_args
 
         redirected_ticket_args = self._extract_ticket_args_from_call_ae_api(tool_args)
         if redirected_ticket_args:
-            return "create_hdfc_ticket", redirected_ticket_args
+            return "create_support_ticket", redirected_ticket_args
 
         redirected_agent_log_args = self._extract_agent_log_args_from_call_ae_api(tool_args)
         if redirected_agent_log_args:
             return "analyze_agent_logs", redirected_agent_log_args
 
-        return tool_name, tool_args
+        return self._canonicalize_tool_name(tool_name), tool_args
 
     def _ensure_turn_tool_active(
         self,
@@ -1090,25 +1128,13 @@ class Orchestrator:
                 return "You're welcome. This issue is resolved. If it comes back, share the details and I'll check."
             return "You're welcome. Share any issue when ready and I'll help."
 
-        # Compute IST (UTC+5:30) time and derive greeting word
-        from datetime import timezone, timedelta
-        _IST = timezone(timedelta(hours=5, minutes=30))
-        _now_ist = datetime.now(_IST)
-        _hour = _now_ist.hour
-        if _hour < 12:
-            _greeting = "Good morning"
-        elif _hour < 17:
-            _greeting = "Good afternoon"
-        elif _hour < 21:
-            _greeting = "Good evening"
-        else:
-            _greeting = "Good night"
-        _now_str = _now_ist.strftime("%A, %d %B %Y  %I:%M %p IST")
+        # Compute the current display time and derive the greeting word
+        _, _greeting, _now_str, _tz_label = self._get_display_time_context()
 
         try:
             return llm_client.chat(
                 (
-                    f"Current Date/Time (IST): {_now_str}\n"
+                    f"Current Date/Time ({_tz_label}): {_now_str}\n"
                     f"Appropriate greeting for this time of day: {_greeting}\n\n"
                     "Respond naturally to the user's message.\n"
                     "If this is a greeting or small talk, use the appropriate greeting above naturally — "
@@ -1322,7 +1348,7 @@ class Orchestrator:
                             
                             # Pre-sanitize args for the Approval UI to ensure the user sees WAF-safe text
                             # and the backend tool doesn't have to strip characters silently.
-                            if tool_name in ("create_hdfc_ticket", "create_incident_ticket"):
+                            if self._is_support_ticket_tool(tool_name):
                                 tool_args = self._sanitize_ticket_args(tool_args)
 
                             if not missing and self.approval_gate.needs_approval(
@@ -1333,7 +1359,7 @@ class Orchestrator:
                                     tool_args,
                                 )
                                 # Clean summary too for ticketing actions
-                                if tool_name in ("create_hdfc_ticket", "create_incident_ticket"):
+                                if self._is_support_ticket_tool(tool_name):
                                     summary = summary.replace("_", " ").replace(":", " ")
 
                                 approval_request = self.approval_gate.create_approval_request(
@@ -1767,19 +1793,20 @@ class Orchestrator:
             state.user_id or "user",
         )
         state.phase = ConversationPhase.EXECUTING
-        approval_tool_def = tool_registry.get_tool(action["tool"])
+        action_tool_name = self._canonicalize_tool_name(str(action.get("tool") or ""))
+        approval_tool_def = tool_registry.get_tool(action_tool_name)
         action_args = self._inject_user_scope(
-            action["tool"],
+            action_tool_name,
             action["args"],
             approval_tool_def,
             state,
         )
-        result = tool_registry.execute(action["tool"], **action_args)
+        result = tool_registry.execute(action_tool_name, **action_args)
         state.log_tool_call(
-            action["tool"], action_args, result.data, result.success
+            action_tool_name, action_args, result.data, result.success
         )
         # Cleanup param collection on success (Loop Fix)
-        if result.success and action["tool"] in ("trigger_workflow", "t4_execute_and_poll"):
+        if result.success and action_tool_name in ("trigger_workflow", "t4_execute_and_poll"):
             state.clear_param_collection()
 
         action_summary = state.pending_action_summary
@@ -1817,10 +1844,10 @@ class Orchestrator:
                     f"Approved and executed: {action_summary}",
                 )
             state.phase = ConversationPhase.RESOLVED
-            return self._format_completion_message(action["tool"], result.data)
+            return self._format_completion_message(action_tool_name, result.data)
 
         return self._build_action_failure_response(
-            action_tool=str(action.get("tool") or ""),
+            action_tool=action_tool_name,
             action_args=action.get("args") or {},
             error_text=result.error,
             error_data=result.data if isinstance(result.data, dict) else None,
@@ -1856,6 +1883,53 @@ class Orchestrator:
             if rank >= tier_rank:
                 return role
         return "admin"
+
+    @staticmethod
+    def _is_ticket_creation_completion(tool_name: str, data: dict | None = None) -> bool:
+        clean_tool = Orchestrator._canonicalize_tool_name(str(tool_name or "").strip()).lower()
+        if clean_tool in {"create_support_ticket", "create_incident_ticket"}:
+            return True
+        if "ticket" in clean_tool and "create" in clean_tool:
+            return True
+
+        if not isinstance(data, dict):
+            return False
+
+        if any(data.get(key) for key in ("ticket_id", "incident_id", "case_id", "support_ticket_id")):
+            return True
+
+        message = str(data.get("message") or data.get("report") or "").strip().lower()
+        return "ticket" in message and any(
+            phrase in message
+            for phrase in ("created", "raised", "logged", "submitted")
+        )
+
+    @classmethod
+    def _should_skip_completion_suggestions(cls, tool_name: str, data: dict | None = None) -> bool:
+        return cls._is_ticket_creation_completion(tool_name, data)
+
+    @staticmethod
+    def _is_unsupported_ticket_followup_suggestion(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if "ticket" not in normalized:
+            return False
+        return any(token in normalized for token in ("status", "update", "updates", "track", "progress"))
+
+    @classmethod
+    def _support_ticket_failure_hint(cls, tool_name: str, data: dict | None = None) -> str:
+        if cls._is_ticket_creation_completion(tool_name, data):
+            return ""
+        payload = data if isinstance(data, dict) else {}
+        combined = " ".join(
+            str(payload.get(key) or "").strip().lower()
+            for key in ("error", "message", "hint", "action_required", "report")
+        )
+        if "support ticket" in combined or "create_support_ticket" in combined:
+            return ""
+        return (
+            "\n\n**Next step:** If you'd like, I can raise a support ticket for this issue "
+            "using `create_support_ticket`."
+        )
 
     def _format_completion_message(self, tool_name: str, data: dict) -> str:
         """Create a clean, human-readable summary of the tool result with LLM-generated suggestions."""
@@ -1987,10 +2061,11 @@ class Orchestrator:
                 # If we have an error but no success flag, or success is False
                 if not tool_error:
                     tool_error = "The tool encountered an operational issue."
+                support_ticket_hint = self._support_ticket_failure_hint(tool_name, data)
 
                 return (
                     f"### ⚠️ Unable to Complete Action\n"
-                    f"{tool_error}{state_tag}{detail_block}{action_hint}{hint_block}{sop_block}"
+                    f"{tool_error}{state_tag}{detail_block}{action_hint}{hint_block}{sop_block}{support_ticket_hint}"
                 )
             if data.get("supported") is False:
                 # Explicitly unsupported operation
@@ -2040,7 +2115,9 @@ class Orchestrator:
             response += "\n" + "\n".join(details)
 
         # Skip suggestions if the message is already long (like a partial report)
-        if len(response) > 400:
+        # or if the completed action was ticket creation, where follow-up status/update
+        # suggestions are not currently supported.
+        if len(response) > 400 or self._should_skip_completion_suggestions(tool_name, data):
             return response
 
         # Ask the LLM to generate 2 context-aware suggestions for what the user might want to do next.
@@ -2048,12 +2125,8 @@ class Orchestrator:
         try:
             status_prev = str(status or "").lower()
             is_failure = any(term in status_prev for term in ("fail", "error", "abort", "reject", "cancel", "invalid"))
-            
-            # Identify if this is likely an HDFC-related process
-            wf_name = str(workflow or "").lower()
-            is_hdfc = "hdfc" in wf_name or "hdfc" in str(tool_name).lower()
-            
-            ticket_tool = "create_hdfc_ticket"
+
+            ticket_tool = "create_support_ticket"
             
             error_instruction = ""
             if is_failure:
@@ -2074,6 +2147,10 @@ class Orchestrator:
                     "Based on the following action just completed by an AutomationEdge support agent, "
                     "suggest exactly 2 brief, actionable next steps the user might want to take. "
                     f"{error_instruction}\n"
+                    "Do not hardcode workflow names, bot names, agent names, tenant names, org names, or special-case business rules. "
+                    "Base every suggestion only on the current tool result and the conversation context provided here. "
+                    "Never suggest checking ticket status, checking ticket updates, tracking ticket progress, or any other unsupported ticket follow-up feature unless that capability was explicitly completed or confirmed in this conversation. "
+                    "After a ticket is created, do not suggest checking status or updates for that ticket.\n"
                     "Return ONLY 2 bullet lines starting with '- '. No preamble, no explanation.\n\n"
                     f"Context: {context_summary}"
                 ),
@@ -2087,6 +2164,11 @@ class Orchestrator:
                 line = line.strip()
                 if line.startswith(("- ", "* ")):
                     suggestions.append(line.lstrip("-* ").strip())
+            suggestions = [
+                suggestion
+                for suggestion in suggestions
+                if not self._is_unsupported_ticket_followup_suggestion(suggestion)
+            ]
             
             # Defensive fallback if LLM ignored the instruction on failure
             if is_failure and suggestions and not any(term in str(suggestions).lower() for term in ("ticket", "escalat", "incident", "support")):
@@ -2170,7 +2252,7 @@ Rules:
    - search_knowledge_base: semantic search across all KB collections
 9. If none of the above help, call discover_tools to search the full
    catalog by description or category.
-10. **CRITICAL: TECHNICAL PRIORITIZATION**. If you call a tool and it returns technical data (workflow instances, logs, agent stats) OR a failure message, you MUST report that specific data or error message to the user. Do NOT provide placeholder SOP instructions if tool data or a specific error (e.g., 'Agent Offline') is available. Prefer the tool's live truth over static Knowledge Base or SOP text provided in the context block.
+10. **CRITICAL: TECHNICAL PRIORITIZATION**. If you call a tool and it returns technical data (workflow instances, logs, agent stats) OR a failure message, you MUST use that live result in your reply. Do NOT provide placeholder SOP instructions if tool data or a specific error (e.g., 'Agent Offline') is available. Prefer the tool's live truth over static Knowledge Base or SOP text provided in the context block. For business users, translate technical findings into plain business language and hide raw technical codes, internal identifiers, and low-level error details unless the user explicitly asks for them.
 11. **CRITICAL: NUMERIC ID RULE**. If the user provides a specific numeric request ID, or automation request ID (e.g. "request id 2501865"), you MUST call `get_execution_status` with that exact ID immediately. Do NOT ask for more information. Do NOT generate troubleshooting steps. Call the tool first, then report results. **EXCEPTION: This rule does NOT apply to Schedule IDs — see Rule 12.**
 12. **CRITICAL: SCHEDULE OPERATION RULE**. If the user says anything containing "schedule" AND an action word (disable, enable, pause, resume, stop, start, halt, activate, deactivate, turn off, turn on), you MUST call the appropriate schedule tool immediately:
     - "disable / pause / stop / halt / deactivate" → call `ae.schedule.disable` with `schedule_id` from the message
@@ -2181,6 +2263,7 @@ Rules:
     - Use a DIFFERENT heading each time — rotate naturally among: "Here are a few options:", "You might also want to:", "Suggested next actions:", "Can I help with anything else?", "What's your next step?" — NEVER repeat the same heading in consecutive turns.
     - Keep suggestions relevant to the context (e.g., after a failure: offer log analysis; after a restart: offer status monitoring).
     - Match the persona: technical users get tool-specific options; business users get plain-language options.
+    - Do NOT hardcode workflow names, bot names, ticket patterns, agent names, tenant names, organization names, or customer-specific rules. Use only the live tool data and the current conversation context.
 14. **TERMINOLOGY & STATUS-FIRST RULE**: "Bots" and "Workflows" are synonymous. If a user asks about a bot (even by a "friendly" or "natural language" name like 'Email Bot JD'), you MUST call `check_workflow_status` as your FIRST action unless they explicitly say "run", "start", or "trigger". Never assume the user wants to execute a bot just because they mentioned its name.
 15. **PROACTIVE PARAMETER DISCOVERY**: When `discover_tools` returns a workflow with `[ORCHESTRATOR_MAPPING]` in its description:
     - **TECHNICAL MAPPING MANDATE**: You MUST silently cross-reference the required parameters against the conversation history before generating a response.
@@ -2192,9 +2275,9 @@ Rules:
 17. **LOG DATE SELECTION RULE**: 
     - **Agent Host Logs (`analyze_agent_logs`)**: When requested for an `agent_id`, you MUST inform the user that logs default to the last 24 hours and ask if they want to specify a particular `from_date` or `to_date` BEFORE performing extraction.
     - **Workflow Execution Logs (`get_execution_logs`)**: When requested for a specific Request/Execution ID, you MUST NOT ask for a time range. These logs represent the entire lifecycle of that specific run and do not require date filters. Call the tool immediately.
-18. **GOAL PERSISTENCE**: If you have started a multi-step intent (e.g., creating a ticket, triggering a workflow, or asking for specific details), you MUST maintain that goal as your primary objective in the next turn. If the user's response provides the requested details but also mentions a failure symptom, you SHOULD call the relevant tool (e.g., `create_hdfc_ticket` or `trigger_workflow`) FIRST while acknowledging the symptom. Do NOT abandon the original goal to start a fresh diagnostics discovery unless the user explicitly cancels the request.
+18. **GOAL PERSISTENCE**: If you have started a multi-step intent (e.g., creating a ticket, triggering a workflow, or asking for specific details), you MUST maintain that goal as your primary objective in the next turn. If the user's response provides the requested details but also mentions a failure symptom, you SHOULD call the relevant tool (e.g., `create_support_ticket` or `trigger_workflow`) FIRST while acknowledging the symptom. Do NOT abandon the original goal to start a fresh diagnostics discovery unless the user explicitly cancels the request.
 19. **STRICT CONTEXT INHERITANCE**: If you previously listed agents, workflows, or IDs (e.g., ID 2887) and the user responds with parameters (like a date range, "yes", or "proceed"), you MUST assume they are referring to the MOST RECENT entity mentioned. NEVER ask "which agent" if only one agent was discussed or listed in the immediate history. Use the `Recent Conversation Context` block provided below as your source of truth.
-20. **STRICT PAYLOAD SANITIZATION**: When calling support or ticketing tools (e.g. `ae.ticket.create`), you MUST provide `description` and `process_name` as PLAIN TEXT only. Do NOT use double quotes ("), colons (:), underscores (_), or parentheses () inside these parameters. Use spaces or hyphens instead to preserve readability. (Example: "execution_id: 2564846" -> "execution id 2564846").
+20. **STRICT PAYLOAD SANITIZATION**: When calling support or ticketing tools (e.g. `create_support_ticket`), you MUST provide `description` and `process_name` as PLAIN TEXT only. Do NOT use double quotes ("), colons (:), underscores (_), or parentheses () inside these parameters. Use spaces or hyphens instead to preserve readability. (Example: "execution_id: 2564846" -> "execution id 2564846").
 21. **AGENT STATUS DISCOVERY**: Always use `ae.agent.list_all` for any general agent status query to see all Running, Stopped, and Offline agents.
 22. **STRICT AGENT ENFORCEMENT**: You MUST call `ae.agent.list_all` (or `list_running`) to discover numeric IDs and verify `RUNNING` status BEFORE suggesting or triggering any diagnostic action (logs, RDP, etc.). NEVER call diagnostics if the agent is `STOPPED`.
 23. **PRECISION ID RESOLUTION**: When calling agent-related tools, always use the numeric `agent_id` (e.g. "2928") resolved from the agent list, rather than the search name (e.g. "vaishnavi.malusare..."), to ensure 100% precision.
@@ -2220,6 +2303,10 @@ Style requirements:
 - Focus on current status, business impact, expected timing, and what happens next.
 - Never start with internal tracking language such as "linked issue", "tool", "workflow mapping", or "parameter collection".
 - Avoid workflow names, request IDs, execution IDs, error codes, endpoint names, and raw file paths unless the user explicitly asks for them.
+- Avoid code-heavy or deeply technical jargon, but you may use simple operational terms when they help, such as "file missing", "system unavailable", "agent not running", or "waiting for another process".
+- If there is a problem, explain it in a practical way the user can act on. Focus on what went wrong in simple terms and what the user should do next.
+- Do not include code-level details, stack traces, internal error text, or deep technical troubleshooting in normal business replies.
+- If a required file is missing from a shared location, explain it simply, for example: "The required file is not available in the shared location. Please check or upload the file."
 - If structure helps, use short sections such as "What happened", "What this means", and "Next options".
 - Keep suggestions simple, concrete, and non-technical.
 - Keep the reply in normal chat format, not as an email, memo, or drafted note.
@@ -2308,22 +2395,11 @@ Use them directly when investigating instead of asking the user to repeat them:
 CRITICAL: If an `execution_id` or `request_id` is listed above and the user asks "why" or "explain", call `get_execution_logs` immediately.
 CRITICAL: If an `agent_id` is listed above and the user asks for logs, says "yes/ok", or PROVIDES A DATE RANGE, you MUST call `analyze_agent_logs` with that `agent_id` immediately. Do NOT ask for the agent ID again."""
 
-        # Build IST (UTC+5:30) datetime and compute the appropriate greeting word
-        from datetime import timezone, timedelta
-        _IST = timezone(timedelta(hours=5, minutes=30))
-        _now_ist = datetime.now(_IST)
-        _hour = _now_ist.hour
-        if _hour < 12:
-            _greeting = "Good morning"
-        elif _hour < 17:
-            _greeting = "Good afternoon"
-        elif _hour < 21:
-            _greeting = "Good evening"
-        else:
-            _greeting = "Good night"
-        _now_str = _now_ist.strftime("%A, %d %B %Y  %I:%M %p IST")
+        # Build the current display time context and matching greeting
+        _, _greeting, _now_str, _tz_label = self._get_display_time_context()
+        _tz_title = "Indian Standard Time" if _tz_label == "IST" else _tz_label
         time_context = (
-            "\n## Current Date & Time (Indian Standard Time)\n"
+            f"\n## Current Date & Time ({_tz_title})\n"
             f"- Date/Time : {_now_str}\n"
             f"- Greeting  : {_greeting}\n"
             "Use the greeting above when the context calls for one (e.g. first turn, opening a conversation). "
@@ -2931,7 +3007,7 @@ CRITICAL RULES:
                 intro=intro,
             )
 
-        tool_name = str(pc.get("execution_tool") or "trigger_workflow")
+        tool_name = self._canonicalize_tool_name(str(pc.get("execution_tool") or "trigger_workflow"))
         action_args = self._build_action_args_for_collection(pc, workflow_name, collected, state)
 
         # If this param collection was created after an already-approved action,
@@ -3050,6 +3126,103 @@ CRITICAL RULES:
             txt = cast(Any, txt)[:-1]
         return txt
 
+    def _recent_workflow_context_candidates(
+        self,
+        state: ConversationState,
+    ) -> list[str]:
+        candidates: list[str] = []
+
+        def add_candidate(value: Any) -> None:
+            clean = str(value or "").strip()
+            if not clean:
+                return
+            if clean.lower() in {"unknown", "this workflow", "this bot", "that workflow", "that bot"}:
+                return
+            if clean not in candidates:
+                candidates.append(clean)
+
+        def scan_payload(payload: Any) -> None:
+            queue: list[Any] = [payload]
+            seen: set[int] = set()
+
+            while queue:
+                current = queue.pop(0)
+                ident = id(current)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+
+                if isinstance(current, dict):
+                    lower_keys = {str(k).lower() for k in current.keys()}
+                    if any(key in lower_keys for key in ("workflow_name", "workflowname")):
+                        add_candidate(current.get("workflow_name") or current.get("workflowName"))
+                    if "workflow" in current and isinstance(current.get("workflow"), str):
+                        add_candidate(current.get("workflow"))
+                    if "name" in current and any(
+                        key in lower_keys for key in ("workflow_id", "workflowid", "workflow_name", "workflowname")
+                    ):
+                        add_candidate(current.get("name"))
+
+                    workflow_meta = (
+                        current.get("workflowConfiguration")
+                        or current.get("workflow_configuration")
+                        or current.get("workflow")
+                    )
+                    if isinstance(workflow_meta, dict):
+                        add_candidate(
+                            workflow_meta.get("name")
+                            or workflow_meta.get("workflowName")
+                            or workflow_meta.get("workflow_name")
+                        )
+                        queue.append(workflow_meta)
+
+                    raw_payload = current.get("raw")
+                    if isinstance(raw_payload, (dict, list, tuple)):
+                        queue.append(raw_payload)
+
+                    for value in current.values():
+                        if isinstance(value, (dict, list, tuple)):
+                            queue.append(value)
+                elif isinstance(current, (list, tuple)):
+                    queue.extend(list(current))
+
+        add_candidate((state.param_collection or {}).get("workflow_name"))
+        add_candidate((state.suspended_flow or {}).get("workflow_name"))
+        pending_action = state.pending_action or {}
+        if isinstance(pending_action, dict):
+            pending_args = pending_action.get("args") or {}
+            if isinstance(pending_args, dict):
+                add_candidate(pending_args.get("workflow_name") or pending_args.get("workflow"))
+
+        for workflow_name in reversed(state.affected_workflows or []):
+            add_candidate(workflow_name)
+
+        for call in reversed(state.tool_call_log[-10:]):
+            if not isinstance(call, dict):
+                continue
+            scan_payload(call.get("params") or {})
+            scan_payload(call.get("result") or {})
+
+        return candidates
+
+    def _resolve_recent_workflow_reference(self, state: ConversationState) -> str:
+        client = get_ae_client()
+        org_code = self._state_org_code(state)
+        user_id = state.user_id
+
+        for candidate in self._recent_workflow_context_candidates(state):
+            try:
+                resolved = client.resolve_cached_workflow_name(
+                    candidate,
+                    user_id=user_id,
+                    org_code=org_code,
+                )
+            except TypeError:
+                resolved = client.resolve_cached_workflow_name(candidate)
+            if resolved:
+                return str(resolved).strip()
+        return ""
+
     def _resolve_workflow_name_from_message(
         self,
         user_message: str,
@@ -3065,11 +3238,23 @@ CRITICAL RULES:
         user_id = state.user_id
 
         candidates: list[str] = []
+        specificity_candidates: list[str] = []
 
-        def add_candidate(value: str) -> None:
+        def add_candidate(value: str, *, count_for_specificity: bool = True) -> None:
             clean = re.sub(r"\s+", " ", str(value or "").strip(" \t\r\n`'\".,:;!?()[]{}")).strip()
             if clean and clean not in candidates:
                 candidates.append(clean)
+            if clean and count_for_specificity and clean not in specificity_candidates:
+                specificity_candidates.append(clean)
+
+        def is_specific_query(value: str) -> bool:
+            checker = getattr(client, "is_specific_workflow_lookup_query", None)
+            if callable(checker):
+                try:
+                    return bool(checker(value))
+                except Exception:
+                    return False
+            return bool(str(value or "").strip())
 
         add_candidate(message)
 
@@ -3095,8 +3280,7 @@ CRITICAL RULES:
         tokens = [tok for tok in re.split(r"[^a-zA-Z0-9_]+", lowered) if tok]
         filtered = [tok for tok in tokens if tok not in stop_words]
         if filtered:
-            add_candidate(" ".join(filtered))
-            add_candidate("_".join(filtered))
+            add_candidate(" ".join(filtered), count_for_specificity=False)
 
         for candidate in candidates:
             resolved = client.resolve_cached_workflow_name(
@@ -3106,6 +3290,18 @@ CRITICAL RULES:
             )
             if resolved:
                 return resolved
+
+        has_specific_candidate = any(is_specific_query(candidate) for candidate in specificity_candidates)
+        if not has_specific_candidate:
+            recent_workflow = self._resolve_recent_workflow_reference(state)
+            if recent_workflow:
+                return recent_workflow
+
+            # If the current turn does not contain a workflow-specific identifier
+            # or a compact workflow-like noun phrase, fail closed here. This
+            # prevents long follow-up sentences from being semantically remapped
+            # to unrelated workflows based on generic nouns buried in the text.
+            return ""
 
         resolver = getattr(client, "resolve_workflow_name_from_text", None)
         if callable(resolver):
@@ -3237,7 +3433,7 @@ CRITICAL RULES:
             "workflow_name": workflow_name,
             "required_params": required,
             "collected_params": collected,
-            "execution_tool": tool_name or "trigger_workflow",
+            "execution_tool": self._canonicalize_tool_name(tool_name or "trigger_workflow"),
             "execution_template": tool_args or {},
             "auto_execute": bool(auto_execute),
         }
@@ -3249,7 +3445,7 @@ CRITICAL RULES:
         collected: dict,
         state: ConversationState,
     ) -> dict:
-        tool_name = str(pc.get("execution_tool") or "trigger_workflow")
+        tool_name = self._canonicalize_tool_name(str(pc.get("execution_tool") or "trigger_workflow"))
         template = dict(pc.get("execution_template") or {})
         org_code = self._state_org_code(state)
 
@@ -3354,6 +3550,11 @@ CRITICAL RULES:
                 "Rewrite this for a non-technical business user. "
                 "Remove workflow names, request IDs, error codes, and deep technical terms. "
                 "Focus on impact, timing, status, and next actions. "
+                "Use simple, clear business language that is easy to understand. "
+                "Avoid code-heavy or deeply technical wording, but you may use simple operational terms when useful, such as 'file missing', 'system unavailable', 'agent not running', or 'waiting for another process'. "
+                "Do not include code-related details, stack traces, raw internal errors, or backend troubleshooting steps unless the user explicitly asked for them. "
+                "If a file is missing from a shared path or shared location, explain it simply like: 'The required file is not available in the shared location. Please check or upload the file.' "
+                "For any issue, explain what the business user needs to do next instead of focusing on system internals. "
                 "Do not shorten the response unnecessarily. "
                 "Keep the response complete and well-structured. "
                 "Start with one clear sentence that answers the user's question or states the current status. "
@@ -3577,9 +3778,9 @@ CRITICAL RULES:
         ).strip()
         wf_label = self._humanize_workflow_name(workflow_name) if workflow_name else "this request"
 
-        if action_tool in ("create_incident_ticket", "create_hdfc_ticket"):
+        if self._is_support_ticket_tool(action_tool):
             title = str((action_args or {}).get("title") or "Support Incident").strip()
-            if action_tool == "create_hdfc_ticket":
+            if self._canonicalize_tool_name(action_tool) == "create_support_ticket":
                 title = str((action_args or {}).get("process_name") or title).strip()
             guidance = self._get_sop_troubleshooting_steps(f"{title} {error_text}")
             msg = (

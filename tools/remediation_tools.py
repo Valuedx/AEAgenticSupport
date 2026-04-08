@@ -18,7 +18,6 @@ CHANGES in trigger_workflow (v2):
 """
 
 import logging
-import json
 
 from config.settings import CONFIG
 from security.workflow_access import (
@@ -27,10 +26,17 @@ from security.workflow_access import (
     get_user_accessible_workflow_names,
     is_execute_enforced,
 )
-from tools.base import ToolDefinition, get_ae_client
+from tools.base import AutomationEdgeClient, ToolDefinition, get_ae_client
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.tools.remediation")
+
+
+def _extract_workflow_response_message(record: dict | None) -> str:
+    try:
+        return str(AutomationEdgeClient.extract_workflow_response_message(record) or "").strip()
+    except Exception:
+        return ""
 
 
 def _build_trigger_access_message(
@@ -272,6 +278,14 @@ def _resolve_cached_workflow_name_for_user(client, workflow_name: str, user_id: 
         resolved = resolver(workflow_name)
     if resolved:
         return resolved
+
+    specificity_checker = getattr(client, "is_specific_workflow_lookup_query", None)
+    if callable(specificity_checker):
+        try:
+            if not specificity_checker(workflow_name):
+                return ""
+        except Exception:
+            return ""
 
     fuzzy_resolver = getattr(client, "resolve_workflow_name_from_text", None)
     if callable(fuzzy_resolver):
@@ -731,6 +745,8 @@ def _friendly_status_message(
         )
 
     if s == "NO_AGENT":
+        if detail_msg:
+            return detail_msg
         assigned_summary = _assigned_agent_summary(list(assigned_agents or []))
         if assigned_summary:
             return (
@@ -741,6 +757,12 @@ def _friendly_status_message(
         return (
             f"**{workflow_name}** could not start — no automation agent is currently available. "
             f"Request ID: `{req_id}`. Please ask your administrator to start or reconnect an agent, then retry."
+        )
+
+    if s == "WAITING_OTHER_PROCESS":
+        return detail_msg or (
+            f"**{workflow_name}** is still in NEW status because another process is currently running. "
+            f"Request ID: `{req_id}`. Please wait some time and check again."
         )
 
     # QUEUED / PENDING / NEW or anything unrecognised
@@ -1273,14 +1295,10 @@ def trigger_workflow(
                 logger.warning("Status poll failed for %s (%s): %s", resolved_name, req_id, poll_exc)
 
         # Pull friendly details from workflowResponse if available
-        detail_msg = ""
-        wf_response = poll_raw.get("workflowResponse")
-        if wf_response:
-            try:
-                parsed = json.loads(wf_response)
-                detail_msg = str(parsed.get("message") or "").strip()
-            except Exception:
-                pass
+        detail_msg = _extract_workflow_response_message(poll_raw)
+        new_diag = poll_raw.get("newExecutionDiagnosis") if isinstance(poll_raw, dict) and isinstance(poll_raw.get("newExecutionDiagnosis"), dict) else {}
+        if not detail_msg and new_diag.get("summary"):
+            detail_msg = str(new_diag.get("summary"))
 
         # ── IMPROVEMENT 3: Terminal failure path ──────────────────────────────
         status_upper = str(final_status or "").upper()
@@ -1307,8 +1325,31 @@ def trigger_workflow(
             }
 
         # ── IMPROVEMENT 3: Non-terminal / pending path ────────────────────────
+        if status_upper == "WAITING_OTHER_PROCESS":
+            pending_msg = _friendly_status_message(
+                status=final_status,
+                workflow_name=resolved_name,
+                req_id=req_id,
+                detail_msg=detail_msg,
+            )
+            return {
+                "success": False,
+                "execution_id": req_id,
+                "workflow_name": resolved_name,
+                "status": final_status,
+                "error": pending_msg,
+                "message": pending_msg,
+                "request_id": req_id,
+                "raw": poll_raw or raw,
+                "diagnosis": new_diag.get("reason") or "other_process_running",
+                "other_execution_id": new_diag.get("other_execution_id") or "",
+                "other_workflow_name": new_diag.get("other_workflow_name") or "",
+            }
+
         if status_upper == "NO_AGENT":
-            assigned_agents = _get_assigned_agents_for_workflow(client, resolved_name)
+            assigned_agents = list(new_diag.get("assigned_agents") or [])
+            if not assigned_agents:
+                assigned_agents = _get_assigned_agents_for_workflow(client, resolved_name)
             pending_msg = _friendly_status_message(
                 status=final_status,
                 workflow_name=resolved_name,
@@ -1327,6 +1368,7 @@ def trigger_workflow(
                 "raw": poll_raw or raw,
                 "agent_name": _primary_assigned_agent_name(assigned_agents),
                 "assigned_agents": assigned_agents,
+                "diagnosis": new_diag.get("reason") or "agent_unavailable",
                 "agent_status": "UNAVAILABLE",
             }
 
@@ -1374,6 +1416,8 @@ def trigger_workflow(
             "raw": poll_raw or raw,
             "agent_status": healthy_agent.get("agentState") if healthy_agent else "UNAVAILABLE",
         }
+        if detail_msg:
+            result["workflow_response_message"] = detail_msg
         # Attach pre-trigger health gate summary (if health checks were run and passed)
         if _health_gate_summary and isinstance(_health_gate_summary, dict):
             result["health_gate"] = _health_gate_summary

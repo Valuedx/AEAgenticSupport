@@ -366,7 +366,7 @@ class ApprovalGate:
             "t4_execute_and_poll": "run workflow and wait for the result",
             "restart_execution": "restart execution",
             "resubmit_execution": "resubmit execution",
-            "create_hdfc_ticket": "create support ticket",
+            "create_support_ticket": "create support ticket",
             "create_incident_ticket": "create incident ticket",
         }
         clean = str(tool_name or "").strip()
@@ -399,7 +399,7 @@ class ApprovalGate:
             if audience == "business":
                 return f"Submit {target_human or 'the selected automation run'} again."
             return f"Resubmit execution {target_technical or ''}.".replace("  ", " ").strip()
-        if tool_name in {"create_hdfc_ticket", "create_incident_ticket"}:
+        if tool_name in {"create_support_ticket", "create_incident_ticket"}:
             if audience == "business":
                 return f"Create a support request for {target_human or 'this issue'}."
             return f"Create a support ticket for {target_technical or 'this issue'}."
@@ -417,7 +417,7 @@ class ApprovalGate:
             if audience == "business":
                 return "this will start or change a live automation run"
             return "this action can start or change live automation activity"
-        if tool_name in {"create_hdfc_ticket", "create_incident_ticket"}:
+        if tool_name in {"create_support_ticket", "create_incident_ticket"}:
             if audience == "business":
                 return "this will create a support record that teams may act on"
             return "this action creates a support record in an external system"

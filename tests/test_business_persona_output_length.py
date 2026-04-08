@@ -83,3 +83,27 @@ def test_business_persona_filter_prompt_forbids_email_and_memo_formats():
 
     assert "not an email, memo, or letter" in captured["prompt"]
     assert "Do NOT add a subject line" in captured["prompt"]
+
+
+def test_business_persona_filter_prompt_prefers_simple_business_language_for_issues():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.user_role = "business"
+
+    captured = {}
+
+    def fake_chat(prompt, system="", temperature=None, max_tokens=None):
+        captured["prompt"] = prompt
+        captured["system"] = system
+        return "Business-friendly response"
+
+    with patch("agents.orchestrator.llm_client.chat", side_effect=fake_chat):
+        orchestrator._filter_for_persona(
+            "The workflow failed because the shared path returned FileNotFoundException and the API payload was invalid.",
+            state,
+        )
+
+    assert "Use simple, clear business language that is easy to understand" in captured["prompt"]
+    assert "you may use simple operational terms when useful" in captured["prompt"]
+    assert "Do not include code-related details" in captured["prompt"]
+    assert "The required file is not available in the shared location. Please check or upload the file." in captured["prompt"]

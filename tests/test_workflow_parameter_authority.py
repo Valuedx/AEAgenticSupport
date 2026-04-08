@@ -212,6 +212,81 @@ def test_preflight_checks_execute_access_before_param_collection(monkeypatch):
     assert "output path" not in response.lower()
 
 
+def test_referential_followup_reuses_recent_workflow_context_before_fuzzy_lookup(monkeypatch):
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.user_id = "webchat:kirtibala.gujar"
+    state.user_metadata = {"org_code": "AEGEMS"}
+    state.tool_call_log.append(
+        {
+            "tool": "check_workflow_status",
+            "params": {"workflow_name": "timesheet_report_generation_v5"},
+            "result": {"workflow_name": "timesheet_report_generation_v5", "status": "Failure"},
+            "success": True,
+        }
+    )
+
+    class StubClient:
+        default_org_code = "AEGEMS"
+
+        @staticmethod
+        def is_specific_workflow_lookup_query(text):
+            return False
+
+        @staticmethod
+        def resolve_cached_workflow_name(workflow_name, **kwargs):
+            if workflow_name == "timesheet_report_generation_v5":
+                return workflow_name
+            return ""
+
+        @staticmethod
+        def resolve_workflow_name_from_text(workflow_name, **kwargs):
+            raise AssertionError("fuzzy resolution should not run for referential follow-up messages")
+
+    monkeypatch.setattr("agents.orchestrator.get_ae_client", lambda: StubClient())
+
+    resolved = orchestrator._resolve_workflow_name_from_message(
+        "retrigger this bot i have added input file",
+        state,
+    )
+
+    assert resolved == "timesheet_report_generation_v5"
+
+
+def test_referential_followup_without_context_does_not_fuzzy_match_generic_input_file_text(monkeypatch):
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.user_id = "webchat:kirtibala.gujar"
+    state.user_metadata = {"org_code": "AEGEMS"}
+    fuzzy_called = {"value": False}
+
+    class StubClient:
+        default_org_code = "AEGEMS"
+
+        @staticmethod
+        def is_specific_workflow_lookup_query(text):
+            return False
+
+        @staticmethod
+        def resolve_cached_workflow_name(workflow_name, **kwargs):
+            return ""
+
+        @staticmethod
+        def resolve_workflow_name_from_text(workflow_name, **kwargs):
+            fuzzy_called["value"] = True
+            return "Input_File"
+
+    monkeypatch.setattr("agents.orchestrator.get_ae_client", lambda: StubClient())
+
+    resolved = orchestrator._resolve_workflow_name_from_message(
+        "retrigger this bot i have added input file",
+        state,
+    )
+
+    assert resolved == ""
+    assert fuzzy_called["value"] is False
+
+
 def test_dynamic_mapping_prefers_direct_workflow_parameters_over_nested_noise():
     workflow = {
         "workflowName": "Test_Demo",

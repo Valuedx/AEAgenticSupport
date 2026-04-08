@@ -19,7 +19,7 @@ logger = logging.getLogger("ops_agent.tools.notification")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-def create_hdfc_ticket(
+def create_support_ticket(
     process_name: str,
     description: str,
     request_type: str = "Request",
@@ -143,7 +143,7 @@ def create_hdfc_ticket(
 
     except Exception as exc:
         msg = f"Unexpected error: {exc}"
-        logger.exception("HDFC Ticket unexpected error")
+        logger.exception("Support ticket unexpected error")
         return {"success": False, "error": msg, "environment": api_env}
 
 
@@ -162,7 +162,7 @@ def create_incident_ticket(
     """
     process_name = str(title or assignee_group or "Support Incident").strip()
     desc = str(description or "").strip()
-    result = create_hdfc_ticket(
+    result = create_support_ticket(
         process_name=process_name,
         description=desc,
         request_type="Incident",
@@ -178,9 +178,9 @@ def create_incident_ticket(
 # ── Register ONLY the ticket creation tool ───────────────────────────────
 tool_registry.register(
     ToolDefinition(
-        name="create_hdfc_ticket",
+        name="create_support_ticket",
         description=(
-            "Raise a support ticket in the HDFC Life ticketing system for a failed or "
+            "Raise a support ticket in the ticketing system for a failed or "
             "problematic process. Returns the assigned Ticket ID on success. "
             "Use this when the user says 'create ticket', 'raise ticket', 'log incident', "
             "'raise issue', or reports a process failure that needs tracking."
@@ -203,15 +203,15 @@ tool_registry.register(
         },
         required_params=["process_name", "description"],
     ),
-    create_hdfc_ticket,
+    create_support_ticket,
 )
 
 tool_registry.register(
     ToolDefinition(
         name="create_incident_ticket",
         description=(
-            "Backward-compatible alias for raising an incident ticket in the HDFC Life ticketing system. "
-            "Use this for failures that need support tracking. Internally routes to create_hdfc_ticket."
+            "Backward-compatible alias for raising an incident ticket in the ticketing system. "
+            "Use this for failures that need support tracking. Internally routes to create_support_ticket."
         ),
         category="notification",
         tier="medium_risk",

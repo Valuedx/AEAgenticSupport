@@ -107,9 +107,9 @@ _TOOL_MESSAGES: dict[str, tuple[str, str]] = {
         "Creating a support ticket...",
         "Creating incident ticket...",
     ),
-    "create_hdfc_ticket": (
+    "create_support_ticket": (
         "Creating a support ticket...",
-        "Creating HDFC support ticket...",
+        "Creating support ticket...",
     ),
     "discover_tools": (
         "Looking for the best way to handle this...",

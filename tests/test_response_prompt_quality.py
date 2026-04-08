@@ -76,6 +76,9 @@ def test_business_prompt_contains_clear_response_guidance():
 
     assert "MEANINGFUL FIRST-LINE RULE" in prompt
     assert "First sentence must answer the question directly in plain English." in prompt
+    assert "you may use simple operational terms when they help" in prompt
+    assert "Do not include code-level details" in prompt
+    assert "The required file is not available in the shared location. Please check or upload the file." in prompt
     assert "If you need approval or more information, explain it in natural chat language" in prompt
     assert "NO EMAIL / LETTER FORMATTING" in prompt
 

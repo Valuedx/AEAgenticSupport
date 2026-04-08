@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from tools import status_tools
@@ -94,3 +95,66 @@ def test_list_recent_failures_handles_naive_iso_timestamps_from_recent_failures(
 
     assert result["total_count"] == 1
     assert result["failures"][0]["execution_id"] == "EX-1001"
+
+
+def test_status_messages_use_display_timezone_for_latest_execution():
+    class StubClient:
+        def resolve_cached_workflow_name(self, workflow_name, user_id="", org_code=""):
+            return workflow_name
+
+        def get_workflow_instances(self, workflow_name, limit=300, status_filter=None):
+            return [
+                {
+                    "id": "2609419",
+                    "automationRequestId": "2609419",
+                    "workflowName": workflow_name,
+                    "status": "Complete",
+                    "createdDate": "2026-04-07T18:50:00+00:00",
+                }
+            ]
+
+    client = StubClient()
+    with patch("tools.status_tools.get_ae_client", return_value=client), patch.dict(
+        status_tools.CONFIG,
+        {"DISPLAY_TIMEZONE": "Asia/Kolkata"},
+        clear=False,
+    ):
+        result = status_tools.check_workflow_status("timesheet_report_generation_v5")
+
+    assert "IST" in result["message"]
+    assert "UTC" not in result["message"]
+    assert "2026-04-08 12:20:00 AM IST" in result["message"]
+
+
+def test_list_recent_failures_uses_completed_time_for_failure_summary():
+    class StubClient:
+        default_org_code = ""
+
+        def request(self, method, path, **kwargs):
+            assert method == "GET"
+            assert path == "/api/v1/failures/recent"
+            return {
+                "failures": [
+                    {
+                        "id": "2610858",
+                        "workflowName": "timesheet_report_generation_v5",
+                        "status": "Failure",
+                        "agentName": "omkar.patil@VDXLPT-1569",
+                        "createdDate": "2026-04-08T04:44:34+00:00",
+                        "completedDate": "2026-04-08T04:54:44+00:00",
+                    }
+                ]
+            }
+
+    client = StubClient()
+    with patch("tools.status_tools.get_ae_client", return_value=client), patch.dict(
+        status_tools.CONFIG,
+        {"DISPLAY_TIMEZONE": "Asia/Kolkata"},
+        clear=False,
+    ):
+        result = status_tools.list_recent_failures(limit=5)
+
+    assert result["latest_failure"]["failure_time"] == "2026-04-08T04:54:44+00:00"
+    assert result["latest_failure"]["failure_time_display"] == "2026-04-08 10:24:44 AM IST"
+    assert "10:24:44 AM IST" in result["message"]
+    assert "10:14" not in result["message"]

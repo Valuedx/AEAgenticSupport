@@ -1,0 +1,129 @@
+# ==============================================================================
+# AutomationEdge Agentic Support — Environment Variables
+# Copy this file to .env and fill in your values.
+# ==============================================================================
+
+# ──────────────────────────────────────────────────────────────────────────────
+# T4 AutomationEdge Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+
+# T4_BASE_URL=https://t4.automationedge.com/aeengine/rest
+# T4_USERNAME=omkar.patil@valuedx.com
+# T4_PASSWORD=Vdx@07
+# T4_ORG_CODE=OMKAR_PATIL_3666
+# T4_TIMEOUT_SECONDS=30
+
+
+T4_BASE_URL=https://t4.automationedge.com/aeengine/rest
+T4_USERNAME='Srushti V'
+T4_PASSWORD=Pune@123
+T4_ORG_CODE=AEGEMS
+T4_TIMEOUT_SECONDS=30
+
+# ── AE MCP Server (derived from T4 settings above) ──
+# AE_BASE_URL=https://t4.automationedge.com
+# AE_REST_BASE_PATH=/aeengine/rest
+# AE_USERNAME=omkar.patil@valuedx.com
+# AE_PASSWORD=Vdx@07
+# AE_ORG_CODE=OMKAR_PATIL_3666
+# AE_TIMEOUT_SECONDS=30
+# AE_VERIFY_SSL=false
+
+
+AE_BASE_URL=https://t4.automationedge.com
+AE_REST_BASE_PATH=/aeengine/rest
+AE_USERNAME='Srushti V'
+AE_PASSWORD=Pune@123
+AE_ORG_CODE=AEGEMS
+AE_TIMEOUT_SECONDS=30
+AE_VERIFY_SSL=false
+
+# Optional JSON object for remote MCP auth/proxy headers, e.g. {"Authorization":"Bearer ..."}.
+# AE_MCP_SERVER_HEADERS_JSON=
+AE_MCP_SERVER_TIMEOUT_SECONDS=30
+AE_TIMEOUT_SECONDS=30
+ENABLE_RELATED_ISSUE_HEALTH_CHECK=true
+RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE=true
+LIFE_ASIA_HEALTH_CHECK_WORKFLOW=Life_Asia_Health_Check
+TEBT_HEALTH_CHECK_WORKFLOW=TEBT_Health_Check
+
+# ── Workflow Catalog Auto-Sync ──
+ENABLE_WF_CATALOG_SYNC=true
+WF_CATALOG_SYNC_INTERVAL_SECONDS=1800
+
+# ── PostgreSQL + pgvector ──
+POSTGRES_DSN=postgresql://postgres:root@localhost:5432/ops_agent
+# -- Google Cloud / Vertex AI --
+GOOGLE_CLOUD_PROJECT=vdxexccenter
+GOOGLE_CLOUD_LOCATION=us-central1
+GOOGLE_APPLICATION_CREDENTIALS=D:\Graph_Chatbot\vdxexccenter-4b1dff9ce849.json
+VERTEX_AI_MODEL=gemini-2.5-flash
+VERTEX_AI_MAX_TOKENS=65536
+# ── Embeddings (Vertex AI text-embedding model) ──
+EMBEDDING_MODEL=text-embedding-004
+
+# ── Tool Gateway (REST tool calling endpoint) ──
+TOOL_BASE_URL=http://127.0.0.1:5050
+TOOL_AUTH_TOKEN=your-tool-auth-token
+
+# ── Agent Behaviour ──
+MAX_AGENT_ITERATIONS=15
+MAX_RESTARTS_PER_WORKFLOW=3
+MAX_BULK_OPERATIONS=10
+STALE_ISSUE_MINUTES=30
+RECURRENCE_ESCALATION_THRESHOLD=3
+
+# ── Tool Selection ──
+# Max RAG-matched tools sent to LLM per turn (rest available via discover_tools)
+MAX_RAG_TOOLS=12
+
+# ── Protected Workflows (comma-separated, never auto-restarted) ──
+PROTECTED_WORKFLOWS=regulatory_report_irdai
+
+# ── Logging ──
+LOG_DIR=logs
+LOG_LEVEL=INFO
+# Set to true to show error type/message in chat when something fails (for debugging)
+# SHOW_ERROR_HINT=false
+
+# ── Extension Mode ──
+# Set to "true" to use the full agentic orchestrator (LLM + RAG + tools)
+# Set to "false" to use the deterministic plan-execute mode
+USE_AGENTIC_MODE=true
+
+# Agent Startup Path (for restart_ae_agent tool)
+AGENT_STARTUP_PATH=D:\PS\T4\ae-agent\bin
+
+AE_MCP_TOOLS_ENABLED=true
+AE_MCP_SERVER_URL=http://127.0.0.1:3000/mcp/
+AE_MCP_SERVER_TRANSPORT=streamable-http
+
+# ── Cognibot / AI Studio configuration ──
+COGNIBOT_BASE_URL=http://localhost:3978
+COGNIBOT_DIRECTLINE_SECRET=ae_ops_support_bypass
+
+# ── Local Orchestrator ──
+ORCHESTRATOR_BASE_URL=http://localhost:8001
+ORCHESTRATOR_TENANT_ID=default
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HDFC Life — Ticket Generation API
+# ──────────────────────────────────────────────────────────────────────────────
+# UAT endpoint (replace with PROD URL when promoted)
+TICKET_API_URL=https://ae-u.hdfclife.com/support/usercreateticket/
+TICKET_API_PROD_URL=
+TICKET_API_EMAIL=robo2@hdfclife.com
+TICKET_API_PASSWORD=661b10b7fcdc34b619ad2f574156e739f8e444ba083bedc26c9c249a87a53f5c
+TICKET_API_TIMEOUT_SECONDS=30
+# Optional: set to "prod" to use TICKET_API_PROD_URL automatically
+# ──────────────────────────────────────────────────────────────────────────────
+# LangFuse Observability (Optional)
+# Set LANGFUSE_ENABLED=true to enable tracing of LLM calls, tool executions,
+# RAG searches, and approval flows in LangFuse.
+# ──────────────────────────────────────────────────────────────────────────────
+
+LANGFUSE_ENABLED=true
+LANGFUSE_SECRET_KEY=sk-lf-7733b7b1-b7e1-4a44-a917-9e2382cd1fdd
+LANGFUSE_PUBLIC_KEY=pk-lf-cca0d2ef-8256-499c-b0e2-0a5ac079df36
+LANGFUSE_HOST=https://cloud.langfuse.com
+# LANGFUSE_RELEASE=1.0.0

@@ -52,7 +52,7 @@ def call_ae_api(method: str, endpoint: str,
     parsed_params = _safe_json(params) if params else None
     parsed_body = _safe_json(body) if body else None
 
-    # Guard: ticket creation must use ae.ticket.create, not this tool.
+    # Guard: ticket creation must use create_support_ticket, not this tool.
     # The AE REST server has no ticket endpoint — routing there gives 404.
     endpoint_lower = endpoint.lower()
     _TICKET_PATTERNS = ("ticket", "support/user", "usercreateticket", "support/create", "incident", "/support/")
@@ -67,9 +67,9 @@ def call_ae_api(method: str, endpoint: str,
         return {
             "error": "ticket_tool_required",
             "message": (
-                "Ticket creation must use the 'ae.ticket.create' tool, not call_ae_api. "
+                "Ticket creation must use the 'create_support_ticket' tool, not call_ae_api. "
                 "call_ae_api only reaches the AutomationEdge REST server which has no ticket endpoint. "
-                "Please call ae.ticket.create with process_name, description, and request_type."
+                "Please call create_support_ticket with process_name, description, and request_type."
             ),
         }
 
@@ -284,7 +284,7 @@ tool_registry.register(
         avoid_when=(
             "A typed tool already exists for the task, or the action is risky "
             "and you have not gathered the exact endpoint and payload yet. "
-            "NEVER use for ticket creation — use ae.ticket.create instead. "
+            "NEVER use for ticket creation — use create_support_ticket instead. "
             "The AE REST server has no ticket endpoint and will return 404."
         ),
         input_examples=[

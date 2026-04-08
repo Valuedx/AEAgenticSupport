@@ -5,6 +5,7 @@ Status & health monitoring tools.
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from config.settings import CONFIG
 from security.workflow_access import (
@@ -15,10 +16,97 @@ from security.workflow_access import (
     is_execute_enforced,
     is_read_enforced,
 )
-from tools.base import ToolDefinition, get_ae_client
+from tools.base import AutomationEdgeClient, ToolDefinition, get_ae_client
 from tools.registry import tool_registry
 
 logger = logging.getLogger("ops_agent.tools.status")
+
+
+def _get_display_timezone() -> tuple[timezone | ZoneInfo, str]:
+    tz_name = str(CONFIG.get("DISPLAY_TIMEZONE") or "Asia/Kolkata").strip() or "Asia/Kolkata"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone(timedelta(hours=5, minutes=30))
+    label = "IST" if tz_name in {"Asia/Kolkata", "Asia/Calcutta"} else tz_name
+    return tz, label
+
+
+def _format_display_time(value: datetime | None) -> str:
+    if not isinstance(value, datetime):
+        return "recently"
+    tz, label = _get_display_timezone()
+    localized = value.astimezone(tz) if value.tzinfo else value.replace(tzinfo=timezone.utc).astimezone(tz)
+    return localized.strftime("%Y-%m-%d %I:%M:%S %p") + f" {label}"
+
+
+def _extract_execution_ref(record: dict | None) -> str:
+    if not isinstance(record, dict):
+        return ""
+    return str(
+        record.get("id")
+        or record.get("automationRequestId")
+        or record.get("requestId")
+        or record.get("executionId")
+        or ""
+    ).strip()
+
+
+def _extract_workflow_ref(record: dict | None) -> str:
+    if not isinstance(record, dict):
+        return ""
+    workflow_meta = record.get("workflowConfiguration") or record.get("workflow") or {}
+    return str(
+        record.get("workflowName")
+        or record.get("workflow_name")
+        or workflow_meta.get("name")
+        or ""
+    ).strip()
+
+
+def _get_new_status_diagnosis(client, record: dict | None, execution_id: str = "") -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+    status = str(record.get("status") or record.get("state") or "").strip().upper()
+    if status not in {"NEW", "QUEUED", "PENDING"}:
+        return {}
+    diagnoser = getattr(client, "diagnose_new_execution", None)
+    if not callable(diagnoser):
+        return {}
+    try:
+        diagnosis = diagnoser(record, execution_id=execution_id)
+        return diagnosis if isinstance(diagnosis, dict) else {}
+    except Exception as exc:
+        logger.warning(
+            "Could not diagnose pending NEW execution %s: %s",
+            execution_id or _extract_execution_ref(record) or "unknown",
+            exc,
+        )
+        return {}
+
+
+def _maybe_refresh_execution_payload(client, execution_id: str, record: dict | None) -> dict:
+    refresher = getattr(type(client), "refresh_execution_payload", None)
+    if not callable(refresher):
+        return dict(record or {}) if isinstance(record, dict) else {}
+    try:
+        refreshed = refresher(
+            client,
+            execution_id,
+            record=record,
+            workflow_name=_extract_workflow_ref(record),
+        )
+        return refreshed if isinstance(refreshed, dict) else (dict(record or {}) if isinstance(record, dict) else {})
+    except Exception as exc:
+        logger.debug("Could not refresh execution payload for %s: %s", execution_id, exc)
+        return dict(record or {}) if isinstance(record, dict) else {}
+
+
+def _extract_workflow_response_message(record: dict | None) -> str:
+    try:
+        return str(AutomationEdgeClient.extract_workflow_response_message(record) or "").strip()
+    except Exception:
+        return ""
 
 
 def _workflow_access_denied_message(
@@ -426,7 +514,7 @@ def check_workflow_status(
                 or not is_read_enforced()
                 or _is_visible_workflow_record(client, instance, user_id, org_code)
             ):
-                return _format_single_instance_response(instance)
+                return _format_single_instance_response(instance, client=client)
             if instance and (user_id or is_read_enforced()):
                 return {
                     "workflow_name": query_name,
@@ -553,13 +641,20 @@ def check_workflow_status(
         )
 
     # User message construction
+    latest_diag = _get_new_status_diagnosis(
+        client,
+        latest,
+        execution_id=_extract_execution_ref(latest),
+    ) if query_name else {}
     if query_name:
         latest_status = latest.get("status")
-        time_str = f"on {latest_ts.strftime('%Y-%m-%d %H:%M:%S UTC')}" if latest_ts else "recently"
+        time_str = f"on {_format_display_time(latest_ts)}" if latest_ts else "recently"
         msg = f"The absolute latest execution for bot '**{display_name}**' was {time_str} and its status is '**{latest_status}**'."
         if latest_ts and latest_ts < cutoff:
             msg += f" (Note: This run is older than 24 hours)."
         msg += f" You can use execution ID `{latest.get('id') or latest.get('automationRequestId')}` to fetch logs if needed."
+        if latest_diag.get("summary"):
+            msg = str(latest_diag.get("summary"))
     else:
         msg = f"Global status summary for all bots (Last 24 hours)."
 
@@ -589,13 +684,21 @@ def check_workflow_status(
         "status_filter_applied": status_filter or "None",
         "message": msg
     }
+    if latest_diag:
+        result["diagnosis"] = latest_diag.get("reason")
+        result["assigned_agents"] = latest_diag.get("assigned_agents") or []
+        result["other_execution_id"] = latest_diag.get("other_execution_id") or ""
+        result["other_workflow_name"] = latest_diag.get("other_workflow_name") or ""
     if related_issue_check:
         result["related_issue_check"] = related_issue_check
     return result
 
 
-def _format_single_instance_response(instance: dict) -> dict:
+def _format_single_instance_response(instance: dict, client=None) -> dict:
     """Helper to format a single T4 instance into the standard status response."""
+    client = client or get_ae_client()
+    request_id = _extract_execution_ref(instance)
+    instance = _maybe_refresh_execution_payload(client, request_id, instance) if request_id else dict(instance or {})
     ts = _parse_timestamp(instance.get("createdDate") or instance.get("started_at"))
     status = instance.get("status", "Unknown")
     bot_name = (
@@ -603,14 +706,19 @@ def _format_single_instance_response(instance: dict) -> dict:
         (instance.get("workflowConfiguration") or {}).get("name") or 
         "Unknown Bot"
     )
-    request_id = instance.get("id") or instance.get("automationRequestId")
+    detail_msg = _extract_workflow_response_message(instance)
     
-    time_str = f"on {ts.strftime('%Y-%m-%d %H:%M:%S UTC')}" if ts else "recently"
+    time_str = f"on {_format_display_time(ts)}" if ts else "recently"
     # Ensure request_id is not empty
     rid_str = f"`{request_id}`" if request_id else "unknown"
     msg = f"Execution ID {rid_str} for bot '**{bot_name}**' was found. Its current status is '**{status}**' ({time_str})."
-    
-    return {
+    diagnosis = _get_new_status_diagnosis(client, instance, execution_id=request_id)
+    if diagnosis.get("summary"):
+        msg = str(diagnosis.get("summary"))
+    elif detail_msg and str(status or "").strip().upper() in {"COMPLETE", "FAILURE", "ERROR"}:
+        msg = detail_msg
+
+    result = {
         "bot_name": bot_name,
         "workflow_name": bot_name,
         "status": status,
@@ -625,6 +733,14 @@ def _format_single_instance_response(instance: dict) -> dict:
         "message": msg,
         "is_single_search": True
     }
+    if detail_msg:
+        result["workflow_response_message"] = detail_msg
+    if diagnosis:
+        result["diagnosis"] = diagnosis.get("reason")
+        result["assigned_agents"] = diagnosis.get("assigned_agents") or []
+        result["other_execution_id"] = diagnosis.get("other_execution_id") or ""
+        result["other_workflow_name"] = diagnosis.get("other_workflow_name") or ""
+    return result
 
 
 def _parse_timestamp(value):
@@ -758,9 +874,9 @@ def list_recent_failures(
             continue
 
         ts = _parse_timestamp(
-            item.get("createdDate")
+            item.get("completedDate")
             or item.get("lastUpdatedDate")
-            or item.get("completedDate")
+            or item.get("createdDate")
             or item.get("started_at")
             or item.get("completed_at")
         )
@@ -776,6 +892,12 @@ def list_recent_failures(
                 "status": item.get("status"),
                 "agent_name": item.get("agentName"),
                 "error_message": item.get("errorMessage") or item.get("errorDetails") or item.get("error"),
+                "failure_time": item.get("completedDate")
+                or item.get("lastUpdatedDate")
+                or item.get("createdDate")
+                or item.get("completed_at")
+                or item.get("started_at"),
+                "failure_time_display": _format_display_time(ts) if ts else "",
                 "created_date": item.get("createdDate") or item.get("started_at"),
                 "completed_date": item.get("completedDate") or item.get("completed_at"),
             }
@@ -783,11 +905,39 @@ def list_recent_failures(
         if len(failures) >= limit:
             break
 
+    def _failure_sort_key(item: dict) -> float:
+        ts = _parse_timestamp(
+            item.get("failure_time")
+            or item.get("completed_date")
+            or item.get("created_date")
+        )
+        return ts.timestamp() if ts else float("-inf")
+
+    failures.sort(key=_failure_sort_key, reverse=True)
+
     result = {
         "failures": failures,
         "total_count": len(failures),
         "time_window_hours": hours,
     }
+    if failures:
+        latest = failures[0]
+        workflow_label = str(latest.get("workflow_name") or "Unknown workflow").strip()
+        execution_id = str(latest.get("execution_id") or "").strip()
+        agent_name = str(latest.get("agent_name") or "").strip()
+        failure_time_display = str(latest.get("failure_time_display") or "").strip()
+
+        message = f"The latest workflow failure is **{workflow_label}**"
+        if execution_id:
+            message += f" (execution ID `{execution_id}`)"
+        if agent_name:
+            message += f", which failed on agent **{agent_name}**"
+        if failure_time_display:
+            message += f" at {failure_time_display}"
+        message += "."
+
+        result["latest_failure"] = latest
+        result["message"] = message
     if not failures and last_error:
         result["warning"] = f"No recent failures found. Last endpoint error: {last_error}"
     return result
@@ -1088,53 +1238,62 @@ def t4_execute_and_poll(
 
     status = poll_result.get("status", "unknown")
     raw = poll_result.get("raw") or {}
-    assigned_agents = (
-        _get_assigned_agents_for_workflow(client, resolved_name)
-        if str(status or "").upper() == "NO_AGENT"
-        else []
-    )
+    diagnosis = raw.get("newExecutionDiagnosis") if isinstance(raw, dict) and isinstance(raw.get("newExecutionDiagnosis"), dict) else {}
+    assigned_agents = list(diagnosis.get("assigned_agents") or [])
+    if not assigned_agents and str(status or "").upper() == "NO_AGENT":
+        assigned_agents = _get_assigned_agents_for_workflow(client, resolved_name)
     assigned_summary = _assigned_agent_summary(assigned_agents)
 
     # ── Extract detailed workflowResponse ──
-    detailed_msg = ""
-    wf_resp_str = raw.get("workflowResponse")
-    if wf_resp_str:
-        try:
-            import json
-            wf_resp = json.loads(wf_resp_str)
-            detailed_msg = wf_resp.get("message") or ""
-        except Exception:
-            pass
+    detailed_msg = _extract_workflow_response_message(raw)
 
     status_messages = {
         "Complete": f"'{workflow_name}' completed successfully! {detailed_msg}".strip(),
-        "Failure": f"'{workflow_name}' encountered a failure. Check logs for details.",
+        "Failure": detailed_msg or f"'{workflow_name}' encountered a failure. Check logs for details.",
         "no_agent": (
-            f"No automation agent was available to start '{workflow_name}'. "
-            f"Assigned agent(s): {assigned_summary}. "
-            f"Request ID: `{request_id}`. Please start or reconnect one of these agents and retry."
-            if assigned_summary
-            else f"No automation agent was available to start '{workflow_name}'. Request ID: `{request_id}`. Please check agent health."
+            str(diagnosis.get("summary"))
+            if diagnosis.get("summary")
+            else (
+                f"No automation agent was available to start '{workflow_name}'. "
+                f"Assigned agent(s): {assigned_summary}. "
+                f"Request ID: `{request_id}`. Please start or reconnect one of these agents and retry."
+                if assigned_summary
+                else f"No automation agent was available to start '{workflow_name}'. Request ID: `{request_id}`. Please check agent health."
+            )
+        ),
+        "waiting_other_process": (
+            str(diagnosis.get("summary"))
+            if diagnosis.get("summary")
+            else (
+                f"'{workflow_name}' is still waiting in NEW status because another process is currently running. "
+                f"Request ID: `{request_id}`. Please wait some time and check again."
+            )
         ),
         "timeout": "Execution timed out waiting for a result.",
-        "Error": f"'{workflow_name}' encountered an error.",
+        "Error": detailed_msg or f"'{workflow_name}' encountered an error.",
         "in_progress": poll_result.get(
             "in_progress_hint",
             f"Execution still running. Use request_id {request_id} to check status.",
         ),
     }
 
-    return {
+    result = {
         "success": status == "Complete",
         "status": status,
         "request_id": str(request_id),
         "workflow_name": workflow_name,
         "message": status_messages.get(status, f"Status: {status}"),
-        "error": status_messages.get(status, f"Status: {status}") if status == "no_agent" else "",
+        "error": status_messages.get(status, f"Status: {status}") if status in {"no_agent", "waiting_other_process"} else "",
         "agent_name": _primary_assigned_agent_name(assigned_agents),
         "assigned_agents": assigned_agents,
+        "diagnosis": diagnosis.get("reason") or "",
+        "other_execution_id": diagnosis.get("other_execution_id") or "",
+        "other_workflow_name": diagnosis.get("other_workflow_name") or "",
         "raw": raw,
     }
+    if detailed_msg:
+        result["workflow_response_message"] = detailed_msg
+    return result
 
 
 def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "") -> dict:
@@ -1145,6 +1304,7 @@ def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "
     """
     client = get_ae_client()
     resp = client.get_execution_status(execution_id)
+    resp = _maybe_refresh_execution_payload(client, execution_id, resp)
     if (user_id or is_read_enforced()) and (
         not isinstance(resp, dict) or not _is_visible_workflow_record(client, resp, user_id, org_code)
     ):
@@ -1155,19 +1315,57 @@ def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "
             "message": _workflow_access_denied_message(),
         }
     status = resp.get("status", "UNKNOWN")
+    workflow_name = _extract_workflow_ref(resp)
+    diagnosis = _get_new_status_diagnosis(client, resp, execution_id=execution_id)
+    start_time = resp.get("startTime") or resp.get("createdDate")
+    detail_msg = _extract_workflow_response_message(resp)
+    message = (
+        str(diagnosis.get("summary"))
+        if diagnosis.get("summary")
+        else (
+            detail_msg
+            if detail_msg and str(status or "").strip().upper() in {"COMPLETE", "FAILURE", "ERROR"}
+            else (
+            f"Execution `{execution_id}` for **{workflow_name or 'this workflow'}** is currently **{status}**."
+            if workflow_name
+            else f"Execution `{execution_id}` is currently **{status}**."
+            )
+        )
+    )
     
     # Enrich the response for LLM decision making
-    return {
+    result = {
         "execution_id": execution_id,
         "status": status,
-        "workflow_name": resp.get("workflowName") or resp.get("workflow_name") or (resp.get("workflowConfiguration") or {}).get("name"),
+        "workflow_name": workflow_name,
         "agent_name": resp.get("agentName"),
-        "start_time": resp.get("startTime") or resp.get("createdDate"),
+        "start_time": start_time,
         "end_time": resp.get("endTime") or resp.get("lastUpdatedDate"),
-        "error_message": resp.get("errorMessage") or resp.get("errorDetails") or resp.get("workflowResponse"),
+        "error_message": resp.get("errorMessage") or resp.get("errorDetails") or detail_msg or resp.get("workflowResponse"),
+        "message": message,
         "raw": resp,
-        "recommendation": f"Use 'get_execution_logs' with execution_id '{execution_id}' to see technical details/errors." if status in ("Failure", "Error", "Complete") else "Execution is still in progress."
+        "recommendation": (
+            str(diagnosis.get("summary"))
+            if diagnosis.get("summary")
+            else (
+                "The workflow has already reported its outcome above."
+                if detail_msg and str(status or "").strip().upper() == "COMPLETE"
+                else (
+                f"Use 'get_execution_logs' with execution_id '{execution_id}' to see technical details/errors."
+                if status in ("Failure", "Error", "Complete")
+                else "Execution is still in progress."
+                )
+            )
+        ),
     }
+    if detail_msg:
+        result["workflow_response_message"] = detail_msg
+    if diagnosis:
+        result["diagnosis"] = diagnosis.get("reason")
+        result["assigned_agents"] = diagnosis.get("assigned_agents") or []
+        result["other_execution_id"] = diagnosis.get("other_execution_id") or ""
+        result["other_workflow_name"] = diagnosis.get("other_workflow_name") or ""
+    return result
 
 
 # ── Register tools ──

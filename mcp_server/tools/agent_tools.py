@@ -1170,6 +1170,96 @@ async def agent_analyze_logs(
         os.getenv("AE_AGENT_LOG_CLEAN_TAIL_SUMMARY_ENABLED", "true")
     ).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _read_positive_int_env(name: str, default: int, *, minimum: int) -> int:
+        raw = str(os.getenv(name, str(default))).strip()
+        try:
+            value = int(raw or str(default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, value)
+
+    clean_tail_max_tokens = _read_positive_int_env(
+        "AE_AGENT_LOG_CLEAN_TAIL_MAX_TOKENS",
+        120,
+        minimum=32,
+    )
+    ai_diagnostic_max_tokens = _read_positive_int_env(
+        "AE_AGENT_LOG_AI_SUMMARY_MAX_TOKENS",
+        600,
+        minimum=160,
+    )
+
+    def _looks_incomplete_text(text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return True
+
+        if candidate.count("```") % 2 != 0 or candidate.count("`") % 2 != 0:
+            return True
+
+        tail = candidate[-1]
+        if tail in {"`", "*", "_", "\\", "/", "(", "[", "{", ":", ";", ","}:
+            return True
+
+        last_line = candidate.splitlines()[-1].strip()
+        if not last_line:
+            return False
+        if last_line.endswith(":"):
+            return True
+        if last_line.startswith("- "):
+            return last_line[-1] not in ".!?)"
+
+        last_word = re.sub(r"[^a-z]+", "", last_line.split()[-1].lower())
+        if last_word in {
+            "a",
+            "an",
+            "the",
+            "to",
+            "for",
+            "of",
+            "in",
+            "on",
+            "with",
+            "by",
+            "due",
+            "because",
+        }:
+            return True
+
+        return last_line[-1] not in ".!?)"
+
+    def _clean_tail_summary_text(text: str) -> str:
+        candidate = " ".join(str(text or "").replace("`", "").split()).strip()
+        if not candidate or _looks_incomplete_text(candidate):
+            return ""
+        if candidate[-1] not in ".!?":
+            candidate = f"{candidate}."
+        return candidate
+
+    def _clean_ai_diagnostic_text(text: str) -> str:
+        candidate = str(text or "").replace("\r\n", "\n").strip()
+        if not candidate:
+            return ""
+
+        if candidate.count("```") % 2 != 0:
+            return ""
+
+        if candidate.count("`") % 2 != 0:
+            candidate = candidate.replace("`", "")
+
+        lines = [line.rstrip() for line in candidate.splitlines()]
+        summary_seen = any(line.strip().lower() == "summary:" for line in lines)
+        suggested_seen = any(line.strip().lower() == "suggested actions:" for line in lines)
+        bullet_count = sum(1 for line in lines if line.strip().startswith("- "))
+
+        if not summary_seen or not suggested_seen or bullet_count < 2:
+            return ""
+
+        if _looks_incomplete_text(candidate):
+            return ""
+
+        return candidate
+
     def _summarize_clean_tail(item: dict[str, Any]) -> str:
         if item.get("tail_summary"):
             return str(item["tail_summary"])
@@ -1194,12 +1284,14 @@ async def agent_analyze_logs(
                     prompt,
                     system=(
                         "You are an expert AutomationEdge support engineer. "
-                        "Write one concise health summary sentence."
+                        "Write one concise health summary sentence in plain text only. "
+                        "Do not use markdown, bullets, or backticks."
                     ),
-                    max_tokens=80,
+                    max_tokens=clean_tail_max_tokens,
                 )
                 or ""
             ).strip()
+            summary = _clean_tail_summary_text(summary)
             if summary:
                 item["tail_summary"] = summary
                 return summary
@@ -1276,13 +1368,15 @@ async def agent_analyze_logs(
                     "1-2 short plain-English sentences.\n\n"
                     "Suggested Actions:\n"
                     "- exactly 2 concise, actionable bullets.\n\n"
+                    "Do not use backticks or code formatting.\n\n"
                     f"Snippets:\n{snippets_text}"
                 )
                 ai_diagnostic = llm_client.chat(
                     prompt,
                     system="You are an expert technical support engineer. Be concise, practical, and specific.",
-                    max_tokens=260,
+                    max_tokens=ai_diagnostic_max_tokens,
                 )
+                ai_diagnostic = _clean_ai_diagnostic_text(ai_diagnostic)
                 logger.info("AI Diagnostic generated: %s", ai_diagnostic[:50])
             except Exception as llm_err:
                 logger.error("Failed to generate AI diagnostic: %s", llm_err, exc_info=True)

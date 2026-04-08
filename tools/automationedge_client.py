@@ -40,6 +40,8 @@ class AutomationEdgeClient:
     _WORKFLOW_LOOKUP_STOPWORDS = {
         "a", "an", "the", "this", "that", "my", "our", "your",
         "please", "can", "could", "would", "kindly", "me",
+        "i", "we", "you", "he", "she", "they", "it",
+        "have", "has", "had", "am", "is", "are", "was", "were", "be", "been",
         "bot", "workflow", "process", "job", "agent", "automation",
         "automationedge", "ae", "trigger", "run", "start", "execute",
         "launch", "submit", "rerun", "retry", "kick", "off", "for",
@@ -321,6 +323,12 @@ class AutomationEdgeClient:
         return headers
 
     def _json_or_text(self, response: httpx.Response) -> Any:
+        content_type = str(response.headers.get("Content-Type", "") or "").lower()
+        if "zip" in content_type or "octet-stream" in content_type:
+            return {
+                "is_zip": True,
+                "log_zip_content": response.content,
+            }
         try:
             return response.json()
         except Exception:
@@ -1116,6 +1124,36 @@ class AutomationEdgeClient:
         ]
 
     @classmethod
+    def is_specific_workflow_lookup_query(cls, text: str) -> bool:
+        raw_text = str(text or "").strip()
+        normalized = cls._normalize_workflow_lookup_text(raw_text)
+        if not normalized:
+            return False
+
+        raw_words = [word for word in normalized.split() if word]
+        lookup_tokens = cls._workflow_lookup_tokens(raw_text)
+        if not lookup_tokens:
+            return False
+
+        has_identifier_shape = (
+            any(ch in raw_text for ch in ("_", "-"))
+            or bool(re.search(r"\d", raw_text))
+            or bool(re.search(r"`[^`]+`|'[^']+'|\"[^\"]+\"", raw_text))
+        )
+        if has_identifier_shape:
+            return True
+
+        token_ratio = len(lookup_tokens) / max(len(raw_words), 1)
+
+        if len(lookup_tokens) >= 3:
+            return token_ratio > 0.6
+        if len(lookup_tokens) == 2:
+            return len(raw_words) <= 3 or token_ratio >= 0.75
+        if len(lookup_tokens) == 1:
+            return len(raw_words) == 1 and len(lookup_tokens[0]) >= 5
+        return False
+
+    @classmethod
     def _workflow_match_score(cls, query: str, workflow_name: str) -> float:
         query_norm = cls._normalize_workflow_lookup_text(query)
         workflow_norm = cls._normalize_workflow_lookup_text(workflow_name)
@@ -1171,6 +1209,8 @@ class AutomationEdgeClient:
     ) -> list[str]:
         text = str(query or "").strip()
         if not text:
+            return []
+        if not self.is_specific_workflow_lookup_query(text):
             return []
 
         try:
@@ -1884,6 +1924,436 @@ class AutomationEdgeClient:
                         continue
         return []
 
+    @staticmethod
+    def _extract_execution_ref(instance: dict | None) -> str:
+        if not isinstance(instance, dict):
+            return ""
+        return str(
+            instance.get("id")
+            or instance.get("automationRequestId")
+            or instance.get("requestId")
+            or instance.get("executionId")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _extract_workflow_ref(instance: dict | None) -> str:
+        if not isinstance(instance, dict):
+            return ""
+        workflow_meta = instance.get("workflowConfiguration") or instance.get("workflow") or {}
+        return str(
+            instance.get("workflowName")
+            or instance.get("workflow_name")
+            or workflow_meta.get("name")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _extract_agent_ref(instance: dict | None) -> tuple[str, str]:
+        if not isinstance(instance, dict):
+            return ("", "")
+        agent_meta = instance.get("agentDetails") or instance.get("agent") or {}
+        agent_name = str(
+            instance.get("agentName")
+            or instance.get("agent_name")
+            or agent_meta.get("agentName")
+            or agent_meta.get("name")
+            or ""
+        ).strip()
+        agent_id = str(
+            instance.get("agentId")
+            or instance.get("agent_id")
+            or instance.get("uuid")
+            or agent_meta.get("agentId")
+            or agent_meta.get("id")
+            or agent_meta.get("uuid")
+            or ""
+        ).strip()
+        return (agent_name, agent_id)
+
+    @staticmethod
+    def _has_meaningful_value(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, dict, tuple, set)):
+            return bool(value)
+        return True
+
+    @classmethod
+    def _parse_workflow_response_payload(cls, raw_value: Any) -> dict[str, Any]:
+        if isinstance(raw_value, dict):
+            return dict(raw_value)
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return {"message": text}
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"outputParameters": parsed}
+            return {"message": text}
+        return {}
+
+    @classmethod
+    def extract_workflow_response_message(cls, instance: dict | None) -> str:
+        if not isinstance(instance, dict):
+            return ""
+
+        direct_message = str(
+            instance.get("workflowResponseMessage")
+            or instance.get("workflow_response_message")
+            or ""
+        ).strip()
+        if direct_message:
+            return direct_message
+
+        payload = cls._parse_workflow_response_payload(instance.get("workflowResponse"))
+        for key in ("message", "currentStatus", "error"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+
+        output_parameters = payload.get("outputParameters")
+        if isinstance(output_parameters, list):
+            for item in output_parameters:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("message", "value", "displayValue", "status"):
+                    value = str(item.get(key) or "").strip()
+                    if value:
+                        return value
+        return ""
+
+    @classmethod
+    def _prefer_richer_execution_value(cls, current: Any, candidate: Any) -> Any:
+        if not cls._has_meaningful_value(candidate):
+            return current
+        if not cls._has_meaningful_value(current):
+            return candidate
+        if isinstance(current, dict) and isinstance(candidate, dict):
+            return cls._merge_execution_payloads(current, candidate)
+        if isinstance(current, list) and isinstance(candidate, list):
+            return candidate if len(candidate) >= len(current) else current
+        if isinstance(current, str) and isinstance(candidate, str):
+            return candidate if len(candidate.strip()) >= len(current.strip()) else current
+        return candidate
+
+    @classmethod
+    def _merge_execution_payloads(
+        cls,
+        primary: dict | None,
+        secondary: dict | None,
+    ) -> dict[str, Any]:
+        merged = dict(primary or {})
+        if not isinstance(secondary, dict):
+            return merged
+
+        preferred_keys = {
+            "status",
+            "workflowResponse",
+            "workflowResponseMessage",
+            "workflow_response_message",
+            "message",
+            "errorMessage",
+            "errorDetails",
+            "completedDate",
+            "completedTime",
+            "completedAt",
+            "executionEndTime",
+            "endTime",
+            "executionStartTime",
+            "startTime",
+            "lastUpdatedDate",
+            "outputParameters",
+        }
+
+        for key, value in secondary.items():
+            if not cls._has_meaningful_value(value):
+                continue
+
+            current = merged.get(key)
+            if key in preferred_keys:
+                merged[key] = cls._prefer_richer_execution_value(current, value)
+                continue
+
+            if isinstance(current, dict) and isinstance(value, dict):
+                merged[key] = cls._merge_execution_payloads(current, value)
+                continue
+
+            if isinstance(current, list) and isinstance(value, list):
+                if len(value) > len(current):
+                    merged[key] = value
+                continue
+
+            if not cls._has_meaningful_value(current):
+                merged[key] = value
+
+        return merged
+
+    def refresh_execution_payload(
+        self,
+        execution_id: str,
+        record: dict | None = None,
+        *,
+        workflow_name: str = "",
+        recent_limit: int = 25,
+    ) -> dict[str, Any]:
+        target_id = str(execution_id or self._extract_execution_ref(record) or "").strip()
+        merged = dict(record or {}) if isinstance(record, dict) else {}
+        if not target_id:
+            return merged
+
+        workflow_label = str(workflow_name or self._extract_workflow_ref(merged) or "").strip()
+
+        def merge_candidate(candidate: dict | None) -> None:
+            nonlocal merged
+            if not isinstance(candidate, dict):
+                return
+            if self._extract_execution_ref(candidate) not in {"", target_id}:
+                return
+            merged = self._merge_execution_payloads(merged, candidate)
+
+        parsed = self._parse_workflow_response_payload(merged.get("workflowResponse"))
+        if parsed:
+            merged["workflowResponseParsed"] = parsed
+            summary = self.extract_workflow_response_message(merged)
+            if summary:
+                merged["workflowResponseMessage"] = summary
+
+        try:
+            merge_candidate(self.get_workflow_instance_by_id(target_id))
+        except Exception as exc:
+            logger.debug("Direct execution refresh failed for %s: %s", target_id, exc)
+
+        if not self.extract_workflow_response_message(merged):
+            search_scopes = []
+            if workflow_label:
+                search_scopes.append(workflow_label)
+            search_scopes.append("")
+
+            seen_scopes: set[str] = set()
+            for scope in search_scopes:
+                norm_scope = str(scope or "").strip().lower()
+                if norm_scope in seen_scopes:
+                    continue
+                seen_scopes.add(norm_scope)
+
+                try:
+                    instances = self.get_workflow_instances(
+                        workflow_name=scope,
+                        limit=max(int(recent_limit), 10),
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Recent execution refresh failed for %s (scope=%s): %s",
+                        target_id,
+                        scope or "global",
+                        exc,
+                    )
+                    continue
+
+                match = next(
+                    (
+                        item for item in instances
+                        if self._extract_execution_ref(item) == target_id
+                    ),
+                    None,
+                )
+                if match:
+                    merge_candidate(match)
+                    if self.extract_workflow_response_message(merged):
+                        break
+
+        parsed = self._parse_workflow_response_payload(merged.get("workflowResponse"))
+        if parsed:
+            merged["workflowResponseParsed"] = parsed
+            summary = self.extract_workflow_response_message(merged)
+            if summary:
+                merged["workflowResponseMessage"] = summary
+        return merged
+
+    @staticmethod
+    def _is_running_agent_state(state: Any) -> bool:
+        normalized = str(state or "").strip().upper()
+        return normalized in {"RUNNING", "CONNECTED", "ACTIVE"}
+
+    @staticmethod
+    def _is_actively_running_execution_status(status: Any) -> bool:
+        normalized = str(status or "").strip().replace(" ", "").upper()
+        return normalized in {"INPROGRESS", "EXECUTIONSTARTED", "RUNNING", "PROCESSING"}
+
+    @staticmethod
+    def _assigned_agent_summary(agents: list[dict]) -> str:
+        labels: list[str] = []
+        for agent in agents or []:
+            if not isinstance(agent, dict):
+                continue
+            name = str(
+                agent.get("agentName")
+                or agent.get("name")
+                or agent.get("agentId")
+                or agent.get("id")
+                or "Unknown"
+            ).strip()
+            state = str(agent.get("agentState") or agent.get("state") or "UNKNOWN").strip().upper()
+            labels.append(f"{name} ({state})")
+        return ", ".join(labels)
+
+    def _assigned_agents_for_workflow(self, workflow_name: str) -> list[dict]:
+        normalized = str(workflow_name or "").strip().lower()
+        if not normalized:
+            return []
+
+        try:
+            entries = self.get_workflow_agents() or []
+        except Exception as exc:
+            logger.debug("Could not load workflow agents for %s: %s", workflow_name, exc)
+            return []
+
+        if not isinstance(entries, list):
+            return []
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            workflow_meta = entry.get("workflow") or entry.get("workflowConfiguration") or {}
+            candidate = str(
+                workflow_meta.get("name")
+                or entry.get("workflowName")
+                or ""
+            ).strip().lower()
+            if candidate != normalized:
+                continue
+            agents = entry.get("agents") or []
+            return [agent for agent in agents if isinstance(agent, dict)]
+        return []
+
+    def diagnose_new_execution(self, execution_payload: dict | None, execution_id: str = "") -> dict[str, Any]:
+        """Explain why a request is still NEW/QUEUED/PENDING."""
+        if not isinstance(execution_payload, dict):
+            return {}
+
+        raw_status = str(
+            execution_payload.get("status")
+            or execution_payload.get("state")
+            or ""
+        ).strip()
+        if raw_status.upper() not in {"NEW", "QUEUED", "PENDING"}:
+            return {}
+
+        current_execution_id = str(execution_id or self._extract_execution_ref(execution_payload)).strip()
+        workflow_name = self._extract_workflow_ref(execution_payload)
+        if not workflow_name:
+            return {}
+
+        assigned_agents = self._assigned_agents_for_workflow(workflow_name)
+        assigned_agent_names = {
+            str(agent.get("agentName") or agent.get("name") or "").strip().lower()
+            for agent in assigned_agents
+            if isinstance(agent, dict) and str(agent.get("agentName") or agent.get("name") or "").strip()
+        }
+        assigned_agent_ids = {
+            str(agent.get("agentId") or agent.get("id") or agent.get("uuid") or "").strip()
+            for agent in assigned_agents
+            if isinstance(agent, dict) and str(agent.get("agentId") or agent.get("id") or agent.get("uuid") or "").strip()
+        }
+
+        try:
+            active_instances = self.get_running_instances("") or []
+        except Exception as exc:
+            logger.debug("Could not inspect running instances while diagnosing NEW request %s: %s", current_execution_id, exc)
+            active_instances = []
+
+        for instance in active_instances:
+            if not isinstance(instance, dict):
+                continue
+            instance_id = self._extract_execution_ref(instance)
+            if current_execution_id and instance_id and instance_id == current_execution_id:
+                continue
+            if not self._is_actively_running_execution_status(instance.get("status")):
+                continue
+
+            instance_workflow = self._extract_workflow_ref(instance) or workflow_name
+            instance_agent_name, instance_agent_id = self._extract_agent_ref(instance)
+            agent_matches_assignment = (
+                (instance_agent_name and instance_agent_name.strip().lower() in assigned_agent_names)
+                or (instance_agent_id and instance_agent_id in assigned_agent_ids)
+            )
+            same_workflow = instance_workflow.strip().lower() == workflow_name.strip().lower()
+            if not (agent_matches_assignment or same_workflow):
+                continue
+
+            agent_suffix = f" on agent **{instance_agent_name}**" if instance_agent_name else ""
+            return {
+                "reason": "other_process_running",
+                "execution_id": current_execution_id,
+                "workflow_name": workflow_name,
+                "other_execution_id": instance_id,
+                "other_workflow_name": instance_workflow,
+                "other_status": str(instance.get("status") or "").strip(),
+                "other_agent_name": instance_agent_name,
+                "assigned_agents": assigned_agents,
+                "summary": (
+                    f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is still **{raw_status or 'New'}** "
+                    f"because another process is currently running: **{instance_workflow}** "
+                    f"(Execution ID: `{instance_id or 'unknown'}`, status: `{instance.get('status') or 'Unknown'}`){agent_suffix}. "
+                    "Please wait some time and check again."
+                ),
+            }
+
+        running_assigned_agents = [
+            agent for agent in assigned_agents
+            if self._is_running_agent_state(agent.get("agentState") or agent.get("state"))
+        ]
+        if assigned_agents and not running_assigned_agents:
+            assigned_summary = self._assigned_agent_summary(assigned_agents) or "No assigned agents found"
+            return {
+                "reason": "agent_unavailable",
+                "execution_id": current_execution_id,
+                "workflow_name": workflow_name,
+                "assigned_agents": assigned_agents,
+                "summary": (
+                    f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is still **{raw_status or 'New'}** "
+                    f"because its assigned agent is not running ({assigned_summary}). "
+                    "Please restart the agent and try again."
+                ),
+            }
+
+        try:
+            live_agents = self.check_agent_status() or []
+        except Exception as exc:
+            logger.debug("Could not inspect live agent status for NEW request %s: %s", current_execution_id, exc)
+            live_agents = []
+
+        if not any(self._is_running_agent_state(agent.get("agentState") or agent.get("state")) for agent in live_agents):
+            return {
+                "reason": "agent_unavailable",
+                "execution_id": current_execution_id,
+                "workflow_name": workflow_name,
+                "assigned_agents": assigned_agents,
+                "summary": (
+                    f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is still **{raw_status or 'New'}** "
+                    "and no active automation agent was detected. Please restart the agent and try again."
+                ),
+            }
+
+        return {
+            "reason": "queued_waiting",
+            "execution_id": current_execution_id,
+            "workflow_name": workflow_name,
+            "assigned_agents": assigned_agents,
+            "summary": (
+                f"Execution `{current_execution_id or 'unknown'}` for **{workflow_name}** is currently **{raw_status or 'New'}**. "
+                "An automation agent is available, so please wait some time and check again."
+            ),
+        }
+
     def get_execution_logs(self, execution_id: str, tail: int = 100) -> dict:
         """Get execution logs by execution id with T4 fallback paths and debug log flow."""
         if not execution_id:
@@ -1990,6 +2460,13 @@ class AutomationEdgeClient:
                 # T4 SUCCESS PATH: /agent/debuglogs/{id} returns the ZIP bytes directly.
                 # _json_or_text encodes this as {"is_zip": True, "log_zip_content": <bytes>}
                 updated = self.get_debug_log_request(str(req_id))
+                if not isinstance(updated, dict):
+                    logger.warning(
+                        "T4 debug log request %s returned non-dict payload type=%s; treating as not-ready.",
+                        req_id,
+                        type(updated).__name__,
+                    )
+                    updated = {"raw_text": str(updated), "status": "PENDING"}
                 if updated.get("is_zip") or updated.get("log_zip_content"):
                     logger.info(f"T4 debug log request {req_id}: received binary ZIP content directly.")
                     if isinstance(updated, dict):
@@ -2198,14 +2675,50 @@ class AutomationEdgeClient:
             status = raw.get("status", "pending") if isinstance(raw, dict) else "pending"
             logger.info("Poll #%d execution_id=%s status=%s", attempt + 1, execution_id, status)
 
-            if status == "New" and not (raw or {}).get("agentName"):
-                no_agent_counter += 1
-                if no_agent_counter >= no_agent_threshold:
-                    status = "no_agent"
+            diagnosis: dict[str, Any] = {}
+            if isinstance(raw, dict) and str(status or "").strip().upper() in {"NEW", "QUEUED", "PENDING"}:
+                try:
+                    diagnosis = self.diagnose_new_execution(raw, execution_id=execution_id)
+                except Exception as exc:
+                    logger.debug("NEW-status diagnosis failed for %s: %s", execution_id, exc)
+                    diagnosis = {}
+
+                if diagnosis:
+                    raw = dict(raw)
+                    raw["newExecutionDiagnosis"] = diagnosis
+                    reason = str(diagnosis.get("reason") or "").strip().lower()
+                    if reason == "other_process_running":
+                        status = "waiting_other_process"
+                    elif reason == "agent_unavailable":
+                        status = "no_agent"
+
+                if status == "New" and not (raw or {}).get("agentName") and not diagnosis.get("reason") == "queued_waiting":
+                    no_agent_counter += 1
+                    if no_agent_counter >= no_agent_threshold:
+                        status = "no_agent"
+                else:
+                    no_agent_counter = 0
             else:
                 no_agent_counter = 0
 
-            if status in terminal_statuses or status == "no_agent":
+            normalized_status = str(status or "").strip().upper()
+            terminal_upper = {str(item or "").strip().upper() for item in terminal_statuses}
+            if normalized_status in terminal_upper:
+                try:
+                    raw = self.refresh_execution_payload(
+                        execution_id,
+                        record=raw if isinstance(raw, dict) else None,
+                        workflow_name=self._extract_workflow_ref(raw if isinstance(raw, dict) else None),
+                    )
+                    if isinstance(raw, dict):
+                        refreshed_status = str(raw.get("status") or "").strip()
+                        if refreshed_status:
+                            status = refreshed_status
+                except Exception as exc:
+                    logger.debug("Could not enrich terminal execution payload for %s: %s", execution_id, exc)
+
+            normalized_status = str(status or "").strip().upper()
+            if normalized_status in terminal_upper or status in {"no_agent", "waiting_other_process"}:
                 break
 
             time.sleep(poll_interval_sec)
@@ -2215,7 +2728,7 @@ class AutomationEdgeClient:
             "execution_id": execution_id,
             "raw": raw,
         }
-        if status not in (*terminal_statuses, "no_agent", "timeout"):
+        if status not in (*terminal_statuses, "no_agent", "waiting_other_process", "timeout"):
             out["status"] = "in_progress"
             out["in_progress_hint"] = (
                 f"Execution still running after {max_attempts} checks. "

@@ -89,6 +89,7 @@ CONFIG = {
     "AE_TIMEOUT_SECONDS": int(
         os.environ.get("AE_TIMEOUT_SECONDS", os.environ.get("T4_TIMEOUT_SECONDS", "30"))
     ),
+    "DISPLAY_TIMEZONE": os.environ.get("DISPLAY_TIMEZONE", "Asia/Kolkata").strip() or "Asia/Kolkata",
 
     # Google Cloud / Vertex AI
     "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),

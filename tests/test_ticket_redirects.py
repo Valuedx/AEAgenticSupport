@@ -10,7 +10,7 @@ def test_call_ae_api_blocks_support_ticket_like_endpoint_before_server_call():
     )
 
     assert result["error"] == "ticket_tool_required"
-    assert "ae.ticket.create" in result["message"]
+    assert "create_support_ticket" in result["message"]
 
 
 def test_orchestrator_extracts_ticket_args_from_malformed_call_ae_api_body():
@@ -28,6 +28,23 @@ def test_orchestrator_extracts_ticket_args_from_malformed_call_ae_api_body():
     assert extracted["process_name"] == "MG312 BOT2"
     assert "Execution failed for MG312 BOT2" in extracted["description"]
     assert extracted["request_type"] == "Incident"
+
+
+def test_orchestrator_rewrites_ticket_api_call_to_create_support_ticket():
+    orch = Orchestrator()
+
+    tool_name, tool_args = orch._rewrite_call_ae_api_tool(
+        "call_ae_api",
+        {
+            "method": "POST",
+            "endpoint": "/an/api/v1/support/tokut",
+            "body": '{"process_name":"MG312 BOT2","description":"Execution failed","request_type":"Incident"}',
+        },
+    )
+
+    assert tool_name == "create_support_ticket"
+    assert tool_args["process_name"] == "MG312 BOT2"
+    assert tool_args["request_type"] == "Incident"
 
 
 def test_orchestrator_extracts_agent_log_args_from_call_ae_api_params():
