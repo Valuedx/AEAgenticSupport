@@ -86,8 +86,11 @@ class VertexAIClient:
     def __init__(self):
         self.project = CONFIG["GOOGLE_CLOUD_PROJECT"]
         self.location = get_runtime_value(
-            "GOOGLE_CLOUD_LOCATION",
-            CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            "VERTEX_AI_LOCATION",
+            CONFIG.get(
+                "VERTEX_AI_LOCATION",
+                CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            ),
         )
         self.model_name = get_runtime_value(
             "VERTEX_AI_MODEL",

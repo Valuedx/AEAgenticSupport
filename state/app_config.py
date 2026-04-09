@@ -241,7 +241,19 @@ DEFAULT_SECTIONS: dict[str, dict[str, Any]] = {
         "toolGatewayUrl": str(CONFIG.get("TOOL_BASE_URL", "http://localhost:9999")).strip(),
         "cognibotBaseUrl": str(CONFIG.get("COGNIBOT_BASE_URL", "http://localhost:3978")).strip(),
         "googleCloudLocation": str(CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1")).strip(),
+        "vertexAiLocation": str(
+            CONFIG.get(
+                "VERTEX_AI_LOCATION",
+                CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            )
+        ).strip(),
         "vertexAiModel": str(CONFIG.get("VERTEX_AI_MODEL", "gemini-2.0-flash")).strip(),
+        "embeddingLocation": str(
+            CONFIG.get(
+                "EMBEDDING_LOCATION",
+                CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            )
+        ).strip(),
         "embeddingModel": str(CONFIG.get("EMBEDDING_MODEL", "text-embedding-004")).strip(),
     },
 }
@@ -351,8 +363,10 @@ SECTION_SCHEMAS: dict[str, dict[str, Any]] = {
             {"key": "aeTimeoutSeconds", "label": "AutomationEdge timeout (seconds)", "type": "number", "help": "How long the app waits for AutomationEdge before timing out."},
             {"key": "toolGatewayUrl", "label": "Tool gateway URL", "type": "text", "help": "Base URL for the external tool gateway if one is used."},
             {"key": "cognibotBaseUrl", "label": "AI Studio Cognibot URL", "type": "text", "help": "Base URL for the Cognibot Direct Line service used by the AI Studio chat page."},
-            {"key": "googleCloudLocation", "label": "Google Cloud location", "type": "text", "help": "Region used for Vertex AI requests."},
+            {"key": "googleCloudLocation", "label": "Default Google Cloud location", "type": "text", "help": "Fallback region used when a service-specific Vertex AI location is not set."},
+            {"key": "vertexAiLocation", "label": "Vertex AI chat location", "type": "text", "help": "Location used for Gemini chat and orchestration requests, for example global."},
             {"key": "vertexAiModel", "label": "Vertex AI chat model", "type": "text", "help": "Model used for orchestration and answer generation."},
+            {"key": "embeddingLocation", "label": "Embedding location", "type": "text", "help": "Location used for embedding generation, for example us-central1."},
             {"key": "embeddingModel", "label": "Embedding model", "type": "text", "help": "Model used when indexing and searching knowledge collections."},
         ],
     },
@@ -367,7 +381,9 @@ RUNTIME_VALUE_MAP: dict[str, tuple[str, str]] = {
     "TOOL_BASE_URL": ("integrations", "toolGatewayUrl"),
     "COGNIBOT_BASE_URL": ("integrations", "cognibotBaseUrl"),
     "GOOGLE_CLOUD_LOCATION": ("integrations", "googleCloudLocation"),
+    "VERTEX_AI_LOCATION": ("integrations", "vertexAiLocation"),
     "VERTEX_AI_MODEL": ("integrations", "vertexAiModel"),
+    "EMBEDDING_LOCATION": ("integrations", "embeddingLocation"),
     "EMBEDDING_MODEL": ("integrations", "embeddingModel"),
     "MAX_AGENT_ITERATIONS": ("operations_policy", "maxAgentIterations"),
     "MAX_RAG_TOOLS": ("operations_policy", "maxKnowledgeMatches"),

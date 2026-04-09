@@ -130,7 +130,11 @@ Key variables to set:
 |---|---|
 | `POSTGRES_DSN` | PostgreSQL connection string |
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID |
+| `GOOGLE_CLOUD_LOCATION` | Default Vertex AI location fallback |
+| `VERTEX_AI_LOCATION` | Location for Gemini chat/orchestration requests (for example `global`) |
 | `VERTEX_AI_MODEL` | Gemini model name (e.g., `gemini-2.5-flash`) |
+| `EMBEDDING_LOCATION` | Location for embedding requests (for example `us-central1`) |
+| `EMBEDDING_MODEL` | Vertex AI embedding model |
 | `VERTEX_AI_MAX_TOKENS` | Max response tokens (default: `32000`) |
 | `T4_BASE_URL` | AutomationEdge T4 API base URL |
 | `T4_USERNAME` / `T4_PASSWORD` | T4 credentials |

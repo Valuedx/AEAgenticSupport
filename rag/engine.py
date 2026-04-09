@@ -48,8 +48,11 @@ class VertexEmbedder:
     def __init__(self, model_name: str = "text-embedding-004"):
         self.project = CONFIG["GOOGLE_CLOUD_PROJECT"]
         self.location = get_runtime_value(
-            "GOOGLE_CLOUD_LOCATION",
-            CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            "EMBEDDING_LOCATION",
+            CONFIG.get(
+                "EMBEDDING_LOCATION",
+                CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            ),
         )
         self.model_name = model_name
         

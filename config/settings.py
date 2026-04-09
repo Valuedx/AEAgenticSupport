@@ -94,6 +94,10 @@ CONFIG = {
     # Google Cloud / Vertex AI
     "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
     "GOOGLE_CLOUD_LOCATION": os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+    "VERTEX_AI_LOCATION": os.environ.get(
+        "VERTEX_AI_LOCATION",
+        os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+    ),
     "VERTEX_AI_MODEL": os.environ.get("VERTEX_AI_MODEL", "gemini-2.0-flash"),
     "VERTEX_AI_MAX_TOKENS": int(os.environ.get("VERTEX_AI_MAX_TOKENS", "65536")),
 
@@ -105,6 +109,10 @@ CONFIG = {
 
     # Embeddings (set EMBEDDING_DIMENSION to avoid cold-start probe, e.g. 768 for text-embedding-004)
     "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", "text-embedding-004"),
+    "EMBEDDING_LOCATION": os.environ.get(
+        "EMBEDDING_LOCATION",
+        os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+    ),
     "EMBEDDING_DIMENSION": int(os.environ["EMBEDDING_DIMENSION"]) if os.environ.get("EMBEDDING_DIMENSION") else None,
 
     # Tool gateway

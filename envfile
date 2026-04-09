@@ -56,11 +56,13 @@ POSTGRES_DSN=postgresql://postgres:root@localhost:5432/ops_agent
 # -- Google Cloud / Vertex AI --
 GOOGLE_CLOUD_PROJECT=vdxexccenter
 GOOGLE_CLOUD_LOCATION=us-central1
+VERTEX_AI_LOCATION=global
 GOOGLE_APPLICATION_CREDENTIALS=D:\Graph_Chatbot\vdxexccenter-4b1dff9ce849.json
 VERTEX_AI_MODEL=gemini-2.5-flash
 VERTEX_AI_MAX_TOKENS=65536
 # ── Embeddings (Vertex AI text-embedding model) ──
 EMBEDDING_MODEL=text-embedding-004
+EMBEDDING_LOCATION=us-central1
 
 # ── Tool Gateway (REST tool calling endpoint) ──
 TOOL_BASE_URL=http://127.0.0.1:5050

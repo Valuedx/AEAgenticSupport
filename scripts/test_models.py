@@ -7,7 +7,10 @@ from google.genai import types as genai_types
 
 # Initialize a direct client to bypass current config
 project = os.environ.get("GOOGLE_CLOUD_PROJECT", "vdxexccenter")
-location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+location = os.environ.get(
+    "VERTEX_AI_LOCATION",
+    os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+)
 client = genai.Client(vertexai=True, project=project, location=location)
 
 def test_model(model_name):

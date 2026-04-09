@@ -293,6 +293,7 @@ AE_TIMEOUT_SECONDS=30
 # Google Cloud / Vertex AI
 GOOGLE_CLOUD_PROJECT=your-gcp-project-id
 GOOGLE_CLOUD_LOCATION=us-central1
+VERTEX_AI_LOCATION=global
 GOOGLE_APPLICATION_CREDENTIALS=/opt/automationedge/keys/sa-key.json
 VERTEX_AI_MODEL=gemini-2.0-flash
 
@@ -300,6 +301,7 @@ VERTEX_AI_MODEL=gemini-2.0-flash
 POSTGRES_DSN=postgresql://ops_agent_user:your-password@db-host:5432/ops_agent
 
 # Embeddings (Vertex AI — uses the same GCP credentials as the LLM)
+EMBEDDING_LOCATION=us-central1
 EMBEDDING_MODEL=text-embedding-004
 # EMBEDDING_DIMENSION=768  # Optional: skip live probe at startup (speeds cold-start)
 

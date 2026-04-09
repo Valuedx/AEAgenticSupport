@@ -35,7 +35,10 @@ def _get_embedding_dimension() -> int:
         client = genai.Client(
             vertexai=True,
             project=CONFIG["GOOGLE_CLOUD_PROJECT"],
-            location=CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+            location=CONFIG.get(
+                "EMBEDDING_LOCATION",
+                CONFIG.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            ),
         )
         model_name = CONFIG.get("EMBEDDING_MODEL", "text-embedding-004")
         res = client.models.embed_content(
