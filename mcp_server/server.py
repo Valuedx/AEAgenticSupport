@@ -30,8 +30,12 @@ mcp = FastMCP(
 def _register_tools() -> int:
     count = 0
     for spec in get_mcp_tool_specs():
+        # gated_handler applies the MCP_MUTATE_ENABLED / MCP_PRIVILEGED_ENABLED
+        # kill-switches for mutating tools; read-only tools return structured_handler
+        # unchanged.  Guard logic lives in MCPToolSpec.gated_handler so it is shared
+        # with the co-located local bridge path in tools/mcp_tools.py.
         mcp.add_tool(
-            spec.structured_handler,
+            spec.gated_handler,
             name=spec.name,
             description=spec.resolved_description,
             annotations=spec.annotations,

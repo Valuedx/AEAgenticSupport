@@ -1,6 +1,6 @@
 # AutomationEdge MCP Server
 
-Independent [Model Context Protocol](https://modelcontextprotocol.io/) server for AutomationEdge IT Operations support. Exposes **106 tools** (71 P0 + 35 support-priority P1) for investigating, diagnosing, and remediating automation issues via any MCP-compatible client (Cursor, Claude Desktop, etc.).
+Independent [Model Context Protocol](https://modelcontextprotocol.io/) server for AutomationEdge IT Operations support. Exposes **116 tools** (71 P0 + 35 support-priority P1 + 10 schedule/list) for investigating, diagnosing, and remediating automation issues via any MCP-compatible client (Cursor, Claude Desktop, etc.).
 
 When these tools are bridged into the main app (`AE_MCP_TOOLS_ENABLED=true`), the app now catalogs the full MCP surface but eagerly hydrates only a curated support subset. In co-located mode, it uses the shared local spec registry; when `AE_MCP_SERVER_URL` is set, it discovers tools remotely with `list_tools()` and executes them with `call_tool()`. The remaining MCP tools stay searchable through RAG and `discover_tools`, then rank alongside custom tools and AE workflow-backed tools using retrieval plus observed execution-history signals. Recent outcomes are weighted more heavily, and agent-scoped feedback is preferred when it exists, before hydrating on demand for the active turn.
 
@@ -13,6 +13,8 @@ Recent MCP SDK features are wired through the registry now:
 - Tool `meta` includes source, category, safety, tier, mutating flag, tags, and structured-output hints.
 - Server registrations use `structured_output=True`, so clients receive `outputSchema` plus structured results instead of only raw JSON text.
 - The standalone MCP server and co-located in-app bridge share the same tool spec registry, eliminating metadata drift. Remote bridge mode consumes the same metadata over the MCP protocol.
+
+For a detailed walkthrough of startup, transport selection, authentication, tool registration, the handler pipeline, and the AE backend client, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
 ## Quick Start
 
@@ -47,13 +49,16 @@ python -m mcp_server
 python -m mcp_server --transport streamable-http --host 127.0.0.1 --port 8000
 ```
 
-**Streamable HTTP transport** (reachable from other machines):
+**Streamable HTTP transport** (reachable from other machines — set a bearer token first):
 
 ```bash
+MCP_BEARER_TOKEN=<strong-secret> \
 python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 8000
 ```
 
 The MCP endpoint URL for HTTP clients is `http://<host>:8000/mcp`.
+
+> **Security note:** `--host 0.0.0.0` without `MCP_BEARER_TOKEN` leaves the server unauthenticated. The server logs a startup WARNING in that case. See [Security](#security) for the full configuration reference.
 
 ## Main App Remote Bridge
 
@@ -63,9 +68,11 @@ If the AI Studio/Teams app is running on a different machine than the MCP server
 AE_MCP_TOOLS_ENABLED=true
 AE_MCP_SERVER_URL=http://mcp-host:8000/mcp
 AE_MCP_SERVER_TRANSPORT=streamable-http
-AE_MCP_SERVER_HEADERS_JSON=
+AE_MCP_SERVER_HEADERS_JSON={"Authorization":"Bearer <MCP_BEARER_TOKEN>"}
 AE_MCP_SERVER_TIMEOUT_SECONDS=30
 ```
+
+`AE_MCP_SERVER_HEADERS_JSON` carries the bearer token the main app sends to the MCP server. It must match `MCP_BEARER_TOKEN` configured on the server side.
 
 Leave `AE_MCP_SERVER_URL` blank only when the app and `mcp_server` package are co-located and you want in-process execution instead of network MCP calls.
 
@@ -107,7 +114,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-## Tool Catalog (106 tools: P0 + support-priority P1)
+## Tool Catalog (116 tools: P0 + support-priority P1)
 
 ### Request Read (14 P0 + 3 P1)
 | Tool | Description |
@@ -144,12 +151,13 @@ Add to `claude_desktop_config.json`:
 | *P1:* `ae.request.export_diagnostic_bundle` | Export case evidence for escalation |
 | *P1:* `ae.request.generate_support_narrative` | Plain-language support summary for handoff |
 
-### Request Mutations (4 P0 + 4 P1) — Guarded/Privileged
+### Request Mutations (5 P0 + 4 P1) — Guarded/Privileged
 | Tool | Safety | Description |
 |------|--------|-------------|
-| `ae.request.restart_failed` | guarded | Restart with same params |
-| `ae.request.terminate_running` | privileged | Kill active request |
-| `ae.request.resubmit_from_failure_point` | guarded | Resume from failure |
+| `ae.request.restart` | guarded | Restart any request (generic) |
+| `ae.request.restart_failed` | guarded | Restart a failed request with same params |
+| `ae.request.terminate_running` | privileged | Kill an actively running request |
+| `ae.request.resubmit_from_failure_point` | guarded | Resume from failure point |
 | `ae.request.add_support_comment` | safe_mutation | Add case note |
 | *P1:* `ae.request.cancel_new_or_retry` | guarded | Cancel request not yet started |
 | *P1:* `ae.request.resubmit_from_start` | guarded | Resubmit from beginning |
@@ -267,14 +275,47 @@ Add to `claude_desktop_config.json`:
 | *P1:* `ae.support.build_case_snapshot` | Full case snapshot for escalation |
 | *P1:* `ae.support.prepare_human_handoff_note` | Human-readable handoff note for support |
 
+## Security
+
+### HTTP Bearer Authentication
+
+When running the SSE or streamable-HTTP transport, set `MCP_BEARER_TOKEN` to a strong random secret. Every request must then include:
+
+```
+Authorization: Bearer <MCP_BEARER_TOKEN>
+```
+
+Requests with a missing or wrong token are rejected with `401 Unauthorized` before reaching any tool handler. If the token is not configured the server logs a startup WARNING and allows all traffic (suitable for `stdio` or trusted-LAN deployments only).
+
+Generate a token with:
+
+```bash
+openssl rand -hex 32
+```
+
+### Mutate Kill-Switches
+
+All `safe_mutation`, `guarded`, and `privileged` tool calls are gated server-side at execution time — not just annotated — using two environment flags. The gate applies on **both** the standalone HTTP server and the co-located local bridge (`AE_MCP_TOOLS_ENABLED=true` without `AE_MCP_SERVER_URL`); it is part of `MCPToolSpec.gated_handler`, which both paths use.
+
+| Variable | Default | Effect when `false` |
+|----------|---------|---------------------|
+| `MCP_MUTATE_ENABLED` | `true` | Blocks **all** mutating tool calls (`safe_mutation`, `guarded`, `privileged`) |
+| `MCP_PRIVILEGED_ENABLED` | `true` | Blocks only `privileged`-tier tools; `guarded` and `safe_mutation` still execute |
+
+`dry_run=True` calls are always passed through regardless of either flag, because they make no backend changes.
+
+### TLS Verification
+
+`AE_VERIFY_SSL` defaults to `true`. Set it to `false` only when the AutomationEdge backend uses a self-signed certificate (development environments). In production, leave it at the default or point it at a trusted CA bundle.
+
 ## Safety Levels
 
-| Level | Description |
-|-------|-------------|
-| `safe_read` | Read-only, no state change |
-| `safe_mutation` | Low-risk change, usually reversible |
-| `guarded` | State change requiring reason, supports dry_run |
-| `privileged` | Potentially disruptive, requires reason + dry_run |
+| Level | Tier | Description |
+|-------|------|-------------|
+| `safe_read` | read-only | Read-only, no state change |
+| `safe_mutation` | low-risk | Low-risk change (e.g. add comment), server-gated by `MCP_MUTATE_ENABLED` |
+| `guarded` | medium-risk | State change requiring `reason`; supports `dry_run`; gated by `MCP_MUTATE_ENABLED` |
+| `privileged` | high-risk | Potentially disruptive (e.g. terminate, change permissions); gated by both `MCP_MUTATE_ENABLED` and `MCP_PRIVILEGED_ENABLED` |
 
 All mutating tools accept `reason`, `requested_by`, `case_id`, and `dry_run` parameters.
 
@@ -283,11 +324,12 @@ All mutating tools accept `reason`, `requested_by`, `case_id`, and `dry_run` par
 ```
 mcp_server/
 ├── __init__.py          # Package marker
-├── __main__.py          # CLI entry point
-├── server.py            # FastMCP server wiring shared, structured MCP tool specs
-├── config.py            # Environment-based configuration
+├── __main__.py          # CLI entry point — wraps HTTP transports with bearer middleware
+├── server.py            # FastMCP server wiring; registers spec.gated_handler for every tool
+├── config.py            # Environment-based configuration (AE + MCP auth settings)
+├── auth.py              # BearerTokenMiddleware (ASGI) + make_mutate_guard decorator
 ├── ae_client.py         # Standalone AE REST client with auth + fallback + path caching
-├── tool_specs.py        # Shared MCP tool definitions, curated metadata, and schema helpers
+├── tool_specs.py        # Shared MCP tool definitions, metadata, schema helpers; gated_handler property
 ├── requirements.txt     # Python dependencies
 └── tools/
     ├── __init__.py

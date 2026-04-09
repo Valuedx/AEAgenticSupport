@@ -44,9 +44,20 @@ MCP_CONFIG = {
     "AE_TOKEN_FIELD": os.environ.get("AE_TOKEN_FIELD", "token"),
     "AE_TOKEN_TTL_SECONDS": int(os.environ.get("AE_TOKEN_TTL_SECONDS", "1800")),
     "AE_TIMEOUT_SECONDS": int(os.environ.get("AE_TIMEOUT_SECONDS", "30")),
-    "AE_VERIFY_SSL": _bool(os.environ.get("AE_VERIFY_SSL", "false")),
+    # Default is now True — set AE_VERIFY_SSL=false only for dev/self-signed certs.
+    "AE_VERIFY_SSL": _bool(os.environ.get("AE_VERIFY_SSL", "true")),
     "MCP_TRANSPORT": os.environ.get("MCP_TRANSPORT", "stdio"),
     "MCP_HOST": os.environ.get("MCP_HOST", "127.0.0.1"),
     "MCP_PORT": int(os.environ.get("MCP_PORT", "8000")),
     "LOG_LEVEL": os.environ.get("LOG_LEVEL", "INFO"),
+    # ── MCP HTTP authentication ──────────────────────────────────────────────
+    # Set to a strong random secret (e.g. openssl rand -hex 32) to require
+    # Authorization: Bearer <token> on every SSE / streamable-HTTP request.
+    # Leave empty only for stdio transport or trusted-network deployments.
+    "MCP_BEARER_TOKEN": os.environ.get("MCP_BEARER_TOKEN", ""),
+    # ── Server-side mutate kill-switches ────────────────────────────────────
+    # Set MCP_MUTATE_ENABLED=false to block all guarded/privileged tool calls.
+    # Set MCP_PRIVILEGED_ENABLED=false to block only privileged-tier tools.
+    "MCP_MUTATE_ENABLED": _bool(os.environ.get("MCP_MUTATE_ENABLED", "true")),
+    "MCP_PRIVILEGED_ENABLED": _bool(os.environ.get("MCP_PRIVILEGED_ENABLED", "true")),
 }

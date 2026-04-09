@@ -325,6 +325,25 @@ celery -A app.workers.celery_app beat --loglevel=info
 redis-server
 ```
 
+### 6.1.1 Local dev shortcut (no Celery / no Redis required)
+
+By default, the backend can run workflow execution **in-process** (background threads) without Celery/Redis:
+
+- Set `ORCHESTRATOR_USE_CELERY=false` (default).
+- You still need PostgreSQL.
+- Redis is only required if you enable features that depend on it (e.g. OIDC PKCE state, token streaming, or if you explicitly enable Celery).
+
+```env
+ORCHESTRATOR_USE_CELERY=false
+```
+
+Start only:
+
+```bash
+cd orchestrator/backend
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+```
+
 ### 6.2 Quick Start (Frontend Only)
 
 If you just want to use the visual builder without backend execution:
@@ -362,6 +381,7 @@ Backend settings use the `ORCHESTRATOR_` prefix; frontend uses `VITE_` variables
 | `ORCHESTRATOR_RATE_LIMIT_REQUESTS` | No | `100` | Max API requests per tenant per window |
 | `ORCHESTRATOR_RATE_LIMIT_WINDOW` | No | `1 minute` | Rate limit time window |
 | `ORCHESTRATOR_EXECUTION_QUOTA_PER_HOUR` | No | `50` | Max workflow executions per tenant per hour |
+| `ORCHESTRATOR_USE_CELERY` | No | `false` | If `true`, dispatches execution/resume/retry via Celery (requires Redis + worker). If `false`, runs tasks in-process in background threads (local dev-friendly). |
 | `ORCHESTRATOR_OIDC_ENABLED` | No | `false` | Enable OIDC Authorization Code + PKCE flow |
 | `ORCHESTRATOR_OIDC_ISSUER` | No | `""` | OIDC provider issuer URL (e.g. `https://accounts.google.com`) |
 | `ORCHESTRATOR_OIDC_CLIENT_ID` | No | `""` | OIDC application client ID |
@@ -371,6 +391,108 @@ Backend settings use the `ORCHESTRATOR_` prefix; frontend uses `VITE_` variables
 | `ORCHESTRATOR_OIDC_SCOPES` | No | `openid email profile` | OIDC scopes to request |
 | `ORCHESTRATOR_MAX_SNAPSHOTS` | No | `20` | Max snapshots to keep per workflow (0 = unlimited). Pruned daily by Celery Beat |
 | `ORCHESTRATOR_MCP_POOL_SIZE` | No | `4` | Number of warm MCP client sessions in the connection pool |
+
+### 7.1.1 Langfuse observability (optional)
+
+The orchestrator backend supports optional **Langfuse** tracing (workflow traces, per-node spans, LLM generations, and tool spans).
+
+- **Enablement model**: Langfuse uses the shared `LANGFUSE_*` variables (no `ORCHESTRATOR_` prefix). If `LANGFUSE_ENABLED` is unset or falsey, the backend uses no-op stubs (no tracing overhead).
+- **Where to set these**: add them to `orchestrator/backend/.env` (recommended) or export them in the shell before starting `uvicorn` / `celery`.
+
+```env
+# Langfuse Observability (Optional)
+LANGFUSE_ENABLED=true
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com   # or your self-hosted URL (e.g. http://localhost:3000)
+# LANGFUSE_RELEASE=0.9.11
+```
+
+**Verify it’s working:**
+
+1. Start the backend (`uvicorn`) and worker (`celery`) with `LANGFUSE_ENABLED=true`.
+2. Run any workflow from the UI.
+3. Open your Langfuse project and confirm you see a trace for the workflow execution with nested node spans and (when applicable) LLM/tool observations.
+
+### 7.3 Step-by-step recipes
+
+#### 7.3.1 Local development (single machine)
+
+1. **PostgreSQL**: create DB and run migrations:
+
+```bash
+psql -U postgres -c "CREATE DATABASE ae_orchestrator;"
+cd orchestrator/backend
+alembic upgrade head
+```
+
+2. **Backend `.env`**: create `orchestrator/backend/.env`:
+
+```env
+ORCHESTRATOR_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ae_orchestrator
+ORCHESTRATOR_SECRET_KEY=dev-secret
+
+# Local dev: no Celery required
+ORCHESTRATOR_USE_CELERY=false
+
+# Optional LLM provider keys
+ORCHESTRATOR_GOOGLE_API_KEY=
+ORCHESTRATOR_OPENAI_API_KEY=
+ORCHESTRATOR_ANTHROPIC_API_KEY=
+```
+
+3. **Start backend**:
+
+```bash
+cd orchestrator/backend
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+```
+
+4. **Start frontend**:
+
+```bash
+cd orchestrator/frontend
+npm run dev
+```
+
+5. **Optional: enable Langfuse** by adding `LANGFUSE_*` to `orchestrator/backend/.env` and restarting the backend.
+
+#### 7.3.2 Production (recommended)
+
+Use Celery for durable async execution and scheduling.
+
+1. **Provision dependencies**:
+   - PostgreSQL (persistent)
+   - Redis (persistent; shared by API + worker + beat)
+   - Optional: Langfuse (Cloud or self-hosted)
+
+2. **Configure env** (prefer an OS secret store or an `.env` file only readable by the service account):
+
+```env
+ORCHESTRATOR_DATABASE_URL=postgresql://...
+ORCHESTRATOR_REDIS_URL=redis://redis:6379/0
+ORCHESTRATOR_SECRET_KEY=change-me-in-production
+ORCHESTRATOR_USE_CELERY=true
+
+# Security hardening
+ORCHESTRATOR_AUTH_MODE=jwt
+ORCHESTRATOR_VAULT_KEY=...
+ORCHESTRATOR_CORS_ORIGINS=["https://your-orchestrator-ui.example.com"]
+```
+
+3. **Run migrations** (once per deploy):
+
+```bash
+cd orchestrator/backend
+alembic upgrade head
+```
+
+4. **Run services** (separate processes/containers):
+   - **API**: `uvicorn main:app --host 0.0.0.0 --port 8001`
+   - **Worker**: `celery -A app.workers.celery_app worker --loglevel=info`
+   - **Beat**: `celery -A app.workers.celery_app beat --loglevel=info`
+
+5. **Put a reverse proxy in front** (TLS termination + request limits). Ensure the frontend points at the proxy via `VITE_API_URL`.
 
 ### 7.2 Frontend Variables
 

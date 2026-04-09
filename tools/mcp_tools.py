@@ -366,7 +366,7 @@ def _register_local_mcp_tools() -> None:
         def _make_handler_factory(_spec):
             def _factory():
                 def _handler(**kwargs):
-                    return _run_mcp_tool(_spec.name, _spec.structured_handler, **kwargs)
+                    return _run_mcp_tool(_spec.name, _spec.gated_handler, **kwargs)
 
                 return _handler
 

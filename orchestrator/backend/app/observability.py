@@ -26,8 +26,19 @@ _langfuse_available: Optional[bool] = None
 
 
 def _is_enabled() -> bool:
-    from app.config import settings
-    return settings.langfuse_enabled
+    # Prefer the shared Langfuse env vars (same convention as the parent project),
+    # but keep backward compatibility with ORCHESTRATOR_-scoped settings.
+    env_val = (os.environ.get("LANGFUSE_ENABLED") or "").strip().lower()
+    if env_val:
+        return env_val in ("1", "true", "yes", "on")
+    env_val = (os.environ.get("ORCHESTRATOR_LANGFUSE_ENABLED") or "").strip().lower()
+    if env_val:
+        return env_val in ("1", "true", "yes", "on")
+    try:
+        from app.config import settings
+        return bool(getattr(settings, "langfuse_enabled", False))
+    except Exception:
+        return False
 
 
 def get_langfuse():
@@ -41,7 +52,7 @@ def get_langfuse():
 
     if not _is_enabled():
         _langfuse_available = False
-        logger.info("Langfuse observability disabled (LANGFUSE_ENABLED != true)")
+        logger.info("Langfuse observability disabled (set LANGFUSE_ENABLED=true to enable)")
         return None
 
     try:

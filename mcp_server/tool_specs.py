@@ -842,6 +842,21 @@ class MCPToolSpec:
         return _make_structured_handler(self.handler, self.name)
 
     @cached_property
+    def gated_handler(self) -> Callable[..., Any]:
+        """structured_handler wrapped with the server-side mutate/privileged gate.
+
+        Read-only tools return ``structured_handler`` unchanged.  Mutating tiers
+        (``safe_mutation``, ``guarded``, ``privileged``) are wrapped with
+        :func:`mcp_server.auth.make_mutate_guard` so that ``MCP_MUTATE_ENABLED``
+        and ``MCP_PRIVILEGED_ENABLED`` are enforced identically on every
+        registration path (standalone server *and* co-located local bridge).
+        """
+        if self.safety not in ("safe_mutation", "guarded", "privileged"):
+            return self.structured_handler
+        from mcp_server.auth import make_mutate_guard  # late import avoids circular dep
+        return make_mutate_guard(self.safety)(self.structured_handler)
+
+    @cached_property
     def fastmcp_tool(self) -> FastMCPTool:
         return FastMCPTool.from_function(
             self.structured_handler,

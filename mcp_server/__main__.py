@@ -48,13 +48,25 @@ def main() -> None:
     )
 
     from mcp_server.server import mcp
+    from mcp_server.auth import BearerTokenMiddleware
 
-    kwargs: dict = {"transport": args.transport}
     if args.transport in ("sse", "streamable-http"):
+        # For HTTP transports we build the ASGI app manually so we can wrap it
+        # with bearer-token authentication before any MCP traffic is handled.
+        import uvicorn
+
         mcp.settings.host = args.host
         mcp.settings.port = args.port
 
-    mcp.run(**kwargs)
+        raw_app = (
+            mcp.streamable_http_app()
+            if args.transport == "streamable-http"
+            else mcp.sse_app()
+        )
+        app = BearerTokenMiddleware(raw_app, token=MCP_CONFIG["MCP_BEARER_TOKEN"])
+        uvicorn.run(app, host=args.host, port=args.port)
+    else:
+        mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":
