@@ -20,6 +20,8 @@ interface WorkflowState {
   workflows: WorkflowOut[];
   instances: InstanceOut[];
   isDirty: boolean;
+  /** Definition version currently rendered on the canvas, if it maps to a saved workflow. */
+  canvasDefinitionVersion: number | null;
 
   activeInstance: InstanceDetailOut | null;
   isExecuting: boolean;
@@ -112,6 +114,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   workflows: [],
   instances: [],
   isDirty: false,
+  canvasDefinitionVersion: null,
   activeInstance: null,
   isExecuting: false,
   instanceContext: null,
@@ -252,6 +255,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       set({
         currentWorkflow: wf,
         isDirty: false,
+        canvasDefinitionVersion: wf.version,
         loading: false,
         activeInstance: null,
         isDebugMode: false,
@@ -286,7 +290,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         });
       }
 
-      set({ currentWorkflow: wf, isDirty: false, loading: false, notice: null });
+      set({
+        currentWorkflow: wf,
+        isDirty: false,
+        canvasDefinitionVersion: wf.version,
+        loading: false,
+        notice: null,
+      });
       get().fetchWorkflows();
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -313,6 +323,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set({
       currentWorkflow: null,
       isDirty: false,
+      canvasDefinitionVersion: null,
       activeInstance: null,
       isDebugMode: false,
       debugCheckpoints: [],
@@ -337,6 +348,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set({
       currentWorkflow: null,
       isDirty: true,
+      canvasDefinitionVersion: null,
       activeInstance: null,
       isExecuting: false,
       _sseCleanup: null,
@@ -359,6 +371,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set({
       currentWorkflow: null,
       isDirty: true,
+      canvasDefinitionVersion: null,
       activeInstance: null,
       isExecuting: false,
       _sseCleanup: null,
@@ -399,8 +412,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       if (get().isDirty) {
         await get().saveWorkflow();
       }
+      const wfNow = get().currentWorkflow ?? wf;
       const result = await api.executeWorkflow(
-        wf.id,
+        wfNow.id,
         triggerPayload,
         undefined,
         get().runSync,
@@ -410,19 +424,19 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       if (isSync(result)) {
         let detail: InstanceDetailOut;
         try {
-          detail = await api.getInstanceDetail(wf.id, result.instance_id);
+          detail = await api.getInstanceDetail(wfNow.id, result.instance_id);
         } catch {
           detail = {
             id: result.instance_id,
             tenant_id: "",
-            workflow_def_id: wf.id,
+            workflow_def_id: wfNow.id,
             status: result.status,
             current_node_id: null,
             started_at: result.started_at,
             completed_at: result.completed_at,
             created_at: result.started_at ?? new Date().toISOString(),
             logs: [],
-            definition_version_at_start: wf.version,
+            definition_version_at_start: wfNow.version,
           };
         }
         set({
@@ -435,7 +449,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           activeInstance: { ...instance, logs: [] },
           isExecuting: true,
         });
-        get().streamInstance(wf.id, instance.id);
+        get().streamInstance(wfNow.id, instance.id);
       }
     } catch (e) {
       if (e instanceof ApiError && e.status === 504) {
@@ -605,8 +619,19 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   alignCanvasToInstanceVersion: async (workflowId, instance) => {
     const v = instance.definition_version_at_start;
     const wf = get().currentWorkflow;
+    const canvasVersion = get().canvasDefinitionVersion;
     if (v == null || !wf || wf.id !== workflowId) return;
-    if (v === wf.version) return;
+    if (canvasVersion === v) return;
+    if (v === wf.version) {
+      const nodes = (wf.graph_json.nodes ?? []) as Node[];
+      const edges = (wf.graph_json.edges ?? []) as Edge[];
+      useFlowStore.getState().replaceGraph(nodes, edges);
+      set({
+        isDirty: false,
+        canvasDefinitionVersion: wf.version,
+      });
+      return;
+    }
     try {
       const { graph_json } = await api.getGraphAtVersion(workflowId, v);
       const nodes = (graph_json.nodes ?? []) as Node[];
@@ -614,6 +639,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       useFlowStore.getState().replaceGraph(nodes, edges);
       set({
         isDirty: true,
+        canvasDefinitionVersion: v,
         notice: `Canvas restored to definition version ${v} from when this run started. The saved workflow is still version ${wf.version}. Save to keep this graph as a new revision, or reload the workflow to return to the latest version.`,
       });
     } catch {
@@ -629,8 +655,22 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       const detail = await api.getInstanceDetail(workflowId, instanceId);
       await get().alignCanvasToInstanceVersion(workflowId, detail);
       const running = detail.status === "queued" || detail.status === "running";
-      set({ activeInstance: detail, isExecuting: running });
-      get().streamInstance(workflowId, instanceId);
+      const prev = get()._sseCleanup;
+      if (prev) prev();
+      set({
+        activeInstance: detail,
+        isExecuting: running,
+        _sseCleanup: null,
+        streamingTokens: {},
+        isDebugMode: false,
+        debugCheckpoints: [],
+        activeCheckpointIdx: null,
+        activeCheckpointDetail: null,
+        debugLoading: false,
+      });
+      if (running) {
+        get().streamInstance(workflowId, instanceId);
+      }
     } catch (e) {
       set({ error: String(e) });
     }

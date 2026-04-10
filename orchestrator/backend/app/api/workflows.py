@@ -40,6 +40,45 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+def _resolve_graph_json_for_version(
+    db: Session,
+    wf: WorkflowDefinition,
+    tenant_id: str,
+    version: int | None,
+    *,
+    strict: bool,
+) -> dict:
+    """Resolve the graph JSON for a definition version.
+
+    When ``strict`` is False and the historical snapshot is unavailable, fall back
+    to the live definition graph instead of failing the request.
+    """
+    if version is None or version == wf.version:
+        return wf.graph_json
+
+    if version < 1 or version > wf.version:
+        if strict:
+            raise HTTPException(
+                404,
+                f"No graph stored for definition version {version} (current is {wf.version})",
+            )
+        return wf.graph_json
+
+    snap = (
+        db.query(WorkflowSnapshot)
+        .filter_by(workflow_def_id=wf.id, tenant_id=tenant_id, version=version)
+        .first()
+    )
+    if not snap:
+        if strict:
+            raise HTTPException(
+                404,
+                f"Snapshot for definition version {version} not found",
+            )
+        return wf.graph_json
+    return snap.graph_json
+
+
 # ---------------------------------------------------------------------------
 # Workflow Definition CRUD
 # ---------------------------------------------------------------------------
@@ -485,26 +524,14 @@ def get_graph_at_definition_version(
     if not wf:
         raise HTTPException(404, "Workflow not found")
 
-    if version == wf.version:
-        return GraphAtVersionOut(version=wf.version, graph_json=wf.graph_json)
-
-    if version < 1 or version > wf.version:
-        raise HTTPException(
-            404,
-            f"No graph stored for definition version {version} (current is {wf.version})",
-        )
-
-    snap = (
-        db.query(WorkflowSnapshot)
-        .filter_by(workflow_def_id=workflow_id, tenant_id=tenant_id, version=version)
-        .first()
+    graph_json = _resolve_graph_json_for_version(
+        db,
+        wf,
+        tenant_id,
+        version,
+        strict=True,
     )
-    if not snap:
-        raise HTTPException(
-            404,
-            f"Snapshot for definition version {version} not found",
-        )
-    return GraphAtVersionOut(version=snap.version, graph_json=snap.graph_json)
+    return GraphAtVersionOut(version=version, graph_json=graph_json)
 
 
 @router.post("/{workflow_id}/rollback/{version}", response_model=WorkflowOut)
@@ -576,7 +603,13 @@ def get_instance_context(
     # Extract approvalMessage from the suspended node's config
     approval_message: str | None = None
     if instance.current_node_id and instance.status == "suspended":
-        graph = instance.definition.graph_json
+        graph = _resolve_graph_json_for_version(
+            db,
+            instance.definition,
+            tenant_id,
+            instance.definition_version_at_start,
+            strict=False,
+        )
         node = next(
             (n for n in graph.get("nodes", []) if n.get("id") == instance.current_node_id),
             None,

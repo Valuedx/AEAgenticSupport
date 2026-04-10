@@ -25,6 +25,7 @@ export function DebugReplayBar() {
   const loading = useWorkflowStore((s) => s.debugLoading);
   const activeInstance = useWorkflowStore((s) => s.activeInstance);
   const currentWorkflow = useWorkflowStore((s) => s.currentWorkflow);
+  const canvasDefinitionVersion = useWorkflowStore((s) => s.canvasDefinitionVersion);
   const exitDebugMode = useWorkflowStore((s) => s.exitDebugMode);
   const selectCheckpointIdx = useWorkflowStore((s) => s.selectCheckpointIdx);
   const stepDebugPrev = useWorkflowStore((s) => s.stepDebugPrev);
@@ -42,8 +43,8 @@ export function DebugReplayBar() {
 
   const versionDrift =
     activeInstance?.definition_version_at_start != null &&
-    currentWorkflow != null &&
-    activeInstance.definition_version_at_start !== currentWorkflow.version;
+    canvasDefinitionVersion != null &&
+    activeInstance.definition_version_at_start !== canvasDefinitionVersion;
 
   if (!isDebugMode) return null;
 
@@ -91,9 +92,8 @@ export function DebugReplayBar() {
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
             This run started on definition version {activeInstance!.definition_version_at_start}, but the
-            saved workflow is version {currentWorkflow!.version}. The canvas may not match the executed
-            graph even if node IDs line up—open the run from Execution history to restore the historical
-            graph when available.
+            canvas is currently showing definition version {canvasDefinitionVersion}. The saved workflow is
+            version {currentWorkflow!.version}. Replay overlays may not match the executed graph.
           </span>
         </div>
       )}

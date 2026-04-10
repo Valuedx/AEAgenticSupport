@@ -32,7 +32,7 @@ export function InstanceHistoryDialog({ open, onOpenChange }: Props) {
   const instances = useWorkflowStore((s) => s.instances);
   const loading = useWorkflowStore((s) => s.loading);
   const fetchInstances = useWorkflowStore((s) => s.fetchInstances);
-  const streamInstance = useWorkflowStore((s) => s.streamInstance);
+  const openInstanceFromHistory = useWorkflowStore((s) => s.openInstanceFromHistory);
 
   useEffect(() => {
     if (open && currentWorkflow) {
