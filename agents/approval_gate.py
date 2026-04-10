@@ -364,6 +364,7 @@ class ApprovalGate:
         custom = {
             "trigger_workflow": "run workflow",
             "t4_execute_and_poll": "run workflow and wait for the result",
+            "run_related_health_check": "run related application health check",
             "restart_execution": "restart execution",
             "resubmit_execution": "resubmit execution",
             "create_support_ticket": "create support ticket",
@@ -391,6 +392,23 @@ class ApprovalGate:
             if audience == "business":
                 return f"Start {target_human or 'the requested automation'}."
             return f"Run {target_technical or 'the requested workflow'}."
+        if tool_name == "run_related_health_check":
+            health_check_workflow = str(params.get("health_check_workflow") or "").strip()
+            issue_label = str(params.get("issue_label") or "the related application").strip()
+            workflow_human = workflow_name.replace("_", " ").replace("-", " ").strip() if workflow_name else ""
+            health_human = health_check_workflow.replace("_", " ").replace("-", " ").strip() if health_check_workflow else ""
+            if audience == "business":
+                if workflow_human:
+                    return f"Verify the current {issue_label} health before retrying {workflow_human}."
+                return f"Verify the current {issue_label} health before retrying the selected automation."
+            if health_check_workflow:
+                return (
+                    f"Run `{health_check_workflow}` to verify {issue_label} health before retrying "
+                    f"{target_technical or ('`' + workflow_name + '`' if workflow_name else 'the selected execution')}."
+                )
+            if health_human:
+                return f"Run {health_human} to verify {issue_label} health before retrying the selected execution."
+            return f"Verify {issue_label} health before retrying {target_technical or 'the selected execution'}."
         if tool_name == "restart_execution":
             if audience == "business":
                 return f"Restart {target_human or 'the selected automation run'}."
@@ -417,6 +435,10 @@ class ApprovalGate:
             if audience == "business":
                 return "this will start or change a live automation run"
             return "this action can start or change live automation activity"
+        if tool_name == "run_related_health_check":
+            if audience == "business":
+                return "this runs a live health-check automation before any retry or restart"
+            return "this action runs a live health-check workflow before the retry or restart decision"
         if tool_name in {"create_support_ticket", "create_incident_ticket"}:
             if audience == "business":
                 return "this will create a support record that teams may act on"
@@ -472,6 +494,8 @@ class ApprovalGate:
         business_map = {
             "workflow_name": "Process",
             "process_name": "Process",
+            "health_check_workflow": "Health check",
+            "issue_label": "Application",
             "output_path": "Document",
             "input_path": "Document",
             "file_path": "Document",
@@ -482,6 +506,8 @@ class ApprovalGate:
             "workflow_name": "Workflow",
             "process_name": "Process",
             "workflow_id": "Workflow ID",
+            "health_check_workflow": "Health check workflow",
+            "issue_label": "Application",
             "output_path": "Output path",
             "input_path": "Input path",
             "file_path": "File path",
@@ -514,7 +540,7 @@ class ApprovalGate:
             name = ntpath.basename(text) or text
             return name
 
-        if leaf in {"workflow_name", "process_name"} and audience == "business":
+        if leaf in {"workflow_name", "process_name", "health_check_workflow"} and audience == "business":
             return text.replace("_", " ").replace("-", " ").strip()
 
         return f"`{text}`" if audience != "business" else text

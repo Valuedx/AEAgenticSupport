@@ -11,7 +11,7 @@ def test_system_prompt_includes_client_policy_addendum_for_org_code():
     prompt = orchestrator._build_system_prompt(state, tracker=None)
 
     assert "AEGEMS Workflow Policy" in prompt
-    assert "always confirm the related application health before retrying the workflow" in prompt
+    assert "confirm the related application health only when the user asks to retry" in prompt
 
 
 def test_retry_tools_inherit_org_scope_from_state():

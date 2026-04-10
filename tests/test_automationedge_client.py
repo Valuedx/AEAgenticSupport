@@ -861,6 +861,22 @@ class TestAutomationEdgeClient(unittest.TestCase):
         self.assertGreaterEqual(calls["recent_list"], 1)
         client.close()
 
+    def test_extract_workflow_response_message_falls_back_to_error_when_message_is_null(self):
+        message = AutomationEdgeClient.extract_workflow_response_message(
+            {
+                "workflowResponse": json.dumps(
+                    {
+                        "message": None,
+                        "error": "Login issue Life Asia Portal",
+                        "currentStatus": None,
+                        "outputParameters": None,
+                    }
+                )
+            }
+        )
+
+        self.assertEqual(message, "Login issue Life Asia Portal")
+
     def test_get_required_parameters_fallback(self):
         """Verify that get_required_parameters falls back to all parameters if none are marked required."""
         client = AutomationEdgeClient()

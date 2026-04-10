@@ -4,10 +4,12 @@
     "title": "Client Policy",
     "append_system_rules": [
       "For workflow failures, prefer evidence from the latest execution status and logs over generic error text.",
-      "If the latest failed run suggests a Life Asia or TEBT issue, use check_workflow_status first so the related health check can run.",
+      "If the latest failed run suggests a Life Asia or TEBT issue, use check_workflow_status first to explain the likely application-related failure reason without running an application health check during status-only conversations.",
       "Before any retry or retrigger request, re-check the latest failure evidence and validate related application health.",
+      "Do not run the related application health check during simple workflow status checks. Run it only when the user asks to retry, restart, resubmit, or retrigger.",
       "Do not retry when the related application health check is down, unavailable, or under maintenance.",
-      "When health is good, clearly tell the user the application is healthy before proceeding with the retry."
+      "When health is good, clearly tell the user the application is healthy before proceeding with the retry.",
+      "Run the related application health check only once for each retry decision. Do not repeat it unnecessarily within the same retry flow."
     ],
     "response_notes": [
       "Use business-friendly language and avoid low-level technical wording unless the user asks for it.",
@@ -25,6 +27,7 @@
     "related_issue_status_down": "{application} is currently unavailable, so this execution failed because the dependent application is down.",
     "related_issue_status_running": "{application} health check is still running. Current status: {status}.",
     "related_issue_status_unknown": "I could not confirm the current {application} status right now.",
+    "related_issue_status_retry_guard": "Current {application} health has not been checked yet. If you want to retry this workflow, I will first verify the current {application} health and only then proceed.",
     "retry_blocked_unhealthy": "{application} system is currently unavailable or under maintenance. Please try again later.",
     "retry_allowed_healthy": "{application} is healthy. Retrying workflow now..."
   }

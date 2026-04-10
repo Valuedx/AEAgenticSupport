@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -153,6 +154,89 @@ def test_check_workflow_status_new_state_does_not_push_log_fetch_hint():
     assert "status is '**New**'" in result["message"]
     assert "fetch logs if needed" not in result["message"]
     assert "assigned agent is running" in result["message"]
+
+
+def test_check_workflow_status_surfaces_workflow_response_error_when_message_is_null():
+    workflow_response = json.dumps(
+        {
+            "message": None,
+            "error": "Login issue Life Asia Portal",
+            "currentStatus": None,
+            "outputParameters": None,
+        }
+    )
+
+    class StubClient:
+        def resolve_cached_workflow_name(self, workflow_name, user_id="", org_code=""):
+            return workflow_name
+
+        def get_workflow_instances(self, workflow_name, limit=300, status_filter=None):
+            return [
+                {
+                    "id": "2615124",
+                    "automationRequestId": "2615124",
+                    "workflowName": workflow_name,
+                    "status": "Failure",
+                    "createdDate": "2026-04-08T04:10:00+00:00",
+                }
+            ]
+
+        def refresh_execution_payload(self, execution_id, record=None, workflow_name="", recent_limit=25):
+            enriched = dict(record or {})
+            enriched["workflowResponse"] = workflow_response
+            return enriched
+
+    client = StubClient()
+    with patch("tools.status_tools.get_ae_client", return_value=client), patch.dict(
+        status_tools.CONFIG,
+        {
+            "DISPLAY_TIMEZONE": "Asia/Kolkata",
+            "ENABLE_RELATED_ISSUE_HEALTH_CHECK": False,
+        },
+        clear=False,
+    ):
+        result = status_tools.check_workflow_status("Daily_claim_report_bot")
+
+    assert result["latest_status"] == "Failure"
+    assert result["workflow_response_message"] == "Login issue Life Asia Portal"
+    assert result["error_message"] == "Login issue Life Asia Portal"
+    assert "Login issue Life Asia Portal" in result["message"]
+    assert "fetch logs if needed" not in result["message"]
+
+
+def test_get_execution_status_prefers_workflow_response_error_over_log_follow_up():
+    workflow_response = json.dumps(
+        {
+            "message": None,
+            "error": "Login issue Life Asia Portal",
+            "currentStatus": None,
+            "outputParameters": None,
+        }
+    )
+
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {
+                "id": execution_id,
+                "automationRequestId": execution_id,
+                "status": "Failure",
+                "workflowName": "Daily_claim_report_bot",
+                "workflowResponse": workflow_response,
+            }
+
+    client = StubClient()
+    with patch("tools.status_tools.get_ae_client", return_value=client), patch.dict(
+        status_tools.CONFIG,
+        {"ENABLE_RELATED_ISSUE_HEALTH_CHECK": False},
+        clear=False,
+    ):
+        result = status_tools.get_execution_status("2615124")
+
+    assert result["status"] == "Failure"
+    assert result["message"] == "Login issue Life Asia Portal"
+    assert result["workflow_response_message"] == "Login issue Life Asia Portal"
+    assert result["error_message"] == "Login issue Life Asia Portal"
+    assert "Use execution logs only if you need deeper technical details." in result["recommendation"]
 
 
 def test_list_recent_failures_uses_completed_time_for_failure_summary():

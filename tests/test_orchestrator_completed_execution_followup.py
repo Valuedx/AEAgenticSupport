@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from agents.orchestrator import Orchestrator
 from state.conversation_state import ConversationState
+from tools.registry import tool_registry
 
 
 def test_completed_execution_fresh_run_request_rewrites_resubmit_to_trigger_workflow():
@@ -494,3 +495,53 @@ def test_failed_execution_trigger_workflow_followup_rewrites_to_restart():
         "execution_id": "2611752",
         "workflow_name": "timesheet_report_generation_v5",
     }
+
+
+def test_failed_execution_restart_followup_stages_related_health_check_approval():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.conversation_id = "conv-related-health"
+    state.user_id = "webchat:pooja"
+    state.log_tool_call(
+        "check_workflow_status",
+        {"workflow_name": "Daily_claim_report_bot"},
+        {
+            "success": True,
+            "execution_id": "2615124",
+            "workflow_name": "Daily_claim_report_bot",
+            "status": "Failure",
+        },
+        True,
+    )
+
+    tool_name, tool_args = orchestrator._rewrite_trigger_followup_from_failed_context(
+        user_message="can you retrigger again",
+        state=state,
+        tool_name="trigger_workflow",
+        tool_args={"workflow_name": "Daily_claim_report_bot", "parameters": {}},
+    )
+
+    with patch(
+        "tools.remediation_tools.inspect_related_retry_health_requirement",
+        return_value={
+            "execution_id": "2615124",
+            "workflow_name": "Daily_claim_report_bot",
+            "issue_type": "life_asia",
+            "issue_label": "Life Asia",
+            "health_check_label": "Life Asia health check",
+            "health_check_workflow": "TEBT_Health_Check",
+            "failure_reason": "Login issue Life Asia Portal.",
+        },
+    ):
+        prompt = orchestrator._maybe_queue_retry_health_check_approval(
+            state=state,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_def=tool_registry.get_tool(tool_name),
+        )
+
+    assert tool_name == "restart_execution"
+    assert state.pending_action is not None
+    assert state.pending_action["tool"] == "run_related_health_check"
+    assert state.pending_action["follow_up_action"]["tool"] == "restart_execution"
+    assert "TEBT_Health_Check" in prompt

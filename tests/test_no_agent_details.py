@@ -280,11 +280,12 @@ def test_get_execution_status_surfaces_related_app_failure_summary():
             "issue_label": "Life Asia",
             "health_check_label": "Life Asia health check",
             "workflow_name": "Life_Asia_Health_Check",
-            "status": "FAILED",
-            "request_id": "HC-002",
-            "message": "Life Asia is currently unavailable.",
+            "status": "NOT_CHECKED",
+            "request_id": "",
+            "message": "Current Life Asia health has not been checked yet. If you want to retry this workflow, I will first verify the current Life Asia health and only then proceed.",
             "failure_reason": "Life Asia connection timeout.",
-            "application_status": "down",
+            "application_status": "not_checked",
+            "health_check_run": False,
         },
     ):
         result = status_tools.get_execution_status("22887")
@@ -292,9 +293,9 @@ def test_get_execution_status_surfaces_related_app_failure_summary():
     assert result["status"] == "Failure"
     assert "Status: Failed." in result["message"]
     assert "Likely cause: Life Asia connection timeout." in result["message"]
-    assert "Life Asia is currently unavailable" in result["message"]
+    assert "Current Life Asia health has not been checked yet" in result["message"]
     assert result["failure_reason"] == "Life Asia connection timeout."
-    assert result["related_issue_check"]["application_status"] == "down"
+    assert result["related_issue_check"]["application_status"] == "not_checked"
 
 
 def test_t4_execute_and_poll_surfaces_completed_workflow_response_message():

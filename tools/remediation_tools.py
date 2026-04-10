@@ -156,34 +156,33 @@ def _evaluate_related_issue_health(
     execution_id: str,
     org_code: str = "",
 ) -> dict | None:
-    from tools.log_tools import get_execution_logs
-    from tools.status_tools import _detect_related_issue, _run_related_health_check
-
-    request_id = str(execution_id or "").strip()
-    if not request_id:
+    requirement = _inspect_related_retry_health_requirement(
+        client,
+        execution_id=execution_id,
+    )
+    if not requirement:
         return None
 
-    try:
-        log_result = get_execution_logs(request_id, tail=0)
-    except Exception as exc:
-        logger.warning("Health gate: log fetch failed for execution %s: %s", request_id, exc)
-        return None
+    from tools.status_tools import _run_related_health_check
 
-    issue_info = _detect_related_issue(log_result)
-    if not issue_info:
-        return None
+    issue_info = {
+        "issue_type": str(requirement.get("issue_type") or "").strip(),
+        "issue_label": str(requirement.get("issue_label") or "").strip(),
+        "health_check_label": str(requirement.get("health_check_label") or "").strip(),
+        "workflow_name": str(requirement.get("health_check_workflow") or "").strip(),
+    }
 
     try:
         health_result = _run_related_health_check(client, issue_info, org_code=org_code)
     except Exception as exc:
         logger.warning(
             "Health gate: health check trigger failed for execution %s issue=%s: %s",
-            request_id,
+            str(execution_id or "").strip() or "unknown",
             issue_info.get("issue_type"),
             exc,
         )
         return {
-            **issue_info,
+            **requirement,
             "request_id": "",
             "status": "ERROR",
             "message": f"{issue_info.get('health_check_label', 'Related health check')} could not be triggered: {exc}",
@@ -192,9 +191,120 @@ def _evaluate_related_issue_health(
 
     health_result["passed"] = _is_success_status(str(health_result.get("status") or ""))
     return {
-        **issue_info,
+        **requirement,
         **health_result,
     }
+
+
+def _inspect_related_retry_health_requirement(
+    client,
+    *,
+    execution_id: str,
+    workflow_name: str = "",
+) -> dict | None:
+    from tools.log_tools import get_execution_logs
+    from tools.status_tools import _detect_related_issue, _extract_related_issue_reason
+
+    request_id = str(execution_id or "").strip()
+    if not request_id:
+        return None
+
+    status_payload: dict = {}
+    resolved_workflow_name = str(workflow_name or "").strip()
+    if hasattr(client, "get_execution_status"):
+        try:
+            status_payload = client.get_execution_status(request_id) or {}
+            if isinstance(status_payload, dict):
+                resolved_workflow_name = (
+                    _extract_workflow_name_from_execution_status(status_payload)
+                    or resolved_workflow_name
+                )
+        except Exception as exc:
+            logger.debug(
+                "Health gate: could not load execution status for %s: %s",
+                request_id,
+                exc,
+            )
+            status_payload = {}
+
+    refresher = getattr(type(client), "refresh_execution_payload", None)
+    if callable(refresher):
+        try:
+            refreshed = refresher(
+                client,
+                request_id,
+                record=status_payload if isinstance(status_payload, dict) else None,
+                workflow_name=resolved_workflow_name,
+            )
+            if isinstance(refreshed, dict):
+                status_payload = refreshed
+                resolved_workflow_name = (
+                    _extract_workflow_name_from_execution_status(status_payload)
+                    or resolved_workflow_name
+                )
+        except Exception as exc:
+            logger.debug(
+                "Health gate: could not refresh execution payload for %s: %s",
+                request_id,
+                exc,
+            )
+
+    log_result = None
+    try:
+        log_result = get_execution_logs(request_id, tail=0)
+    except Exception as exc:
+        logger.warning("Health gate: log fetch failed for execution %s: %s", request_id, exc)
+        log_result = None
+
+    issue_info = _detect_related_issue(log_result) if isinstance(log_result, dict) else None
+    failure_reason = _extract_related_issue_reason(log_result, issue_info) if issue_info else ""
+
+    if not issue_info:
+        status_detail = str(
+            _extract_workflow_response_message(status_payload)
+            or (status_payload.get("errorMessage") if isinstance(status_payload, dict) else "")
+            or (status_payload.get("errorDetails") if isinstance(status_payload, dict) else "")
+            or (status_payload.get("workflowResponse") if isinstance(status_payload, dict) else "")
+            or ""
+        ).strip()
+        if status_detail:
+            synthetic_signal = {
+                "report": status_detail,
+                "message": status_detail,
+                "error": status_detail,
+                "workflow_name": resolved_workflow_name,
+            }
+            issue_info = _detect_related_issue(synthetic_signal)
+            if issue_info:
+                failure_reason = _extract_related_issue_reason(synthetic_signal, issue_info)
+
+    if not issue_info:
+        return None
+
+    return {
+        "execution_id": request_id,
+        "workflow_name": resolved_workflow_name,
+        "issue_type": str(issue_info.get("issue_type") or "").strip(),
+        "issue_label": str(issue_info.get("issue_label") or "").strip(),
+        "health_check_label": str(issue_info.get("health_check_label") or "").strip(),
+        "health_check_workflow": str(issue_info.get("workflow_name") or "").strip(),
+        "failure_reason": failure_reason,
+    }
+
+
+def inspect_related_retry_health_requirement(
+    execution_id: str,
+    workflow_name: str = "",
+    user_id: str = "",
+    org_code: str = "",
+) -> dict | None:
+    del user_id, org_code
+    client = get_ae_client()
+    return _inspect_related_retry_health_requirement(
+        client,
+        execution_id=execution_id,
+        workflow_name=workflow_name,
+    )
 
 
 def _apply_related_issue_health_gate(
@@ -846,6 +956,123 @@ def _friendly_status_message(
 # Remediation functions
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+def run_related_health_check(
+    execution_id: str,
+    workflow_name: str = "",
+    user_id: str = "",
+    org_code: str = "",
+    health_check_workflow: str = "",
+    issue_label: str = "",
+) -> dict:
+    """Run the configured related application health check before retry actions."""
+    del user_id
+    client = get_ae_client()
+    resolved_org = str(org_code or default_org_code()).strip()
+
+    requirement = _inspect_related_retry_health_requirement(
+        client,
+        execution_id=str(execution_id),
+        workflow_name=workflow_name,
+    )
+    if not requirement:
+        clean_workflow = str(workflow_name or "this workflow").strip() or "this workflow"
+        return {
+            "success": True,
+            "health_gate_required": False,
+            "health_gate_passed": True,
+            "workflow_name": clean_workflow,
+            "execution_id": str(execution_id or "").strip(),
+            "message": f"No related application health check is required before retrying **{clean_workflow}**.",
+        }
+
+    from tools.status_tools import _classify_related_health_status, _run_related_health_check
+
+    issue_info = {
+        "issue_type": str(requirement.get("issue_type") or "").strip(),
+        "issue_label": str(requirement.get("issue_label") or issue_label or "Related application").strip(),
+        "health_check_label": str(requirement.get("health_check_label") or "").strip(),
+        "workflow_name": str(
+            requirement.get("health_check_workflow") or health_check_workflow or ""
+        ).strip(),
+    }
+
+    try:
+        health_result = _run_related_health_check(client, issue_info, org_code=resolved_org)
+    except Exception as exc:
+        error_text = (
+            f"I couldn't run {issue_info.get('health_check_label') or 'the related health check'} "
+            f"before retrying this workflow: {exc}"
+        )
+        return {
+            "success": False,
+            "blocked_reason": "health_check_error",
+            "workflow_name": str(requirement.get("workflow_name") or workflow_name or "").strip(),
+            "execution_id": str(execution_id or "").strip(),
+            "issue_label": issue_info["issue_label"],
+            "health_check_workflow": issue_info["workflow_name"],
+            "message": error_text,
+            "error": error_text,
+        }
+
+    health_status = str(health_result.get("status") or "").strip()
+    health_message = str(health_result.get("message") or "").strip()
+    health_state = _classify_related_health_status(
+        health_status,
+        has_request_id=bool(str(health_result.get("request_id") or "").strip()),
+    )
+    passed = _is_success_status(health_status)
+    resolved_workflow = str(requirement.get("workflow_name") or workflow_name or "").strip()
+    result = {
+        "workflow_name": resolved_workflow,
+        "execution_id": str(execution_id or "").strip(),
+        "issue_type": issue_info["issue_type"],
+        "issue_label": issue_info["issue_label"],
+        "health_check_label": issue_info["health_check_label"],
+        "health_check_workflow": issue_info["workflow_name"],
+        "health_status": health_status,
+        "health_state": health_state,
+        "health_gate_required": True,
+        "health_gate_passed": passed,
+        "health_result": health_result,
+    }
+    if passed:
+        result.update(
+            {
+                "success": True,
+                "message": health_message or f"{issue_info['issue_label']} is currently up and running.",
+            }
+        )
+        return result
+
+    if health_state == "pending":
+        next_text = (
+            f"{issue_info['issue_label']} health check is still running. "
+            "I have not started the retry or restart."
+        )
+    else:
+        next_text = format_client_message(
+            "retry_blocked_unhealthy",
+            "{application} system is currently unavailable or under maintenance. Please try again later.",
+            org_code=resolved_org,
+            application=issue_info["issue_label"],
+            workflow_name=resolved_workflow,
+            health_message=health_message,
+        )
+
+    full_message = "\n\n".join(
+        part for part in [health_message, next_text] if str(part or "").strip()
+    ).strip()
+    result.update(
+        {
+            "success": False,
+            "blocked_reason": "health_check_failed",
+            "message": full_message,
+            "error": full_message,
+        }
+    )
+    return result
+
+
 def restart_execution(execution_id: str,
                       workflow_name: str = "Unknown",
                       from_checkpoint: bool = True,
@@ -854,7 +1081,8 @@ def restart_execution(execution_id: str,
                       requested_by: str = None,
                       case_id: str = None,
                       dry_run: bool = False,
-                      org_code: str = "") -> dict:
+                      org_code: str = "",
+                      _skip_retry_health_gate: bool = False) -> dict:
     """Restart a failed execution."""
     if workflow_name != "Unknown" and workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
         return {
@@ -908,22 +1136,23 @@ def restart_execution(execution_id: str,
 
     resolved_org = str(org_code or default_org_code()).strip()
     retry_health_gate = None
-    try:
-        retry_health_gate = _pre_retry_health_gate(
-            client,
-            execution_id=str(execution_id),
-            workflow_name=workflow_name,
-            org_code=resolved_org,
-        )
-    except _HealthGateBlockError as hg_err:
-        return {
-            "success": False,
-            "blocked_reason": "health_check_failed",
-            "message": str(hg_err),
-            "error": str(hg_err),
-            "workflow_name": workflow_name,
-            "execution_id": execution_id,
-        }
+    if not _skip_retry_health_gate:
+        try:
+            retry_health_gate = _pre_retry_health_gate(
+                client,
+                execution_id=str(execution_id),
+                workflow_name=workflow_name,
+                org_code=resolved_org,
+            )
+        except _HealthGateBlockError as hg_err:
+            return {
+                "success": False,
+                "blocked_reason": "health_check_failed",
+                "message": str(hg_err),
+                "error": str(hg_err),
+                "workflow_name": workflow_name,
+                "execution_id": execution_id,
+            }
 
     # 2. Check Protection
     if workflow_name != "Unknown" and workflow_name in CONFIG.get("PROTECTED_WORKFLOWS", []):
@@ -993,6 +1222,7 @@ def restart_execution(execution_id: str,
                     reason=f"{reason} (auto-resubmit: restart limit AE-2624 reached)",
                     user_id=user_id,
                     org_code=org_code,
+                    _skip_retry_health_gate=True,
                 )
                 return {
                     **resubmit_resp,
@@ -1029,7 +1259,8 @@ def resubmit_execution(execution_id: str,
                        from_failure_point: bool = True,
                        reason: str = "Resubmitted by support agent",
                        user_id: str = "",
-                       org_code: str = "") -> dict:
+                       org_code: str = "",
+                       _skip_retry_health_gate: bool = False) -> dict:
     """Resubmit a failed execution as a NEW run."""
     client = get_ae_client()
     status_resp = None
@@ -1062,22 +1293,23 @@ def resubmit_execution(execution_id: str,
 
     resolved_org = str(org_code or default_org_code()).strip()
     retry_health_gate = None
-    try:
-        retry_health_gate = _pre_retry_health_gate(
-            client,
-            execution_id=str(execution_id),
-            workflow_name=workflow_name,
-            org_code=resolved_org,
-        )
-    except _HealthGateBlockError as hg_err:
-        return {
-            "success": False,
-            "blocked_reason": "health_check_failed",
-            "message": str(hg_err),
-            "error": str(hg_err),
-            "workflow_name": workflow_name,
-            "execution_id": execution_id,
-        }
+    if not _skip_retry_health_gate:
+        try:
+            retry_health_gate = _pre_retry_health_gate(
+                client,
+                execution_id=str(execution_id),
+                workflow_name=workflow_name,
+                org_code=resolved_org,
+            )
+        except _HealthGateBlockError as hg_err:
+            return {
+                "success": False,
+                "blocked_reason": "health_check_failed",
+                "message": str(hg_err),
+                "error": str(hg_err),
+                "workflow_name": workflow_name,
+                "execution_id": execution_id,
+            }
 
     try:
         resp = client.resubmit_request(
@@ -1679,6 +1911,52 @@ def enable_schedule(schedule_id: str, reason: str = "") -> dict:
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Register all remediation tools
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+tool_registry.register(
+    ToolDefinition(
+        name="run_related_health_check",
+        description=(
+            "Run the configured Life Asia or TEBT application health-check workflow "
+            "before a restart, retrigger, or resubmit decision. "
+            "Use this only when a failed execution looks related to one of those applications."
+        ),
+        category="remediation",
+        tier="medium_risk",
+        parameters={
+            "execution_id": {
+                "type": "string",
+                "description": "Failed execution ID that needs a retry decision",
+            },
+            "workflow_name": {
+                "type": "string",
+                "description": "Original workflow name tied to the failed execution",
+            },
+            "org_code": {
+                "type": "string",
+                "description": "Tenant org code used for policy and health-check resolution.",
+            },
+            "health_check_workflow": {
+                "type": "string",
+                "description": "Optional pre-resolved health-check workflow name for the approval prompt.",
+            },
+            "issue_label": {
+                "type": "string",
+                "description": "Optional related application label such as Life Asia or TEBT.",
+            },
+            "user_id": {
+                "type": "string",
+                "description": "User id from conversation context for scoped retry handling.",
+            },
+        },
+        required_params=["execution_id"],
+        use_when=(
+            "Before restart_execution or resubmit_execution when the failed run appears to be caused by "
+            "Life Asia connectivity or TEBT login or portal issues."
+        ),
+        avoid_when="Simple status-only checks that do not plan to retry the failed run.",
+    ),
+    run_related_health_check,
+)
 
 tool_registry.register(
     ToolDefinition(

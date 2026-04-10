@@ -13,7 +13,7 @@ def test_build_client_prompt_addendum_includes_org_specific_prompt_text():
     prompt = build_client_prompt_addendum(org_code="AEGEMS", metadata={"org_code": "AEGEMS"})
 
     assert "AEGEMS Workflow Policy" in prompt
-    assert "always confirm the related application health before retrying the workflow" in prompt
+    assert "confirm the related application health only when the user asks to retry" in prompt
 
 
 def test_format_client_message_uses_client_override():

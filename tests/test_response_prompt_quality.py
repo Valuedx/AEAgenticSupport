@@ -122,3 +122,31 @@ def test_business_clarification_prompt_stays_chat_friendly():
     assert "workflow_id" not in prompt
     assert "user_id" not in prompt
     assert "org_code" not in prompt
+
+
+def test_related_health_check_approval_prompt_is_clear():
+    gate = ApprovalGate()
+
+    prompt = gate.format_approval_prompt(
+        ApprovalRequest(
+            tool_name="run_related_health_check",
+            tool_params={
+                "execution_id": "2615124",
+                "workflow_name": "Daily_claim_report_bot",
+                "health_check_workflow": "TEBT_Health_Check",
+                "issue_label": "Life Asia",
+                "org_code": "AEGEMS",
+            },
+            tier="medium_risk",
+            reason="approval required",
+            summary="run_related_health_check on TEBT_Health_Check",
+        ),
+        audience="technical",
+    )
+
+    assert "I'm ready to run this action." in prompt
+    assert "Run `TEBT_Health_Check` to verify Life Asia health" in prompt
+    assert "Workflow: `Daily_claim_report_bot`" in prompt
+    assert "Health check workflow: `TEBT_Health_Check`" in prompt
+    assert "Application: `Life Asia`" in prompt
+    assert "org_code" not in prompt

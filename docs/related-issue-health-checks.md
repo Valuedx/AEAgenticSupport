@@ -2,10 +2,12 @@
 
 ## Purpose
 
-This change adds an extra condition on top of the existing `check_workflow_status` flow.
+This change adds a related-issue diagnosis flow on top of the existing `check_workflow_status` flow, and a strict health-check gate on retry or retrigger actions.
 
 It does **not** replace the current behavior.
-It only adds a related-system health check when:
+It does **not** run a related-system health check during a simple workflow status request.
+
+It only adds related-app diagnosis when:
 
 1. the latest execution is a failure, and
 2. the latest failure logs suggest either:
@@ -59,13 +61,12 @@ Added helper methods:
 - `_run_related_health_check(...)`
 - `_maybe_add_related_issue_health_check(...)`
 
-What they do:
+What they do now:
 
 - collect text from execution-log output
 - classify whether the failure looks like `Life Asia` or `TEBT`
-- trigger the mapped health-check workflow
-- run it using the AE admin/service-account path
-- append a business-readable summary into the status result
+- append a business-readable failure summary into the status result
+- defer the actual application health check until the user asks to retry, restart, resubmit, or retrigger
 
 ### 4. Additive enrichment inside existing status flow
 
@@ -74,10 +75,10 @@ File: [status_tools.py](d:/AG_V2/AEAgenticSupport/tools/status_tools.py)
 Inside `check_workflow_status(...)`, after the existing latest-status logic is built:
 
 - the code now calls `_maybe_add_related_issue_health_check(latest)`
-- if a related issue is detected, it appends extra text to the existing message
+- if a related issue is detected, it appends likely-cause guidance to the existing message
 - the result payload also includes `related_issue_check`
 
-This means the old status response is preserved and only enriched when the new condition matches.
+This means the old status response is preserved and only enriched when the new condition matches. It does **not** trigger the application health workflow during status checks.
 
 ### 5. Prompt guidance for orchestrator
 
@@ -85,8 +86,9 @@ File: [orchestrator.py](d:/AG_V2/AEAgenticSupport/agents/orchestrator.py)
 
 Added one extra rule in the system prompt:
 
-- if the user asks for process status, failure reason, or health check, the agent should call `check_workflow_status` first
-- if that tool returns a related issue check/result, the agent should surface it clearly
+- if the user asks for process status or failure reason, the agent should call `check_workflow_status` first
+- if that tool returns a related issue diagnosis, the agent should surface it clearly
+- if the user asks to retry or retrigger, the agent should then run the related application health check once before allowing the retry
 
 This improves scenario handling from the prompt side without changing the core old flow.
 
@@ -96,8 +98,9 @@ File: [test_related_issue_health_checks.py](d:/AG_V2/AEAgenticSupport/tests/test
 
 Added tests for:
 
-- Life Asia failure detection -> mapped health check trigger
-- TEBT failure detection -> mapped health check trigger
+- Life Asia failure detection -> status summary without running health check
+- TEBT failure detection -> status summary without running health check
+- retry/retrigger flow -> health check still runs before action
 
 Verified with:
 
@@ -111,7 +114,7 @@ Result:
 
 ## Trigger Logic
 
-The extra health-check branch runs only when all of these are true:
+The status-side related-issue diagnosis runs only when all of these are true:
 
 1. `ENABLE_RELATED_ISSUE_HEALTH_CHECK=true`
 2. `check_workflow_status(...)` is called for a workflow/process
@@ -121,11 +124,13 @@ The extra health-check branch runs only when all of these are true:
    - `Life Asia` + connection/system terms
    - `TEBT` + login/portal/auth/session terms
 
-If any of those do not match, no health check is triggered.
+If any of those do not match, no related-app diagnosis is added.
+
+The actual application health check runs only when the user asks to retry, restart, resubmit, or retrigger the failed workflow.
 
 ## Admin Scope Behavior
 
-The health check is intentionally triggered using the AE admin/service account path, not user-wise workflow access.
+When a retry or retrigger is requested, the health check is intentionally triggered using the AE admin/service account path, not user-wise workflow access.
 
 Reason:
 
@@ -140,7 +145,7 @@ These parts were intentionally left unchanged:
 
 - existing `check_workflow_status` lookup flow
 - existing user-wise access logic for normal workflows
-- existing remediation/retry flow
+- existing remediation/retry flow, except that the health gate now belongs there instead of the status-only path
 - existing log retrieval flow
 - existing chatbot behavior for unrelated failures
 
@@ -155,10 +160,9 @@ If the latest failure logs show a Life Asia connection issue:
 - the bot still returns the normal process status
 - then it appends:
   - detected `Life Asia` issue
-  - triggered `Life Asia health check`
-  - result such as:
-    - `System is down. Please investigate system connectivity.`
-    - or `System is up. Issue may be intermittent. Retry recommended.`
+  - likely cause summary
+  - guidance such as:
+    - `If you want to retry this workflow, I will first verify the current Life Asia health and only then proceed.`
 
 ### TEBT related
 
@@ -167,10 +171,9 @@ If the latest failure logs show a TEBT login/portal issue:
 - the bot still returns the normal process status
 - then it appends:
   - detected `TEBT` issue
-  - triggered `TEBT health check`
-  - result such as:
-    - `Login service down. Please check credentials/server.`
-    - or `Portal accessible. Check bot credentials or session issue.`
+  - likely cause summary
+  - guidance such as:
+    - `If you want to retry this workflow, I will first verify the current TEBT health and only then proceed.`
 
 ## Files Changed
 

@@ -473,7 +473,10 @@ def _build_related_issue_status_message(
     failure_reason = _normalize_related_issue_sentence(related_issue_check.get("failure_reason") or "")
     health_status = str(related_issue_check.get("status") or "").strip()
     health_state = str(related_issue_check.get("application_status") or "").strip().lower()
-    if not health_state:
+    health_check_run = bool(related_issue_check.get("health_check_run"))
+    if not health_check_run and health_state in {"", "unknown"}:
+        health_state = "not_checked"
+    elif not health_state:
         health_state = _classify_related_health_status(
             health_status,
             has_request_id=bool(str(related_issue_check.get("request_id") or "").strip()),
@@ -490,7 +493,18 @@ def _build_related_issue_status_message(
     else:
         parts.append(f"Likely cause: {issue_label} related issue.")
 
-    if health_state == "up":
+    if health_state == "not_checked":
+        parts.append(
+            format_client_message(
+                "related_issue_status_retry_guard",
+                "Current {application} health has not been checked yet. If you want to retry this workflow, I will first verify the current {application} health and only then proceed.",
+                org_code=org_code,
+                application=issue_label,
+                workflow_name=display_name,
+                status=health_status,
+            )
+        )
+    elif health_state == "up":
         parts.append(
             format_client_message(
                 "related_issue_status_up",
@@ -679,6 +693,12 @@ def _maybe_add_related_issue_health_check(
     latest: dict[str, Any],
     org_code: str = "",
 ) -> dict[str, Any] | None:
+    """Diagnose Life Asia / TEBT related failures without running a health check.
+
+    Status checks should explain the likely application-related reason, but the
+    actual application health validation is deferred until the user asks to
+    retry or retrigger the failed workflow.
+    """
     if not bool(CONFIG.get("ENABLE_RELATED_ISSUE_HEALTH_CHECK", False)):
         return None
 
@@ -702,36 +722,29 @@ def _maybe_add_related_issue_health_check(
     if not issue_info:
         return None
     failure_reason = _extract_related_issue_reason(log_result, issue_info)
-
-    client = get_ae_client()
-    try:
-        health_result = _run_related_health_check(client, issue_info, org_code=org_code)
-    except Exception as exc:
-        logger.warning(
-            "Related health check trigger failed for issue=%s workflow=%s: %s",
-            issue_info.get("issue_type"),
-            issue_info.get("workflow_name"),
-            exc,
-        )
-        return {
-            "issue_type": issue_info.get("issue_type", ""),
-            "issue_label": issue_info.get("issue_label", ""),
-            "health_check_label": issue_info.get("health_check_label", ""),
-            "workflow_name": issue_info.get("workflow_name", ""),
-            "request_id": "",
-            "status": "ERROR",
-            "used_admin_scope": bool(CONFIG.get("RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)),
-            "message": f"{issue_info.get('health_check_label', 'Related health check')} could not be triggered: {exc}",
-            "failure_reason": failure_reason,
-            "application_status": "unknown",
-        }
-
-    health_result["failure_reason"] = failure_reason
-    health_result["application_status"] = _classify_related_health_status(
-        str(health_result.get("status") or ""),
-        has_request_id=bool(str(health_result.get("request_id") or "").strip()),
+    issue_label = str(issue_info.get("issue_label") or "Related application").strip()
+    guidance = format_client_message(
+        "related_issue_status_retry_guard",
+        "Current {application} health has not been checked yet. If you want to retry this workflow, I will first verify the current {application} health and only then proceed.",
+        org_code=org_code,
+        application=issue_label,
+        workflow_name=str(latest.get("workflowName") or latest.get("workflow_name") or "").strip(),
+        status="NOT_CHECKED",
     )
-    return health_result
+    return {
+        "issue_type": issue_info.get("issue_type", ""),
+        "issue_label": issue_label,
+        "health_check_label": issue_info.get("health_check_label", ""),
+        "workflow_name": issue_info.get("workflow_name", ""),
+        "request_id": "",
+        "status": "NOT_CHECKED",
+        "used_admin_scope": False,
+        "message": guidance,
+        "failure_reason": failure_reason,
+        "application_status": "not_checked",
+        "health_check_run": False,
+        "retry_health_check_required": True,
+    }
 
 
 def check_workflow_status(
@@ -839,7 +852,21 @@ def check_workflow_status(
 
     # Latest instance details - ALWAYS present regardless of 24h
     latest = instances[0]
+    latest_execution_id = _extract_execution_ref(latest)
+    if latest_execution_id:
+        latest = _maybe_refresh_execution_payload(client, latest_execution_id, latest)
     latest_ts = _parse_timestamp(latest.get("createdDate") or latest.get("started_at"))
+    latest_status = latest.get("status")
+    normalized_latest_status = str(latest_status or "").strip().upper()
+    latest_detail_msg = _extract_workflow_response_message(latest)
+    latest_error_message = ""
+    if normalized_latest_status in {"FAILURE", "FAILED", "ERROR"}:
+        latest_error_message = str(
+            latest.get("errorMessage")
+            or latest.get("errorDetails")
+            or latest_detail_msg
+            or ""
+        ).strip()
     
     # 24-hour summary logic
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
@@ -891,14 +918,20 @@ def check_workflow_status(
         execution_id=_extract_execution_ref(latest),
     ) if query_name else {}
     if query_name:
-        latest_status = latest.get("status")
         time_str = f"on {_format_display_time(latest_ts)}" if latest_ts else "recently"
         msg = f"The absolute latest execution for bot '**{display_name}**' was {time_str} and its status is '**{latest_status}**'."
         if latest_ts and latest_ts < cutoff:
             msg += f" (Note: This run is older than 24 hours)."
-        normalized_latest_status = str(latest_status or "").strip().upper()
-        if normalized_latest_status in {"FAILURE", "FAILED", "ERROR", "COMPLETE", "COMPLETED"}:
-            msg += f" You can use execution ID `{latest.get('id') or latest.get('automationRequestId')}` to fetch logs if needed."
+        if normalized_latest_status in {"FAILURE", "FAILED", "ERROR"}:
+            if latest_error_message:
+                msg += f" Error: {latest_error_message}"
+            else:
+                msg += f" You can use execution ID `{latest.get('id') or latest.get('automationRequestId')}` to fetch logs if needed."
+        elif normalized_latest_status in {"COMPLETE", "COMPLETED"}:
+            if latest_detail_msg:
+                msg += f" Result: {latest_detail_msg}"
+            else:
+                msg += f" You can use execution ID `{latest.get('id') or latest.get('automationRequestId')}` to fetch logs if needed."
         elif normalized_latest_status in {"NEW", "QUEUED", "PENDING"}:
             msg += (
                 " The request is still waiting. I will first verify whether the assigned agent is running and, "
@@ -923,11 +956,11 @@ def check_workflow_status(
         "bot_name": display_name,
         "workflow_name": display_name,
         "is_global_check": not bool(query_name),
-        "latest_status": latest.get("status"),
+        "latest_status": latest_status,
         "latest_execution": {
             "id": latest.get("id") or latest.get("automationRequestId"),
             "bot_name": latest.get("workflowName") or (latest.get("workflowConfiguration") or {}).get("name") or "Unknown Bot",
-            "status": latest.get("status"),
+            "status": latest_status,
             "timestamp": str(latest_ts) if latest_ts else "Unknown"
         },
         "latest_execution_id": latest.get("id") or latest.get("automationRequestId"),
@@ -942,6 +975,10 @@ def check_workflow_status(
         result["assigned_agents"] = latest_diag.get("assigned_agents") or []
         result["other_execution_id"] = latest_diag.get("other_execution_id") or ""
         result["other_workflow_name"] = latest_diag.get("other_workflow_name") or ""
+    if latest_detail_msg:
+        result["workflow_response_message"] = latest_detail_msg
+    if latest_error_message:
+        result["error_message"] = latest_error_message
     if related_issue_check:
         result["related_issue_check"] = related_issue_check
         if related_issue_check.get("failure_reason"):
@@ -1633,8 +1670,8 @@ def get_execution_status(execution_id: str, user_id: str = "", org_code: str = "
             str(diagnosis.get("summary"))
             if diagnosis.get("summary")
             else (
-                "The workflow has already reported its outcome above."
-                if detail_msg and str(status or "").strip().upper() == "COMPLETE"
+                "The workflow has already reported its outcome above. Use execution logs only if you need deeper technical details."
+                if detail_msg and str(status or "").strip().upper() in {"COMPLETE", "COMPLETED", "FAILURE", "FAILED", "ERROR"}
                 else (
                 f"Use 'get_execution_logs' with execution_id '{execution_id}' to see technical details/errors."
                 if status in ("Failure", "Error", "Complete")
@@ -1750,7 +1787,8 @@ tool_registry.register(
             "Check the CURRENT, HISTORICAL, or EXECUTION status/records of bots (workflows). "
             "Returns the absolute latest execution details (even if old), request ID, "
             "and a 24-hour summary. Use this to find out 'did my bot run', 'is it failing', "
-            "'what was the last status', 'what is the execution status', or 'how many times did it run today'."
+            "'what was the last status', 'what is the execution status', or 'how many times did it run today'. "
+            "When the status API already includes a workflow response message or error, surface that first and use logs only for deeper technical analysis."
         ),
         category="status",
         tier="read_only",

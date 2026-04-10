@@ -1,6 +1,8 @@
 from unittest.mock import patch
 
+from config.settings import CONFIG
 from tools import remediation_tools
+import json
 
 
 def test_restart_execution_blocks_when_related_app_health_check_fails():
@@ -123,3 +125,100 @@ def test_restart_execution_uses_explicit_org_code_for_retry_health_gate():
 
     assert result["success"] is True
     assert captured["org_code"] == "AEGEMS"
+
+
+def test_restart_execution_fallback_to_resubmit_reuses_single_health_check():
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {"status": "FAILED", "workflowName": "Claims_Process"}
+
+        def get_workflow_agents(self):
+            return []
+
+        def restart_request(self, execution_id, reason=""):
+            raise Exception("AE-2624 maximum limit of 10 restarts reached")
+
+        def resubmit_request(self, execution_id, reason="", from_failure_point=True):
+            return {"success": True, "automationRequestId": "2611437", "oldRequestId": execution_id}
+
+        def poll_execution_status(self, execution_id, poll_interval_sec=2, max_attempts=15):
+            return {"status": "QUEUED", "raw": {"status": "QUEUED"}}
+
+    call_count = {"value": 0}
+
+    def fake_pre_retry_health_gate(client, execution_id, workflow_name, org_code):
+        call_count["value"] += 1
+        return {
+            "health_gate_passed": True,
+            "issue_type": "life_asia",
+            "issue_label": "Life Asia",
+            "health_summary": "Life Asia is currently up and running.\n\nLife Asia is healthy. Retrying workflow now...",
+            "health_result": {"status": "COMPLETE", "passed": True},
+        }
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._get_request_payload",
+        return_value={},
+    ), patch(
+        "tools.remediation_tools._pre_retry_health_gate",
+        side_effect=fake_pre_retry_health_gate,
+    ):
+        result = remediation_tools.restart_execution(execution_id="22024")
+
+    assert result["success"] is True
+    assert result["fallback"] == "resubmit"
+    assert call_count["value"] == 1
+
+
+def test_run_related_health_check_uses_execution_status_error_when_logs_do_not_identify_issue():
+    workflow_response = json.dumps(
+        {
+            "message": None,
+            "error": "Login issue Life Asia Portal",
+            "currentStatus": None,
+            "outputParameters": None,
+        }
+    )
+
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {
+                "id": execution_id,
+                "status": "FAILED",
+                "workflowName": "Daily_claim_report_bot",
+                "workflowResponse": workflow_response,
+            }
+
+        def refresh_execution_payload(self, execution_id, record=None, workflow_name="", recent_limit=25):
+            return dict(record or {})
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch.dict(
+        CONFIG,
+        {
+            "LIFE_ASIA_HEALTH_CHECK_WORKFLOW": "TEBT_Health_Check",
+            "TEBT_HEALTH_CHECK_WORKFLOW": "Life_Asia_Health_Check",
+        },
+        clear=False,
+    ), patch(
+        "tools.log_tools.get_execution_logs",
+        return_value={"report": "Generic failure with no app details."},
+    ), patch(
+        "tools.status_tools._run_related_health_check",
+        return_value={
+            "issue_type": "life_asia",
+            "issue_label": "Life Asia",
+            "health_check_label": "Life Asia health check",
+            "workflow_name": "TEBT_Health_Check",
+            "status": "COMPLETE",
+            "message": "Life Asia is currently up and running.",
+        },
+    ):
+        result = remediation_tools.run_related_health_check(
+            execution_id="2615124",
+            workflow_name="Daily_claim_report_bot",
+        )
+
+    assert result["success"] is True
+    assert result["health_gate_required"] is True
+    assert result["health_check_workflow"] == "TEBT_Health_Check"
+    assert result["issue_label"] == "Life Asia"

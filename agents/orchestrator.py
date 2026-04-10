@@ -372,13 +372,25 @@ class Orchestrator:
             updated_args,
             summary,
         )
-        state.pending_action = {
+        refreshed_action = dict(action)
+        refreshed_action.update({
             "tool": tool_name,
             "args": dict(updated_args),
             "tier": actual_tier,
             "authorized_users": authorized_users,
             "request_id": approval_request.request_id,
-        }
+        })
+        follow_up_action = refreshed_action.get("follow_up_action")
+        if isinstance(follow_up_action, dict):
+            updated_follow_up = dict(follow_up_action)
+            follow_up_args = dict(updated_follow_up.get("args") or {})
+            for key in ("execution_id", "workflow_name", "request_id", "org_code", "user_id"):
+                if key in updated_args:
+                    follow_up_args[key] = updated_args[key]
+            if follow_up_args:
+                updated_follow_up["args"] = follow_up_args
+            refreshed_action["follow_up_action"] = updated_follow_up
+        state.pending_action = refreshed_action
         state.pending_action_summary = summary
         state.phase = ConversationPhase.AWAITING_APPROVAL
         return (
@@ -389,6 +401,290 @@ class Orchestrator:
             )
         )
 
+    def _maybe_queue_retry_health_check_approval(
+        self,
+        *,
+        state: ConversationState,
+        tool_name: str,
+        tool_args: dict,
+        tool_def,
+    ) -> str:
+        clean_tool = self._canonicalize_tool_name(str(tool_name or ""))
+        if clean_tool not in {"restart_execution", "resubmit_execution"}:
+            return ""
+
+        execution_id = str(
+            (tool_args or {}).get("execution_id")
+            or (tool_args or {}).get("request_id")
+            or ""
+        ).strip()
+        if not execution_id or bool((tool_args or {}).get("_skip_retry_health_gate")):
+            return ""
+
+        try:
+            from tools.remediation_tools import inspect_related_retry_health_requirement
+
+            requirement = inspect_related_retry_health_requirement(
+                execution_id=execution_id,
+                workflow_name=str((tool_args or {}).get("workflow_name") or "").strip(),
+                user_id=str((tool_args or {}).get("user_id") or state.user_id or "").strip(),
+                org_code=str((tool_args or {}).get("org_code") or self._state_org_code(state) or "").strip(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not inspect retry health requirement for %s (%s): %s",
+                clean_tool,
+                execution_id,
+                exc,
+            )
+            return ""
+
+        if not isinstance(requirement, dict):
+            return ""
+
+        health_check_workflow = str(requirement.get("health_check_workflow") or "").strip()
+        issue_label = str(requirement.get("issue_label") or "").strip()
+        if not health_check_workflow or not issue_label:
+            return ""
+
+        health_tool_name = "run_related_health_check"
+        health_tool_def = tool_registry.get_tool(health_tool_name)
+        if not health_tool_def:
+            return ""
+
+        original_args = dict(tool_args or {})
+        follow_up_args = dict(original_args)
+        follow_up_args["_skip_retry_health_gate"] = True
+
+        health_args = {
+            "execution_id": execution_id,
+            "workflow_name": str(
+                requirement.get("workflow_name")
+                or original_args.get("workflow_name")
+                or ""
+            ).strip(),
+            "health_check_workflow": health_check_workflow,
+            "issue_label": issue_label,
+        }
+        user_id = str(original_args.get("user_id") or state.user_id or "").strip()
+        org_code = str(original_args.get("org_code") or self._state_org_code(state) or "").strip()
+        if user_id:
+            health_args["user_id"] = user_id
+        if org_code:
+            health_args["org_code"] = org_code
+
+        summary = f"{health_tool_name} on {health_check_workflow}"
+        approval_request = self.approval_gate.create_approval_request(
+            state.conversation_id,
+            health_tool_name,
+            health_tool_def.tier,
+            health_args,
+            summary,
+        )
+        state.pending_action = {
+            "tool": health_tool_name,
+            "args": health_args,
+            "tier": health_tool_def.tier,
+            "authorized_users": list(original_args.get("authorized_users") or []),
+            "request_id": approval_request.request_id,
+            "follow_up_action": {
+                "tool": clean_tool,
+                "args": follow_up_args,
+                "tier": tool_def.tier if tool_def else "medium_risk",
+                "authorized_users": list(original_args.get("authorized_users") or []),
+            },
+        }
+        state.pending_action_summary = summary
+        state.phase = ConversationPhase.AWAITING_APPROVAL
+
+        action_label = "restart" if clean_tool == "restart_execution" else "resubmit"
+        workflow_label = str(
+            requirement.get("workflow_name")
+            or original_args.get("workflow_name")
+            or "this workflow"
+        ).strip() or "this workflow"
+        note = (
+            f"Before I {action_label} **{workflow_label}**, I need to verify the current "
+            f"**{issue_label}** health by running **{health_check_workflow}**."
+        )
+        return (
+            f"{note}\n\n"
+            + self.approval_gate.format_approval_prompt(
+                approval_request,
+                audience=state.user_role,
+            )
+        )
+
+    def _handle_related_health_check_follow_up(
+        self,
+        *,
+        state: ConversationState,
+        action: dict,
+        result,
+        tracker: IssueTracker | None = None,
+    ) -> str:
+        payload = result.data if isinstance(result.data, dict) else {}
+        if not result.success:
+            return self._build_action_failure_response(
+                action_tool="run_related_health_check",
+                action_args=action.get("args") or {},
+                error_text=result.error,
+                error_data=payload if payload else None,
+            )
+
+        follow_up_action = self._resolve_related_health_check_follow_up_action(
+            state=state,
+            action=action,
+        )
+        if not isinstance(follow_up_action, dict):
+            return self._format_completion_message("run_related_health_check", payload)
+
+        next_tool_name = self._canonicalize_tool_name(str(follow_up_action.get("tool") or ""))
+        next_tool_def = tool_registry.get_tool(next_tool_name)
+        if not next_tool_name or not next_tool_def:
+            return self._format_completion_message("run_related_health_check", payload)
+
+        next_args = dict(follow_up_action.get("args") or {})
+        next_args["_skip_retry_health_gate"] = True
+        next_args = self._inject_user_scope(next_tool_name, next_args, next_tool_def, state)
+        next_result = tool_registry.execute(next_tool_name, **next_args)
+        next_payload = next_result.data if isinstance(next_result.data, dict) else {}
+        state.log_tool_call(next_tool_name, next_args, next_payload, next_result.success)
+
+        if next_result.success:
+            merged_payload = dict(next_payload or {})
+            prefix = str(payload.get("message") or "").strip()
+            if prefix:
+                existing_message = str(merged_payload.get("message") or "").strip()
+                merged_payload["message"] = (
+                    f"{prefix}\n\n{existing_message}" if existing_message else prefix
+                )
+            merged_payload.setdefault("health_gate", payload)
+            state.phase = ConversationPhase.RESOLVED
+            state.param_collection = {}
+            active_issue = tracker.get_active_issue() if tracker else None
+            if active_issue and tracker:
+                tracker.resolve_issue(
+                    active_issue.issue_id,
+                    f"Approved health check and executed: {self._build_pending_action_summary(next_tool_name, next_args)}",
+                )
+            return self._format_completion_message(next_tool_name, merged_payload)
+
+        return self._build_action_failure_response(
+            action_tool=next_tool_name,
+            action_args=next_args,
+            error_text=next_result.error,
+            error_data=next_payload if isinstance(next_payload, dict) else None,
+        )
+
+    @staticmethod
+    def _get_previous_user_message(state: ConversationState) -> str:
+        messages = list(state.messages[:-1]) if state.messages else []
+        for entry in reversed(messages):
+            if str(entry.get("role") or "").strip().lower() != "user":
+                continue
+            content = str(entry.get("content") or "").strip()
+            if content:
+                return content
+        return ""
+
+    @staticmethod
+    def _has_retry_intent_terms(user_message: str) -> bool:
+        lower = str(user_message or "").strip().lower()
+        if not lower:
+            return False
+        retry_terms = (
+            "retrigger",
+            "trigger again",
+            "run again",
+            "retry",
+            "restart",
+            "rerun",
+            "resubmit",
+            "from start",
+            "from scratch",
+            "from failure",
+        )
+        return any(term in lower for term in retry_terms)
+
+    def _resolve_related_health_check_follow_up_action(
+        self,
+        *,
+        state: ConversationState,
+        action: dict,
+    ) -> dict:
+        follow_up_action = action.get("follow_up_action") or {}
+        if isinstance(follow_up_action, dict) and str(follow_up_action.get("tool") or "").strip():
+            return follow_up_action
+
+        previous_user_message = self._get_previous_user_message(state)
+        if not previous_user_message:
+            return {}
+
+        if not self._has_retry_intent_terms(previous_user_message):
+            try:
+                if not self._is_retry_followup_for_recent_failure(previous_user_message, state):
+                    return {}
+            except Exception as exc:
+                logger.debug(
+                    "Could not infer retry follow-up from previous health-check request %r: %s",
+                    previous_user_message[:80],
+                    exc,
+                )
+                return {}
+
+        action_args = dict(action.get("args") or {})
+        recent = self._get_recent_failed_execution_context(state)
+        execution_id = str(
+            action_args.get("execution_id")
+            or action_args.get("request_id")
+            or recent.get("execution_id")
+            or ""
+        ).strip()
+        workflow_name = str(
+            action_args.get("workflow_name")
+            or recent.get("workflow_name")
+            or ""
+        ).strip()
+        if not execution_id:
+            return {}
+
+        if self._is_explicit_resubmit_request(
+            previous_user_message,
+            "resubmit_execution",
+            action_args,
+        ):
+            from_failure_point = not any(
+                term in previous_user_message.lower()
+                for term in ("from start", "from scratch")
+            )
+            inferred_args = {
+                "execution_id": execution_id,
+                "from_failure_point": from_failure_point,
+                "_skip_retry_health_gate": True,
+            }
+            if workflow_name:
+                inferred_args["workflow_name"] = workflow_name
+            return {
+                "tool": "resubmit_execution",
+                "args": inferred_args,
+                "tier": "medium_risk",
+                "authorized_users": list(action.get("authorized_users") or []),
+            }
+
+        inferred_args = {
+            "execution_id": execution_id,
+            "_skip_retry_health_gate": True,
+        }
+        if workflow_name:
+            inferred_args["workflow_name"] = workflow_name
+        return {
+            "tool": "restart_execution",
+            "args": inferred_args,
+            "tier": "medium_risk",
+            "authorized_users": list(action.get("authorized_users") or []),
+        }
+
     def _inject_user_scope(self, tool_name: str, tool_args: dict, tool_def, state: ConversationState) -> dict:
         args = dict(tool_args or {})
         metadata = getattr(tool_def, "metadata", {}) or {}
@@ -397,6 +693,7 @@ class Orchestrator:
                 "discover_tools",
                 "check_workflow_status",
                 "list_recent_failures",
+                "run_related_health_check",
                 "restart_execution",
                 "resubmit_execution",
                 "trigger_workflow",
@@ -1175,7 +1472,7 @@ class Orchestrator:
                 ),
                 system="You are a polite, concise assistant. Always use the provided IST date/time and greeting word — never guess the time of day yourself.",
                 temperature=0.5,
-                max_tokens=120,
+                max_tokens=5000,
             ).strip()
         except Exception:
             return (
@@ -1363,6 +1660,12 @@ class Orchestrator:
                             tool_name=tool_name,
                             tool_args=tool_args,
                         )
+                        tool_name, tool_args = self._rewrite_direct_health_check_followup_from_failed_context(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
                         tool_name, tool_args = self._align_retry_tool_args_with_recent_failed_context(
                             user_message=user_message,
                             state=state,
@@ -1400,6 +1703,15 @@ class Orchestrator:
                             if not missing and self.approval_gate.needs_approval(
                                 tool_name, tool_def.tier, tool_args
                             ):
+                                retry_health_prompt = self._maybe_queue_retry_health_check_approval(
+                                    state=state,
+                                    tool_name=tool_name,
+                                    tool_args=tool_args,
+                                    tool_def=tool_def,
+                                )
+                                if retry_health_prompt:
+                                    state.is_agent_working = False
+                                    return retry_health_prompt
                                 summary = self._build_pending_action_summary(
                                     tool_name,
                                     tool_args,
@@ -1453,6 +1765,12 @@ class Orchestrator:
                             tool_args=tool_args,
                         )
                         tool_name, tool_args = self._rewrite_trigger_followup_from_failed_context(
+                            user_message=user_message,
+                            state=state,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        )
+                        tool_name, tool_args = self._rewrite_direct_health_check_followup_from_failed_context(
                             user_message=user_message,
                             state=state,
                             tool_name=tool_name,
@@ -1901,6 +2219,14 @@ class Orchestrator:
         state.pending_action = None
         state.pending_action_summary = ""
         state.phase = ConversationPhase.IDLE
+
+        if action_tool_name == "run_related_health_check":
+            return self._handle_related_health_check_follow_up(
+                state=state,
+                action=action,
+                result=result,
+                tracker=tracker,
+            )
 
         if isinstance(result.data, dict) and result.data.get("needs_user_input"):
             workflow_name = str(result.data.get("workflow_name") or action.get("args", {}).get("workflow_name") or "").strip()
@@ -2417,7 +2743,7 @@ Rules:
 5. Every tool call is audited.
 6. Read tool descriptions carefully. They may include use/avoid guidance,
    required parameters, and example arguments. Follow those hints exactly.
-7. Always prioritize `check_workflow_status` for ANY query about a bot's state, performance, or history. Use `get_execution_logs` for deeper analysis only when the execution is terminal (Failure/Error/Complete) and log evidence is actually needed. Do NOT use `get_execution_logs` as the first step for NEW/QUEUED/PENDING state diagnosis.
+7. Always prioritize `check_workflow_status` for ANY query about a bot's state, performance, or history. Use `get_execution_logs` for deeper analysis only when the execution is terminal (Failure/Error/Complete) and log evidence is actually needed. If `check_workflow_status` or `get_execution_status` already returns `workflow_response_message` or `error_message`, do NOT call `get_execution_logs` unless the user explicitly asks for logs or deeper RCA. Do NOT use `get_execution_logs` as the first step for NEW/QUEUED/PENDING state diagnosis.
 8. If no typed tool fits, use the general-purpose escape hatches:
    - call_ae_api: hit any AE REST endpoint directly
    - query_database: run read-only SQL against the ops database
@@ -2455,7 +2781,7 @@ Rules:
 21. **AGENT STATUS DISCOVERY**: Always use `ae.agent.list_all` for any general agent status query to see all Running, Stopped, and Offline agents.
 22. **STRICT AGENT ENFORCEMENT**: You MUST call `ae.agent.list_all` (or `list_running`) to discover numeric IDs and verify `RUNNING` status BEFORE suggesting or triggering any diagnostic action (logs, RDP, etc.). NEVER call diagnostics if the agent is `STOPPED`.
 23. **PRECISION ID RESOLUTION**: When calling agent-related tools, always use the numeric `agent_id` (e.g. "2928") resolved from the agent list, rather than the search name (e.g. "vaishnavi.malusare..."), to ensure 100% precision.
-24. **RELATED SYSTEM HEALTH CHECKS**: If the user asks for a process status, failure reason, or health check and the failing run may be related to Life Asia connectivity or TEBT login/portal problems, call `check_workflow_status` first. That tool may automatically inspect the latest failure evidence and run the configured related-system health check via admin scope. If the tool response includes a related issue check/result, you MUST surface that result clearly to the user. When the workflow status is failed, keep the workflow status as "Failed" even if the related application is currently healthy. Describe application health separately from workflow status. If the user asks why it failed, provide the application-related reason in simple business language.
+24. **RELATED SYSTEM FAILURE FLOW**: If the user asks for process status or why a workflow failed, call `check_workflow_status` first. Use that result to explain the likely Life Asia or TEBT related failure reason in simple business language, but do NOT run or assume a current application health check during a status-only conversation. If the user later asks to retry, restart, resubmit, or retrigger the failed run, you MUST re-check the latest failure evidence and then run the related application health check once before retrying. If the health check fails, block the retry. If it passes, say the application is healthy and proceed.
 24a. **GENERIC RETRY FOLLOW-UP RULE**: If the user sends a short retry follow-up after a failed execution was already discussed, treat it as a follow-up to the most recent failed execution. Do NOT treat the follow-up phrase itself as a workflow name.
 25. **MEANINGFUL FIRST-LINE RULE**: Start every final reply with the answer, outcome, or current status. Do NOT open with internal narration such as "This looks related", "I would like to perform", "I'll track it", or raw tool names.
 26. **CHAT-NOT-SYSTEM RULE**: Write like a helpful teammate in chat. Avoid raw field dumps such as `workflow_name`, `user_id`, `org_code`, JSON-like parameter blocks, or internal tool names unless the user explicitly needs that level of detail.
@@ -3249,6 +3575,14 @@ CRITICAL RULES:
         # Otherwise move to approval flow.
         tool_def = tool_registry.get_tool(tool_name)
         actual_tier = tool_def.tier if tool_def else "medium_risk"
+        retry_health_prompt = self._maybe_queue_retry_health_check_approval(
+            state=state,
+            tool_name=tool_name,
+            tool_args=action_args,
+            tool_def=tool_def,
+        )
+        if retry_health_prompt:
+            return retry_health_prompt
         summary = self._build_pending_action_summary(tool_name, action_args)
         approval_request = self.approval_gate.create_approval_request(
             state.conversation_id,
@@ -4642,6 +4976,73 @@ CRITICAL RULES:
         return (
             "restart_execution",
             {
+                "execution_id": execution_id,
+                "workflow_name": workflow_name,
+            },
+        )
+
+    def _rewrite_direct_health_check_followup_from_failed_context(
+        self,
+        *,
+        user_message: str,
+        state: ConversationState,
+        tool_name: str,
+        tool_args: dict,
+    ) -> tuple[str, dict]:
+        clean_tool = str(tool_name or "").strip().lower()
+        if clean_tool != "run_related_health_check":
+            return tool_name, tool_args
+
+        lower_msg = str(user_message or "").lower()
+        if not self._has_retry_intent_terms(lower_msg):
+            return tool_name, tool_args
+
+        recent = self._get_recent_failed_execution_context(state)
+        workflow_name = str(recent.get("workflow_name") or "").strip()
+        execution_id = str(recent.get("execution_id") or "").strip()
+        if not workflow_name or not execution_id:
+            return tool_name, tool_args
+
+        requested_execution_id = self._extract_user_mentioned_execution_id(user_message)
+        if requested_execution_id and requested_execution_id != execution_id:
+            logger.info(
+                "Skipping direct health-check rewrite because requested execution=%s differs from recent failed execution=%s",
+                requested_execution_id,
+                execution_id,
+            )
+            return tool_name, tool_args
+
+        passthrough_args = {}
+        for key in ("org_code", "user_id", "authorized_users"):
+            if key in (tool_args or {}):
+                passthrough_args[key] = tool_args.get(key)
+
+        if self._is_explicit_resubmit_request(user_message, "resubmit_execution", tool_args):
+            from_failure_point = not any(term in lower_msg for term in ("from start", "from scratch"))
+            logger.info(
+                "Rewriting direct run_related_health_check follow-up to resubmit_execution for failed execution=%s workflow=%s",
+                execution_id,
+                workflow_name,
+            )
+            return (
+                "resubmit_execution",
+                {
+                    **passthrough_args,
+                    "execution_id": execution_id,
+                    "workflow_name": workflow_name,
+                    "from_failure_point": from_failure_point,
+                },
+            )
+
+        logger.info(
+            "Rewriting direct run_related_health_check follow-up to restart_execution for failed execution=%s workflow=%s",
+            execution_id,
+            workflow_name,
+        )
+        return (
+            "restart_execution",
+            {
+                **passthrough_args,
                 "execution_id": execution_id,
                 "workflow_name": workflow_name,
             },

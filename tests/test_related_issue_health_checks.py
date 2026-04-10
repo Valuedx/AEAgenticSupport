@@ -47,7 +47,7 @@ class _StatusClient:
         return {"status": self.poll_status, "raw": {"status": self.poll_status}}
 
 
-def test_check_workflow_status_appends_life_asia_health_check(monkeypatch):
+def test_check_workflow_status_describes_life_asia_issue_without_running_health_check(monkeypatch):
     client = _StatusClient("Failure")
 
     monkeypatch.setitem(status_tools.CONFIG, "ENABLE_RELATED_ISSUE_HEALTH_CHECK", True)
@@ -68,17 +68,18 @@ def test_check_workflow_status_appends_life_asia_health_check(monkeypatch):
     assert result["latest_status"] == "Failure"
     assert "Status: Failed." in result["message"]
     assert "Likely cause: Life Asia connection issue." in result["message"]
-    assert "Life Asia is currently unavailable" in result["message"]
+    assert "Current Life Asia health has not been checked yet." in result["message"]
+    assert "If you want to retry this workflow" in result["message"]
     assert "Triggered" not in result["message"]
     assert result["related_issue_check"]["workflow_name"] == "TEBT_Health_Check"
-    assert result["related_issue_check"]["used_admin_scope"] is True
+    assert result["related_issue_check"]["used_admin_scope"] is False
     assert result["related_issue_check"]["failure_reason"] == "Life Asia connection issue."
-    assert result["related_issue_check"]["application_status"] == "down"
-    assert client.executed[0]["workflow_name"] == "TEBT_Health_Check"
-    assert client.executed[0]["user_id"] == ""
+    assert result["related_issue_check"]["application_status"] == "not_checked"
+    assert result["related_issue_check"]["health_check_run"] is False
+    assert client.executed == []
 
 
-def test_check_workflow_status_appends_tebt_health_check(monkeypatch):
+def test_check_workflow_status_describes_tebt_issue_without_running_health_check(monkeypatch):
     client = _StatusClient("Complete")
 
     monkeypatch.setitem(status_tools.CONFIG, "ENABLE_RELATED_ISSUE_HEALTH_CHECK", True)
@@ -98,14 +99,14 @@ def test_check_workflow_status_appends_tebt_health_check(monkeypatch):
 
     assert "Status: Failed." in result["message"]
     assert "Likely cause: TEBT login issue." in result["message"]
-    assert "TEBT is currently up and running." in result["message"]
-    assert "Please retry the workflow." not in result["message"]
+    assert "Current TEBT health has not been checked yet." in result["message"]
     assert result["related_issue_check"]["workflow_name"] == "Life_Asia_Health_Check"
-    assert result["related_issue_check"]["application_status"] == "up"
-    assert client.executed[0]["workflow_name"] == "Life_Asia_Health_Check"
+    assert result["related_issue_check"]["application_status"] == "not_checked"
+    assert result["related_issue_check"]["health_check_run"] is False
+    assert client.executed == []
 
 
-def test_check_workflow_status_numeric_request_id_uses_related_issue_summary(monkeypatch):
+def test_check_workflow_status_numeric_request_id_uses_related_issue_summary_without_running_health_check(monkeypatch):
     client = _StatusClient("Complete")
 
     monkeypatch.setitem(status_tools.CONFIG, "ENABLE_RELATED_ISSUE_HEALTH_CHECK", True)
@@ -126,5 +127,7 @@ def test_check_workflow_status_numeric_request_id_uses_related_issue_summary(mon
     assert result["is_single_search"] is True
     assert "Status: Failed." in result["message"]
     assert "Likely cause: TEBT login issue." in result["message"]
-    assert "TEBT is currently up and running." in result["message"]
-    assert result["related_issue_check"]["application_status"] == "up"
+    assert "Current TEBT health has not been checked yet." in result["message"]
+    assert result["related_issue_check"]["application_status"] == "not_checked"
+    assert result["related_issue_check"]["health_check_run"] is False
+    assert client.executed == []
