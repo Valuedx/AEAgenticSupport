@@ -1,3 +1,5 @@
+> - **AE AI Hub — Tier 1 UX (2026-04-10)**: Orchestrator **template gallery** (import/export `graph_json`), **native synchronous** `POST …/execute` with `sync: true` (HTTP 200 + final context; see `orchestrator/SETUP_GUIDE.md` §7.1.2), and **checkpoint debug replay** on the canvas. See `orchestrator/TECHNICAL_BLUEPRINT.md` (V0.9.13 changelog) and `orchestrator/HOW_IT_WORKS.md` Step 6.
+>
 > - **Orchestrator operator controls (2026-03-22)**: The AE AI Hub orchestrator supports cooperative **pause**, **cancel**, and **resume** between nodes; see `orchestrator/TECHNICAL_BLUEPRINT.md` §6.11.
 >
 > - **Studio ↔ Orchestrator Proxy Bridge (2026-03-22)**: AI Studio acts as a dumb proxy to the visual orchestrator. Callers pass `orchestrator_workflow_id` (and optionally `orchestrator_payload`, `orchestrator_timeout`, `orchestrator_wait_for_result`, `orchestrator_chat_reply_mode`, `orchestrator_include_context_json`) in `user_metadata` to `handle_chat_message()` to bypass LLM routing. **Default is async:** `POST /execute` only, returning instance id and polling URLs unless `orchestrator_wait_for_result` or `ORCHESTRATOR_BRIDGE_WAIT_FOR_RESULT=true` enables blocking `run_and_wait`. **Sync** completion text prefers hub context `orchestrator_user_reply` (**Bridge User Reply** DAG node), then heuristic LLM response extraction, then JSON (`ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE` / metadata). The bridge merges chat `message` / `session_id` / user fields into the trigger payload when missing, supports optional `ORCHESTRATOR_API_TOKEN` (Bearer) for JWT orchestrator mode, returns structured suspended/HITL messages in sync mode, and is covered by `tests/test_orchestrator_bridge.py`. Config adds `ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE`. See `orchestrator/TECHNICAL_BLUEPRINT.md` §10 and `orchestrator/HOW_IT_WORKS.md` Step 17.
@@ -46,7 +48,7 @@
 > **Documentation Update (2026-03-25)**: The main AI Studio Extension path is now a **thin async adapter**. `custom/custom_hooks.py::api_messages_hook` does cheap normalization, dedupe, minimal state persistence, and queues work to `agent_server.py /chat/async`; completion comes back through AI Studio `POST /api/reply` and `custom/custom_hooks.py::api_reply_hook`. The older inline/support-agent-in-hook and local `custom_cognibot/` dialog proxy paths are no longer the recommended production model. Optional AI Studio Dialog Designer wrappers now live in `custom/functions/python/actions.py`.
 
 **Version:** 1.5  
-**Last updated:** 2026-03-24
+**Last updated:** 2026-04-10
 
 ---
 

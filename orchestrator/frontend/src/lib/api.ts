@@ -1,6 +1,21 @@
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8001";
 const TENANT_ID = import.meta.env.VITE_TENANT_ID || "default";
 
+/** Thrown on non-2xx responses; includes parsed JSON body when possible (e.g. sync 504 with instance_id). */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly bodyText: string;
+  readonly json: Record<string, unknown> | undefined;
+
+  constructor(message: string, status: number, bodyText: string, json?: Record<string, unknown>) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.bodyText = bodyText;
+    this.json = json;
+  }
+}
+
 function getAuthHeaders(): Record<string, string> {
   const token = localStorage.getItem("ae_access_token");
   if (token) return { "Authorization": `Bearer ${token}` };
@@ -21,7 +36,16 @@ async function request<T>(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`API ${res.status}: ${body}`);
+    let json: Record<string, unknown> | undefined;
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        json = parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* plain text body */
+    }
+    throw new ApiError(`API ${res.status}: ${body}`, res.status, body, json);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
@@ -51,6 +75,17 @@ export interface InstanceOut {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  /** WorkflowDefinition.version when this run was queued (null for older instances). */
+  definition_version_at_start?: number | null;
+}
+
+/** Response when `sync: true` on execute — HTTP 200. */
+export interface SyncExecuteOut {
+  instance_id: string;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  output: Record<string, unknown>;
 }
 
 export interface ExecutionLogOut {
@@ -88,6 +123,17 @@ export interface SnapshotOut {
 
 export interface SnapshotDetailOut extends SnapshotOut {
   graph_json: { nodes: unknown[]; edges: unknown[] };
+}
+
+export interface CheckpointOut {
+  id: string;
+  instance_id: string;
+  node_id: string;
+  saved_at: string | null;
+}
+
+export interface CheckpointDetailOut extends CheckpointOut {
+  context_json: Record<string, unknown>;
 }
 
 export interface InstanceContextOut {
@@ -150,12 +196,16 @@ export const api = {
     id: string,
     triggerPayload?: Record<string, unknown>,
     deterministicMode?: boolean,
-  ): Promise<InstanceOut> {
+    sync?: boolean,
+    syncTimeout?: number,
+  ): Promise<InstanceOut | SyncExecuteOut> {
     return request(`/api/v1/workflows/${id}/execute`, {
       method: "POST",
       body: JSON.stringify({
         trigger_payload: triggerPayload ?? null,
         deterministic_mode: deterministicMode ?? false,
+        sync: sync ?? false,
+        sync_timeout: syncTimeout ?? 120,
       }),
     });
   },
@@ -242,12 +292,39 @@ export const api = {
     );
   },
 
+  listCheckpoints(
+    workflowId: string,
+    instanceId: string,
+  ): Promise<CheckpointOut[]> {
+    return request(
+      `/api/v1/workflows/${workflowId}/instances/${instanceId}/checkpoints`,
+    );
+  },
+
+  getCheckpointDetail(
+    workflowId: string,
+    instanceId: string,
+    checkpointId: string,
+  ): Promise<CheckpointDetailOut> {
+    return request(
+      `/api/v1/workflows/${workflowId}/instances/${instanceId}/checkpoints/${checkpointId}`,
+    );
+  },
+
   listTools(): Promise<ToolOut[]> {
     return request("/api/v1/tools");
   },
 
   listVersions(workflowId: string): Promise<SnapshotOut[]> {
     return request(`/api/v1/workflows/${workflowId}/versions`);
+  },
+
+  /** Graph JSON for a historical definition version (for checkpoint replay alignment). */
+  getGraphAtVersion(
+    workflowId: string,
+    version: number,
+  ): Promise<{ version: number; graph_json: { nodes: unknown[]; edges: unknown[] } }> {
+    return request(`/api/v1/workflows/${workflowId}/graph-at-version/${version}`);
   },
 
   rollbackVersion(workflowId: string, version: number): Promise<WorkflowOut> {
@@ -276,7 +353,7 @@ export const api = {
     es.addEventListener("token", (e) => {
       if (onToken) onToken(JSON.parse(e.data));
     });
-    es.addEventListener("done", (e) => {
+    es.addEventListener("done", () => {
       onDone();
       es.close();
     });

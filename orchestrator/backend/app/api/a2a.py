@@ -316,6 +316,7 @@ def _tasks_send(params: dict, tenant_id: str, db: Session) -> dict:
         workflow_def_id=wf.id,
         trigger_payload=trigger_payload,
         status="queued",
+        definition_version_at_start=wf.version,
     )
     db.add(instance)
     db.commit()

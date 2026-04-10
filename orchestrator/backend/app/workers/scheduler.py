@@ -64,6 +64,7 @@ def check_scheduled_workflows():
                     workflow_def_id=wf.id,
                     trigger_payload={"source": "schedule", "cron": cron_expr, "fired_at": now.isoformat()},
                     status="queued",
+                    definition_version_at_start=wf.version,
                 )
                 db.add(instance)
                 db.commit()

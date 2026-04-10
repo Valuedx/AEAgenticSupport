@@ -1,13 +1,15 @@
 # AE AI Hub — Agentic Orchestrator Developer Guide
 
+> - **V0.9.13 (2026-04-10):** **Templates** — add or edit entries in `frontend/src/lib/templates/index.ts` (import graphs from `example*.ts` or inline `nodes`/`edges`). **Sync execute** — `app/api/workflows.py` `execute_workflow` async branch; `schemas.py` `SyncExecuteOut`, `ExecuteRequest.sync` / `sync_timeout`. **Debug replay** — `workflowStore` checkpoint actions; `DebugReplayBar.tsx`; `api.listCheckpoints` / `getCheckpointDetail`. See `TECHNICAL_BLUEPRINT.md` V0.9.13.
+>
 > - **V0.9.12 (2026-04-07):** **§25** — A2A (Agent-to-Agent) protocol. Per-tenant agent card (`GET /tenants/{id}/.well-known/agent.json`), JSON-RPC 2.0 dispatcher (`POST /tenants/{id}/a2a`) with `tasks/send`, `tasks/get`, `tasks/cancel`, `tasks/sendSubscribe`. Outbound **A2A Agent Call** node delegates tasks to remote A2A agents. Inbound key management (`POST/GET/DELETE /api/v1/a2a/keys`). Workflow publish toggle (`PATCH /api/v1/workflows/{id}/publish`). New `A2AApiKey` model, `is_published` on `WorkflowDefinition`. Alembic migration `0007_a2a_support.py`. `WorkflowInstance` status → A2A task state mapping (`suspended` → `input-required`).
 >
 > - **V0.9.11 (2026-03-22):** **§24** — operator pause / cancel / resume (`cancel_requested`, `pause_requested`, migrations `0005`/`0006`); **§4** clarified HITL `suspended` vs operator `paused`; **§21** SSE terminal statuses. **§23** — Bridge User Reply + `displayName` pointers (V0.9.10).
 >
 > - **Earlier sections:** Custom nodes (§1), `safe_eval` (§2), ReAct (§3), ForEach / retry / HITL (§4), vault (§5), conversational memory (§6), through Loop node (§22).
 
-**Version:** 0.9.12
-**Last updated:** 2026-04-07
+**Version:** 0.9.13
+**Last updated:** 2026-04-10
 
 Welcome to the Developer Guide! 🚀 
 

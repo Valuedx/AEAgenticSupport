@@ -54,6 +54,33 @@ class ExecuteRequest(BaseModel):
             "for production hot-paths."
         ),
     )
+    sync: bool = Field(
+        False,
+        description=(
+            "When True, run the workflow inline on the API server (bypasses Celery) "
+            "and return HTTP 200 with the final context when the run reaches a "
+            "terminal status. Use for API-first callers that cannot poll or use SSE."
+        ),
+    )
+    sync_timeout: int = Field(
+        120,
+        ge=5,
+        le=3600,
+        description="Seconds to wait for a synchronous run before returning 504 Gateway Timeout.",
+    )
+
+
+class SyncExecuteOut(BaseModel):
+    """Response body for synchronous workflow execution (HTTP 200)."""
+
+    instance_id: uuid.UUID
+    status: str
+    started_at: datetime | None
+    completed_at: datetime | None
+    output: dict[str, Any] = Field(
+        ...,
+        description="Final execution context with internal (_-prefixed) keys stripped.",
+    )
 
 
 class CallbackRequest(BaseModel):
@@ -106,6 +133,13 @@ class InstanceOut(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
+    definition_version_at_start: int | None = Field(
+        None,
+        description=(
+            "WorkflowDefinition.version when this instance was queued. "
+            "Use with GET …/graph-at-version/{version} to restore the canvas for replay."
+        ),
+    )
 
     model_config = {"from_attributes": True}
 
@@ -143,6 +177,13 @@ class SnapshotOut(BaseModel):
 
 
 class SnapshotDetailOut(SnapshotOut):
+    graph_json: dict[str, Any]
+
+
+class GraphAtVersionOut(BaseModel):
+    """Graph JSON for a historical definition version (or the live definition if it matches)."""
+
+    version: int
     graph_json: dict[str, Any]
 
 

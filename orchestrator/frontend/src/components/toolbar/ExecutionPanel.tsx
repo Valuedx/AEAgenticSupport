@@ -15,6 +15,7 @@ import {
   Check,
   Maximize2,
   ClipboardCheck,
+  Bug,
 } from "lucide-react";
 import { useState, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +30,7 @@ import {
 } from "@/components/ui/dialog";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { HITLResumeDialog } from "@/components/toolbar/HITLResumeDialog";
+import { DebugReplayBar } from "@/components/toolbar/DebugReplayBar";
 import type { ExecutionLogOut } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
@@ -240,6 +242,8 @@ export function ExecutionPanel() {
   const instanceContext = useWorkflowStore((s) => s.instanceContext);
   const fetchInstanceContext = useWorkflowStore((s) => s.fetchInstanceContext);
   const streamingTokens = useWorkflowStore((s) => s.streamingTokens);
+  const isDebugMode = useWorkflowStore((s) => s.isDebugMode);
+  const enterDebugMode = useWorkflowStore((s) => s.enterDebugMode);
   const [hitlOpen, setHitlOpen] = useState(false);
 
   if (!activeInstance) return null;
@@ -255,6 +259,10 @@ export function ExecutionPanel() {
     (activeInstance.status === "running" ||
       activeInstance.status === "queued" ||
       activeInstance.status === "paused");
+  const canReplay =
+    !!currentWorkflow &&
+    !isExecuting &&
+    ["completed", "failed", "cancelled", "paused"].includes(activeInstance.status);
   const Icon = STATUS_ICON[activeInstance.status] ?? CircleDot;
   const color = STATUS_COLOR[activeInstance.status] ?? "text-muted-foreground";
 
@@ -331,6 +339,18 @@ export function ExecutionPanel() {
             Review &amp; Resume
           </Button>
         )}
+        {canReplay && currentWorkflow && !isDebugMode && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-[11px] gap-1 text-indigo-700 border-indigo-300 hover:bg-indigo-50 dark:text-indigo-300 dark:border-indigo-800 dark:hover:bg-indigo-950/40"
+            title="Step through saved checkpoints on the canvas"
+            onClick={() => void enterDebugMode()}
+          >
+            <Bug className="h-3 w-3" />
+            Debug
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="sm"
@@ -350,6 +370,7 @@ export function ExecutionPanel() {
         />
       )}
       <Separator />
+      {isDebugMode && <DebugReplayBar />}
       <ScrollArea className="flex-1 px-4 py-2">
         <div className="space-y-1.5">
           {activeInstance.logs.length === 0 ? (

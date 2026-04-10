@@ -60,6 +60,8 @@ class WorkflowInstance(Base):
         index=True,
     )
     trigger_payload = Column(JSONB, nullable=True)
+    # WorkflowDefinition.version at queue time (for replay / graph alignment).
+    definition_version_at_start = Column(Integer, nullable=True)
     context_json = Column(JSONB, nullable=False, default=dict)
     current_node_id = Column(String(128), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)

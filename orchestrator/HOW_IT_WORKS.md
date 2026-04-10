@@ -1,3 +1,5 @@
+> - **V0.9.13 Tier 1 UX (2026-04-10)**: **Template gallery** (toolbar **Templates**) — starter workflows, category filters, search, **Import JSON** / **Export current** (`{nodes, edges}`). **Sync run** — toolbar checkbox; `POST /execute` with `sync: true` holds the HTTP connection until a terminal status and returns final context (**200** + `SyncExecuteOut`); default async **202** unchanged. **Debug replay** — after **completed** / **failed** / **cancelled** / **paused**, **Debug** loads checkpoints, timeline scrubber, full `context_json` per step; canvas highlights the checkpoint node. See `SETUP_GUIDE.md` §7.1.2, `TECHNICAL_BLUEPRINT.md` V0.9.13 / §4.5 / §6.10.
+>
 > - **V0.9.11 Operator pause / cancel / resume (2026-03-22)**: While a run is **queued** or **running**, the execution panel offers **Pause** (cooperative pause after the current node), **Stop** (cooperative **cancel**), and (same timing) the SSE stream ends when the instance reaches **`paused`** or **`cancelled`**. **Resume** continues a **`paused`** run via `POST …/resume-paused` (optional `context_patch`). From **`paused`**, **Stop** abandons the run (immediate **`cancelled`**). Distinct from HITL **`suspended`** + **Review & Resume** (`POST …/callback`). DB: `cancel_requested`, `pause_requested` (migrations `0005`, `0006`). See `TECHNICAL_BLUEPRINT.md` §4.5, §5.2, §6.11.
 >
 > - **V0.9.10 Bridge reply + display names (2026-03-22)**: **Bridge User Reply** node promotes `orchestrator_user_reply` to context root for Studio/Teams sync replies; parent `MessageGateway` prefers it, then heuristic extraction, then JSON (`ORCHESTRATOR_BRIDGE_CHAT_REPLY_MODE`). Optional **`displayName`** on canvas nodes (registry **`label`** unchanged) — see Step 4 / Step 17 and `TECHNICAL_BLUEPRINT.md` §3.4.1, §6.8, §10.
@@ -40,8 +42,8 @@
 
 **Purpose:** This document explains how the orchestrator works end-to-end, from building a visual workflow to executing it asynchronously. Each step includes pointers to the relevant **code files** so you can trace behavior or extend it. For contributor-focused topics (custom nodes, `safe_eval`, pause/cancel internals), see `DEVELOPER_GUIDE.md`.
 
-**Version:** 0.9.11
-**Last updated:** 2026-03-22
+**Version:** 0.9.13
+**Last updated:** 2026-04-10
 
 ---
 
@@ -378,7 +380,31 @@ POST /execute                        │                               │
                                                          (DAG execution begins)
 ```
 
-The API immediately returns `202 Accepted` with the new instance ID. The actual execution happens asynchronously in the Celery worker.
+The API returns **`202 Accepted`** with the new instance ID when execution is **asynchronous** (default). The worker runs the DAG (Celery when enabled, or the in-process worker when `ORCHESTRATOR_USE_CELERY=false`).
+
+### Synchronous mode (V0.9.13)
+
+For API clients that cannot poll or open an SSE stream, send:
+
+```json
+{
+  "trigger_payload": { "message": "hello" },
+  "sync": true,
+  "sync_timeout": 120
+}
+```
+
+The API waits (up to `sync_timeout` seconds) and responds with **`200 OK`** and a **`SyncExecuteOut`** body: `instance_id`, `status`, `started_at`, `completed_at`, and `output` (the instance `context_json` with internal `_…` keys removed). On timeout the server returns **504**. This path calls `execute_graph` directly in a background thread and does **not** enqueue Celery for that request.
+
+In the Hub UI, enable **Sync run** next to **Run** to use the same contract from the browser (the client then loads full instance detail including logs).
+
+### Template gallery (V0.9.13)
+
+Click the **Templates** (layout) icon in the toolbar to open the gallery: bundled example DAGs (helpdesk, onboarding, research, etc.), category tabs, search, **Use template** (replaces the canvas after confirm), **Import JSON**, and **Export current**. Template graphs live in `frontend/src/lib/templates/index.ts` and reuse the same `graph_json` shape as the save API.
+
+### Debug replay (V0.9.13)
+
+When a run ends in **`completed`**, **`failed`**, **`cancelled`**, or **`paused`**, **Debug** appears in the execution panel. It loads `GET …/checkpoints`, lets you step forward/back or click timeline dots, shows the **`context_json`** for each checkpoint, and updates node status colors on the canvas (indigo ring = checkpoint under inspection). Exit with **X** on the replay bar or by closing execution.
 
 ### Deterministic Mode (V0.9.3)
 

@@ -16,7 +16,7 @@ interface Registry {
   node_types: RegistryNodeType[];
 }
 
-const registry = registryData as Registry;
+const registry = registryData as unknown as Registry;
 
 function schemaToDefaultConfig(
   schema: Record<string, { type: string; default?: unknown }>,

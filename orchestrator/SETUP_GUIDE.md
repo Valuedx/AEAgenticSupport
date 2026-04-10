@@ -1,3 +1,5 @@
+> - **V0.9.13 Tier 1 UX (2026-04-10)**: Template gallery, sync execute (`§7.1.2`), debug replay in the Hub UI — no new migrations. See `TECHNICAL_BLUEPRINT.md` V0.9.13 and `HOW_IT_WORKS.md` Step 6.
+>
 > - **V0.9.11 Operator execution control (2026-03-22)**: `workflow_instances` gains `cancel_requested` and `pause_requested` (Alembic `0005`, `0006`). Run `alembic upgrade head` after pull. API: `POST …/pause`, `POST …/resume-paused`, `POST …/cancel` — see `TECHNICAL_BLUEPRINT.md` §6.11.
 >
 > - **V0.9 Execution Enhancements (2026-03-21)**: New env variables `ORCHESTRATOR_MAX_SNAPSHOTS` and `ORCHESTRATOR_MCP_POOL_SIZE`. ForEach loop node added to node_registry.json. MCP client upgraded with connection pooling. Retry-from-failed endpoint added. Snapshot pruning via Celery Beat. Safe expression evaluator enhanced with whitelisted function/method calls. Env variable mapping (`{{ env.SECRET_NAME }}`) for node configs.
@@ -7,8 +9,8 @@
 
 ## AE AI Hub — Orchestrator Setup Guide
 
-**Version:** 0.9.11
-**Last updated:** 2026-03-22
+**Version:** 0.9.13
+**Last updated:** 2026-04-10
 
 ---
 
@@ -169,7 +171,17 @@ Output goes to `orchestrator/frontend/dist/`. Serve with any static file server 
 npm run preview
 ```
 
-### 3.4 Type Checking
+### 3.4 Hub UI quick reference (V0.9.13)
+
+| Feature | Where | Notes |
+|---------|--------|--------|
+| **Templates** | Toolbar (layout icon) | Starter DAGs, import/export JSON |
+| **Sync run** | Checkbox next to **Run** | Same as `POST …/execute` with `sync: true` |
+| **Debug** | Execution panel (after terminal run) | Checkpoint timeline + context replay |
+
+Details: `HOW_IT_WORKS.md` Step 6, `TECHNICAL_BLUEPRINT.md` §4.5 / §6.10.
+
+### 3.5 Type Checking
 
 ```bash
 npx tsc -b --noEmit
@@ -413,6 +425,32 @@ LANGFUSE_HOST=https://cloud.langfuse.com   # or your self-hosted URL (e.g. http:
 1. Start the backend (`uvicorn`) and worker (`celery`) with `LANGFUSE_ENABLED=true`.
 2. Run any workflow from the UI.
 3. Open your Langfuse project and confirm you see a trace for the workflow execution with nested node spans and (when applicable) LLM/tool observations.
+
+### 7.1.2 Synchronous execution (API hold-open)
+
+By default, `POST /api/v1/workflows/{workflow_id}/execute` returns **202 Accepted** with an `InstanceOut` and runs the DAG via Celery (or the in-process worker when `ORCHESTRATOR_USE_CELERY=false`). Callers poll `GET …/instances/{id}` or subscribe to SSE.
+
+For **API-first** integrations that cannot poll, set **`sync: true`** on the execute body. The server runs `execute_graph` inline (in a worker thread), waits until the instance reaches a terminal status (`completed`, `failed`, `suspended`, `cancelled`, or `paused`), and returns **HTTP 200** with the final context:
+
+| Field | Meaning |
+|-------|---------|
+| `instance_id` | Same as async `InstanceOut.id` |
+| `status` | Terminal workflow status |
+| `started_at` / `completed_at` | From `workflow_instances` |
+| `output` | `context_json` with internal `_…` keys stripped (same rule as HITL context) |
+
+**Limits:** `sync_timeout` (default **120**, max **3600** seconds) bounds the wait; exceeding it returns **504**. Long-running or HITL-heavy flows should stay async. Sync mode **bypasses Celery** for that request even when Celery is enabled.
+
+**Example:**
+
+```bash
+curl -sS -X POST "http://localhost:8001/api/v1/workflows/$WORKFLOW_ID/execute" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: default" \
+  -d '{"trigger_payload":{"message":"hello"},"sync":true,"sync_timeout":60}'
+```
+
+The AE AI Hub toolbar also exposes a **Sync run** checkbox next to **Run** for quick testing from the UI.
 
 ### 7.3 Step-by-step recipes
 

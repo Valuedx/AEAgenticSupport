@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { nodeCanvasTitle, type AgenticNodeData, type NodeCategory } from "@/types/nodes";
 import { cn } from "@/lib/utils";
 import { useNodeValidation } from "@/lib/useNodeValidation";
+import { useWorkflowStore } from "@/store/workflowStore";
 
 const ICON_MAP: Record<string, LucideIcon> = {
   webhook: Webhook,
@@ -81,6 +82,11 @@ const STATUS_DOT: Record<string, string> = {
 function AgenticNodeComponent({ id, data, selected }: NodeProps) {
   const nodeData = data as unknown as AgenticNodeData;
   const { label, nodeCategory, config, status = "idle" } = nodeData;
+  const replayCursorId = useWorkflowStore((s) => {
+    if (!s.isDebugMode || s.activeCheckpointIdx == null) return null;
+    return s.debugCheckpoints[s.activeCheckpointIdx]?.node_id ?? null;
+  });
+  const isReplayCursor = replayCursorId === id;
   const styles = CATEGORY_STYLES[nodeCategory];
   const iconName = (config?.icon as string) || getDefaultIcon(nodeCategory);
   const Icon = ICON_MAP[iconName] || Brain;
@@ -102,6 +108,8 @@ function AgenticNodeComponent({ id, data, selected }: NodeProps) {
         styles.bg,
         // Selection ring takes highest priority
         selected && "ring-2 ring-primary shadow-lg",
+        // Checkpoint replay cursor (debug mode)
+        !selected && isReplayCursor && "ring-2 ring-indigo-500 shadow-lg",
         // Error ring when not selected
         !selected && hasError && "ring-2 ring-red-500/70",
         // Warning ring when not selected and no error
@@ -127,10 +135,14 @@ function AgenticNodeComponent({ id, data, selected }: NodeProps) {
             </CardTitle>
           </div>
           {hasError && (
-            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-500" title="This node has configuration errors" />
+            <span className="shrink-0" title="This node has configuration errors">
+              <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+            </span>
           )}
           {hasWarning && (
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-yellow-500" title="This node is not connected to a trigger" />
+            <span className="shrink-0" title="This node is not connected to a trigger">
+              <AlertTriangle className="h-3.5 w-3.5 text-yellow-500" />
+            </span>
           )}
           {!hasError && !hasWarning && (
             <span className={cn("h-2 w-2 rounded-full shrink-0", STATUS_DOT[status])} />
@@ -156,13 +168,19 @@ function AgenticNodeComponent({ id, data, selected }: NodeProps) {
             </Badge>
           )}
         </div>
-        {label === "ForEach" && config?.arrayExpression && (
-          <p className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight" title={String(config.arrayExpression)}>
+        {label === "ForEach" && config?.arrayExpression != null && config.arrayExpression !== "" && (
+          <p
+            className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight"
+            title={String(config.arrayExpression)}
+          >
             ↻ {String(config.arrayExpression)}
           </p>
         )}
-        {label === "Loop" && config?.continueExpression && (
-          <p className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight" title={String(config.continueExpression)}>
+        {label === "Loop" && config?.continueExpression != null && config.continueExpression !== "" && (
+          <p
+            className="text-[10px] font-mono text-muted-foreground truncate mt-1 leading-tight"
+            title={String(config.continueExpression)}
+          >
             ⟳ {String(config.continueExpression)}
           </p>
         )}

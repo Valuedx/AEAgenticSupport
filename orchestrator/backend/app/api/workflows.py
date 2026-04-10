@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.security.tenant import get_tenant_id
 from app.models.workflow import WorkflowDefinition, WorkflowInstance, WorkflowSnapshot, ExecutionLog, InstanceCheckpoint
 from app.api.schemas import (
@@ -20,10 +23,12 @@ from app.api.schemas import (
     RetryRequest,
     ResumePausedRequest,
     InstanceOut,
+    SyncExecuteOut,
     InstanceDetailOut,
     InstanceContextOut,
     ExecutionLogOut,
     SnapshotOut,
+    GraphAtVersionOut,
     CheckpointOut,
     CheckpointDetailOut,
 )
@@ -154,8 +159,8 @@ def delete_workflow(
 # Execution
 # ---------------------------------------------------------------------------
 
-@router.post("/{workflow_id}/execute", response_model=InstanceOut, status_code=202)
-def execute_workflow(
+@router.post("/{workflow_id}/execute")
+async def execute_workflow(
     workflow_id: uuid.UUID,
     body: ExecuteRequest,
     tenant_id: str = Depends(get_tenant_id),
@@ -177,15 +182,74 @@ def execute_workflow(
         workflow_def_id=wf.id,
         trigger_payload=body.trigger_payload,
         status="queued",
+        definition_version_at_start=wf.version,
     )
     db.add(instance)
     db.commit()
     db.refresh(instance)
 
+    if body.sync:
+        from app.engine.dag_runner import execute_graph
+
+        instance_id_str = str(instance.id)
+
+        def _sync_run() -> WorkflowInstance:
+            session = SessionLocal()
+            try:
+                execute_graph(session, instance_id_str, body.deterministic_mode)
+                inst = (
+                    session.query(WorkflowInstance)
+                    .filter_by(id=instance.id)
+                    .first()
+                )
+                if not inst:
+                    raise RuntimeError(f"Instance {instance_id_str} missing after sync run")
+                return inst
+            finally:
+                session.close()
+
+        try:
+            fresh = await asyncio.wait_for(
+                run_in_threadpool(_sync_run),
+                timeout=float(body.sync_timeout),
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "detail": (
+                        f"Synchronous execution exceeded sync_timeout={body.sync_timeout}s. "
+                        "The run may still be completing in the background."
+                    ),
+                    "instance_id": str(instance.id),
+                    "hint": f"Poll GET …/instances/{instance.id} to track the orphaned run.",
+                },
+            )
+
+        output = {
+            k: v
+            for k, v in (fresh.context_json or {}).items()
+            if not str(k).startswith("_")
+        }
+        payload = SyncExecuteOut(
+            instance_id=fresh.id,
+            status=fresh.status,
+            started_at=fresh.started_at,
+            completed_at=fresh.completed_at,
+            output=output,
+        )
+        return JSONResponse(
+            status_code=200,
+            content=payload.model_dump(mode="json"),
+        )
+
     from app.workers.tasks import execute_workflow_task
     execute_workflow_task.delay(str(instance.id), body.deterministic_mode)
 
-    return instance
+    return JSONResponse(
+        status_code=202,
+        content=InstanceOut.model_validate(instance).model_dump(mode="json"),
+    )
 
 
 @router.post("/{workflow_id}/instances/{instance_id}/callback", response_model=InstanceOut)
@@ -395,6 +459,52 @@ def list_versions(
         .limit(50)
         .all()
     )
+
+
+@router.get(
+    "/{workflow_id}/graph-at-version/{version}",
+    response_model=GraphAtVersionOut,
+)
+def get_graph_at_definition_version(
+    workflow_id: uuid.UUID,
+    version: int,
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Return the workflow graph as it existed at a given definition version.
+
+    For the **current** ``WorkflowDefinition.version``, returns the live ``graph_json``.
+    For older versions, returns the immutable row from ``workflow_snapshots`` (the graph
+    that was replaced when the definition moved to ``version + 1``).
+    """
+    wf = (
+        db.query(WorkflowDefinition)
+        .filter_by(id=workflow_id, tenant_id=tenant_id)
+        .first()
+    )
+    if not wf:
+        raise HTTPException(404, "Workflow not found")
+
+    if version == wf.version:
+        return GraphAtVersionOut(version=wf.version, graph_json=wf.graph_json)
+
+    if version < 1 or version > wf.version:
+        raise HTTPException(
+            404,
+            f"No graph stored for definition version {version} (current is {wf.version})",
+        )
+
+    snap = (
+        db.query(WorkflowSnapshot)
+        .filter_by(workflow_def_id=workflow_id, tenant_id=tenant_id, version=version)
+        .first()
+    )
+    if not snap:
+        raise HTTPException(
+            404,
+            f"Snapshot for definition version {version} not found",
+        )
+    return GraphAtVersionOut(version=snap.version, graph_json=snap.graph_json)
 
 
 @router.post("/{workflow_id}/rollback/{version}", response_model=WorkflowOut)

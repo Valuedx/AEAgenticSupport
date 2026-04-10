@@ -6,6 +6,7 @@ import { FlowCanvas } from "@/components/canvas/FlowCanvas";
 import { PropertyInspector } from "@/components/sidebar/PropertyInspector";
 import { Toolbar } from "@/components/toolbar/Toolbar";
 import { ExecutionPanel } from "@/components/toolbar/ExecutionPanel";
+import { WorkflowBanner } from "@/components/banner/WorkflowBanner";
 import { LoginPage } from "@/components/auth/LoginPage";
 
 // OIDC auth gate: only active when VITE_AUTH_MODE=oidc
@@ -23,6 +24,7 @@ export default function App() {
       <ReactFlowProvider>
         <div className="flex flex-col h-screen w-screen overflow-hidden bg-background text-foreground">
           <Toolbar />
+          <WorkflowBanner />
           <div className="flex flex-1 min-h-0">
             <NodePalette
               collapsed={paletteCollapsed}

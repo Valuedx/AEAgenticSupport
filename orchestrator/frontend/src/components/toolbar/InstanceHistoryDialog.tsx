@@ -11,7 +11,6 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { useWorkflowStore } from "@/store/workflowStore";
-import { api } from "@/lib/api";
 
 interface Props {
   open: boolean;
@@ -43,16 +42,9 @@ export function InstanceHistoryDialog({ open, onOpenChange }: Props) {
 
   const handleOpenInstance = async (instanceId: string) => {
     if (!currentWorkflow) return;
-    try {
-      // Fetch details and logs first
-      const detail = await api.getInstanceDetail(currentWorkflow.id, instanceId);
-      useWorkflowStore.setState({ activeInstance: detail, isExecuting: false });
-      
-      // Now start streaming if it's still running, or just let panel show logs
-      streamInstance(currentWorkflow.id, instanceId);
+    await openInstanceFromHistory(currentWorkflow.id, instanceId);
+    if (!useWorkflowStore.getState().error) {
       onOpenChange(false);
-    } catch (err) {
-      alert(`Failed to load instance: ${err}`);
     }
   };
 

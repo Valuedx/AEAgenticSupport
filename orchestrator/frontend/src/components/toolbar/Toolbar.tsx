@@ -12,8 +12,7 @@ import {
   Pause,
   PauseCircle,
   Ban,
-  Layers,
-  Cpu,
+  LayoutTemplate,
   Undo2,
   Redo2,
   Activity,
@@ -28,6 +27,7 @@ import { WorkflowListDialog } from "@/components/toolbar/WorkflowListDialog";
 import { VersionHistoryDialog } from "@/components/toolbar/VersionHistoryDialog";
 import { InstanceHistoryDialog } from "@/components/toolbar/InstanceHistoryDialog";
 import { ValidationDialog } from "@/components/toolbar/ValidationDialog";
+import { TemplateGalleryDialog } from "@/components/toolbar/TemplateGalleryDialog";
 import { validateWorkflow, type ValidationError } from "@/lib/validateWorkflow";
 
 const STATUS_CONFIG: Record<string, { icon: typeof CircleDot; label: string; className: string }> = {
@@ -48,6 +48,7 @@ export function Toolbar() {
   const [nameInput, setNameInput] = useState("");
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
   const [validationOpen, setValidationOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
 
   const currentWorkflow = useWorkflowStore((s) => s.currentWorkflow);
   const isDirty = useWorkflowStore((s) => s.isDirty);
@@ -57,15 +58,14 @@ export function Toolbar() {
   const saveWorkflow = useWorkflowStore((s) => s.saveWorkflow);
   const executeWorkflow = useWorkflowStore((s) => s.executeWorkflow);
   const newWorkflow = useWorkflowStore((s) => s.newWorkflow);
-  const loadExampleComplexWorkflow = useWorkflowStore((s) => s.loadExampleComplexWorkflow);
-  const loadAutomationEdgeMainWorkflow = useWorkflowStore((s) => s.loadAutomationEdgeMainWorkflow);
+  const runSync = useWorkflowStore((s) => s.runSync);
+  const setRunSync = useWorkflowStore((s) => s.setRunSync);
   const nodes = useFlowStore((s) => s.nodes);
   const edges = useFlowStore((s) => s.edges);
   const past = useFlowStore((s) => s.past);
   const future = useFlowStore((s) => s.future);
   const undo = useFlowStore((s) => s.undo);
   const redo = useFlowStore((s) => s.redo);
-  const nodeCount = nodes.length;
 
   const workflowName = currentWorkflow?.name || "Untitled Workflow";
   const status = activeInstance?.status;
@@ -189,39 +189,10 @@ export function Toolbar() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => {
-            if (
-              (isDirty || nodeCount > 0) &&
-              !window.confirm(
-                "Replace the canvas with the IT helpdesk example? It matches AI Studio’s orchestrator bridge (save this DAG, set orchestrator_workflow_id for Teams/webchat). Unsaved changes will be lost if you have not saved.",
-              )
-            ) {
-              return;
-            }
-            loadExampleComplexWorkflow();
-          }}
-          title="Example: IT helpdesk — router, ForEach SLA notes, L2 approval (Studio/Teams bridge)"
+          onClick={() => setTemplatesOpen(true)}
+          title="Template gallery — starter DAGs, import/export JSON"
         >
-          <Layers className="h-4 w-4" />
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            if (
-              (isDirty || nodeCount > 0) &&
-              !window.confirm(
-                "Replace the canvas with the replicated main-app routing example (gateway specialists as a DAG)? Same fields as the AI Studio orchestrator bridge (orchestrator_workflow_id + merged trigger). Unsaved changes will be lost if you have not saved.",
-              )
-            ) {
-              return;
-            }
-            loadAutomationEdgeMainWorkflow();
-          }}
-          title="Example: main-app parity — router + specialists + HITL (orchestrator V0.9.x, Studio/Teams)"
-        >
-          <Cpu className="h-4 w-4" />
+          <LayoutTemplate className="h-4 w-4" />
         </Button>
 
         <Button variant="ghost" size="sm" onClick={() => setListOpen(true)} title="Open workflow">
@@ -261,12 +232,26 @@ export function Toolbar() {
 
         <Separator orientation="vertical" className="h-6" />
 
+        <label className="hidden md:flex items-center gap-2 mr-1 text-[11px] text-muted-foreground cursor-pointer whitespace-nowrap">
+          <input
+            type="checkbox"
+            className="rounded border-input"
+            checked={runSync}
+            onChange={(e) => setRunSync(e.target.checked)}
+          />
+          Sync run
+        </label>
+
         <Button
           variant="default"
           size="sm"
           onClick={handleRun}
-          disabled={isExecuting || loading}
-          title="Execute workflow"
+          disabled={!currentWorkflow || isExecuting || loading}
+          title={
+            !currentWorkflow
+              ? "Save the workflow first (toolbar Save) after templates or JSON import"
+              : "Execute workflow"
+          }
           className="gap-1.5"
         >
           {isExecuting ? (
@@ -278,6 +263,7 @@ export function Toolbar() {
         </Button>
       </div>
 
+      <TemplateGalleryDialog open={templatesOpen} onOpenChange={setTemplatesOpen} />
       <WorkflowListDialog open={listOpen} onOpenChange={setListOpen} />
       <VersionHistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} />
       <InstanceHistoryDialog open={instancesOpen} onOpenChange={setInstancesOpen} />

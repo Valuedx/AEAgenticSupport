@@ -1,3 +1,5 @@
+> - **V0.9.13 Tier 1 product UX (2026-04-10)**: **Template gallery** — bundled starter DAGs (`frontend/src/lib/templates/index.ts`), `TemplateGalleryDialog`, toolbar **Templates** button; import/export portable `{nodes, edges}` JSON via `workflowStore.importGraphJson` / `exportCurrentGraph`. **Native synchronous execute** — `POST /{workflow_id}/execute` with `sync: true` runs `execute_graph` inline in a worker thread (`run_in_threadpool` + `asyncio.wait_for`); returns **200** + `SyncExecuteOut` (`instance_id`, `status`, timestamps, `output` context with `_…` keys stripped); default remains **202** + `InstanceOut` + Celery. Request fields `sync_timeout` (5–3600 s, default 120). **Visual debug / replay** — after terminal runs (`completed`, `failed`, `cancelled`, `paused`), Execution panel **Debug** loads checkpoints, timeline scrubber (`DebugReplayBar`), context JSON viewer; canvas node status overlays + indigo ring on the active checkpoint node (`workflowStore` + `AgenticNode`). Hub UI checkbox **Sync run** for local testing. See `SETUP_GUIDE.md` §7.1.2, §4.5 / §6.10 here, `HOW_IT_WORKS.md` Step 6.
+>
 > - **V0.9.12 A2A Protocol (2026-04-07)**: Google A2A protocol v0.2 inbound and outbound support. **Inbound:** Per-tenant agent card (`GET /tenants/{id}/.well-known/agent.json`) lists `is_published` workflows as skills. JSON-RPC 2.0 dispatcher (`POST /tenants/{id}/a2a`) handles `tasks/send`, `tasks/get`, `tasks/cancel`, `tasks/sendSubscribe` (SSE). Inbound auth via SHA-256-hashed API keys stored in new `a2a_api_keys` table. `WorkflowInstance` status maps to A2A task states: `suspended` → `input-required` (Human Approval integration). **Outbound:** New `A2A Agent Call` action node wraps `app/engine/a2a_client.py` (`fetch_agent_card`, `send_task`, `poll_until_done`). **Key management:** `POST/GET/DELETE /api/v1/a2a/keys`. **Publish toggle:** `PATCH /api/v1/workflows/{id}/publish`. New `A2AApiKey` ORM model. `WorkflowDefinition.is_published` column (Alembic `0007_a2a_support.py`). MCP and A2A coexist — MCP is for tools, A2A is for agent delegation.
 >
 > - **V0.9.11 Operator execution control (2026-03-22)**: Cooperative **cancel**, **pause**, and **resume** between nodes (the current node always finishes; no mid–LLM-call interrupt). New DB columns on `workflow_instances`: `cancel_requested`, `pause_requested` (Alembic `0005_workflow_cancel_requested.py`, `0006_workflow_pause_requested.py`). `dag_runner` exposes `_finalize_cancelled`, `_finalize_paused`, and `_abort_if_cancel_or_pause` — **cancel wins** if both flags are set. Instance statuses: `cancelled` (terminal, sets `completed_at`), `paused` (operator pause, not HITL — `completed_at` stays null). **API:** `POST /{workflow_id}/instances/{instance_id}/cancel` (queued/running: sets `cancel_requested`; **paused**: immediate `cancelled`), `POST …/pause` (sets `pause_requested`), `POST …/resume-paused` (body optional `context_patch`, Celery `resume_paused_workflow_task` → `resume_paused_graph`). **SSE** (`sse.py`) ends the stream with `done` for `cancelled` and `paused` (same pattern as `suspended`). **Frontend:** `ExecutionPanel` — Pause, Resume (when `paused`), Stop (cooperative cancel while running; **discard** when paused). **`workflowStore`:** `cancelInstance`, `pauseInstance`, `resumePausedInstance`. **`tools/orchestrator_client.py`:** `cancel()`, `pause()`, `resume_paused()`; `run_and_wait()` returns context when status is `cancelled` or `paused`. See §4.5, §5.2, §6.11.
@@ -12,7 +14,7 @@
 >
 > - **V0.9.7 Checkpoint-aware Langfuse (2026-03-22)**: `_save_checkpoint()` now returns the checkpoint UUID string (or `None` on failure) instead of `None`. `span_node()` in `observability.py` gains an optional `checkpoint_id: str | None = None` kwarg — when provided it is written into the Langfuse span's `metadata` dict under `"checkpoint_id"`, linking the trace directly to the DB snapshot. In `_execute_single_node` (sequential path), the returned `checkpoint_id` is captured and passed to `span.update(output={..., "checkpoint_id": checkpoint_id})` while the span is still open. In `_execute_parallel._apply_result` (parallel path), the span has already exited by the time `_apply_result` runs, so the `checkpoint_id` is instead embedded in `log_entry.output_json` under the `"_checkpoint_id"` key — it remains queryable via the execution log API. This gives a complete checkpoint→trace link: sequential nodes via Langfuse metadata, parallel nodes via execution log output. No DB migration required.
 >
-> - **V0.9.6 Checkpointing Threads (2026-03-22)**: New `instance_checkpoints` table (Alembic migration `0004_instance_checkpoints.py`). One row is written per successfully completed node: `instance_id` (FK cascade-delete), `node_id`, `context_json` (full context with `_`-prefixed internal keys stripped), `saved_at`. `_save_checkpoint()` helper in `dag_runner.py` is called in both `_execute_single_node` (after `db.commit()`) and `_apply_result` inside `_execute_parallel` (after output is written to context). Failures in `_save_checkpoint` are non-fatal — a warning is logged and execution continues. New API endpoints: `GET /{workflow_id}/instances/{instance_id}/checkpoints` (list, `CheckpointOut` — no context payload) and `GET /{workflow_id}/instances/{instance_id}/checkpoints/{checkpoint_id}` (`CheckpointDetailOut` — includes `context_json`). `InstanceCheckpoint` SQLAlchemy model added to `workflow.py`. Schemas `CheckpointOut` / `CheckpointDetailOut` added to `schemas.py`. No frontend changes — checkpoints are a backend/API feature used by Item 5 (Langfuse tagging) and external tooling. Indexes: `(instance_id)` and `(instance_id, node_id)`.
+> - **V0.9.6 Checkpointing Threads (2026-03-22)**: New `instance_checkpoints` table (Alembic migration `0004_instance_checkpoints.py`). One row is written per successfully completed node: `instance_id` (FK cascade-delete), `node_id`, `context_json` (full context with `_`-prefixed internal keys stripped), `saved_at`. `_save_checkpoint()` helper in `dag_runner.py` is called in both `_execute_single_node` (after `db.commit()`) and `_apply_result` inside `_execute_parallel` (after output is written to context). Failures in `_save_checkpoint` are non-fatal — a warning is logged and execution continues. New API endpoints: `GET /{workflow_id}/instances/{instance_id}/checkpoints` (list, `CheckpointOut` — no context payload) and `GET /{workflow_id}/instances/{instance_id}/checkpoints/{checkpoint_id}` (`CheckpointDetailOut` — includes `context_json`). `InstanceCheckpoint` SQLAlchemy model added to `workflow.py`. Schemas `CheckpointOut` / `CheckpointDetailOut` added to `schemas.py`. **Frontend (V0.9.13):** checkpoint list/detail consumed by the Hub **Debug** replay UI; still used for Langfuse linking (V0.9.7) and external tooling. Indexes: `(instance_id)` and `(instance_id, node_id)`.
 >
 > - **V0.9.5 Reflection Node (2026-03-22)**: New `Reflection` agent node that calls an LLM with an auto-built summary of the workflow's execution history and expects a structured JSON response. Handler in `app/engine/reflection_handler.py` — `_build_execution_summary()` collects the most recent N `node_*` keys from context (hard cap 25, configurable via `maxHistoryNodes`), truncates each to 800 chars to prevent token explosion, and injects the trigger payload. `reflectionPrompt` is a Jinja2 template with `{{ execution_summary }}` available alongside all normal context variables. `_parse_json_response()` strips markdown fences, falls back to regex `{...}` extraction, and returns `{"reflection": raw, "parse_error": True}` as a last resort. `outputKeys` warns (non-blocking) if any expected top-level keys are absent from the response. Node registered in `shared/node_registry.json` under category `agent`. Dispatch added in `node_handlers.py` via label match `"Reflection"`. Frontend: `reflectionPrompt` added to `REQUIRED_FIELDS` in `validateWorkflow.ts`; `_raw_response` added to `NODE_OUTPUT_FIELDS` in `expressionVariables.ts`. Node is intentionally read-only — it never mutates the shared context; downstream Condition nodes route on its returned JSON fields (e.g., `node_X.next_action == "escalate"`). Full Langfuse observability via `record_generation`. No DB migration required.
 >
@@ -28,9 +30,9 @@
 
 ## AE AI Hub — Agentic Orchestrator Technical Blueprint
 
-**Version:** 0.9.12
-**Last updated:** 2026-04-07
-**Status:** V0.9.12 A2A Protocol; V0.9.11 Operator cancel/pause/resume; V0.9.10 Bridge User Reply + Studio chat formatting + `displayName`; V0.9.9 Loop Node; V0.9.8 Rich Token Streaming; V0.9.7 Checkpoint-aware Langfuse; V0.9.6 Checkpointing; V0.9.5 Reflection; V0.9.4 HITL UX; V0.9.3 Deterministic batch; V0.9.2 UX; V0.9.1 Stateful DAGs; V0.9 execution; V0.8 enterprise; earlier milestones through V0.1
+**Version:** 0.9.13
+**Last updated:** 2026-04-10
+**Status:** V0.9.13 Template gallery + sync execute + debug replay; V0.9.12 A2A Protocol; V0.9.11 Operator cancel/pause/resume; V0.9.10 Bridge User Reply + Studio chat formatting + `displayName`; V0.9.9 Loop Node; V0.9.8 Rich Token Streaming; V0.9.7 Checkpoint-aware Langfuse; V0.9.6 Checkpointing; V0.9.5 Reflection; V0.9.4 HITL UX; V0.9.3 Deterministic batch; V0.9.2 UX; V0.9.1 Stateful DAGs; V0.9 execution; V0.8 enterprise; earlier milestones through V0.1
 > - **V0.7 Observability, MCP Streaming & Tenant Tools (2026-03-20)**: Langfuse v4 integration (`app/observability.py`) — root trace per workflow execution, child spans per node, LLM generation recording with token usage, tool call spans. MCP client rewritten to use MCP Python SDK with Streamable HTTP transport (`app/engine/mcp_client.py`) — replaces raw httpx REST bridge with standard MCP protocol. Tool listing and ReAct tool definitions now fetched live from MCP server. TenantToolOverride consumed by tools endpoint to filter MCP tools per tenant.
 >
 > - **V0.6 Advanced Agent Capabilities (2026-03-20)**: ReAct iterative tool-calling loop (`app/engine/react_loop.py`) with multi-provider support (Google/OpenAI/Anthropic tool-calling APIs). SSE real-time execution updates (`app/api/sse.py`) replacing frontend polling. Celery Beat cron scheduler (`app/workers/scheduler.py`) for schedule triggers with croniter. Frontend palette now hydrated from `shared/node_registry.json` via `src/lib/registry.ts`. Backend config validation against registry schemas on save (`app/engine/config_validator.py`).
@@ -107,7 +109,7 @@ This module does **not** modify any existing `AEAgenticSupport` code. It runs as
 │                  FastAPI Gateway (port 8001)                         │
 │                                                                      │
 │  POST /api/v1/workflows          — Save graph JSON                   │
-│  POST /api/v1/workflows/{id}/execute  — Enqueue to Celery            │
+│  POST /api/v1/workflows/{id}/execute  — 202 + Celery, or 200 if sync:true │
 │  POST /api/v1/workflows/{id}/instances/{iid}/callback — HITL resume  │
 │  POST /api/v1/workflows/{id}/instances/{iid}/pause|resume-paused|cancel │
 │  GET  /api/v1/workflows/{id}/status   — Execution logs               │
@@ -161,8 +163,16 @@ orchestrator/frontend/src/
 │   ├── sidebar/
 │   │   ├── NodePalette.tsx         # Left: draggable node categories
 │   │   └── PropertyInspector.tsx   # Right: node config forms
-│   └── ui/                         # shadcn components (11 total)
+│   ├── toolbar/
+│   │   ├── Toolbar.tsx             # Save, Run, Templates, sync-run checkbox, …
+│   │   ├── ExecutionPanel.tsx      # Logs, pause/cancel, HITL, Debug replay entry
+│   │   ├── TemplateGalleryDialog.tsx
+│   │   └── DebugReplayBar.tsx      # Checkpoint timeline + context JSON
+│   └── ui/                         # shadcn components
 └── lib/
+    ├── templates/index.ts          # Bundled workflow templates (marketplace)
+    ├── exampleComplexWorkflow.ts   # Still imported by templates
+    ├── exampleMainAppWorkflow.ts
     └── utils.ts                    # cn() utility
 ```
 
@@ -447,7 +457,7 @@ prompts to be reusable across different workflow topologies.
 | `GET` | `/{workflow_id}` | 200 | Get single workflow |
 | `PATCH` | `/{workflow_id}` | 200 | Update name/description/graph (bumps version) |
 | `DELETE` | `/{workflow_id}` | 204 | Delete workflow and cascade instances |
-| `POST` | `/{workflow_id}/execute` | 202 | Create instance, enqueue to Celery |
+| `POST` | `/{workflow_id}/execute` | 202 / 200 | **202:** create instance, enqueue Celery (`InstanceOut`). **200:** if body has `sync: true` — run `execute_graph` inline (thread pool + timeout), return `SyncExecuteOut` with final `output` (see `ExecuteRequest` in `schemas.py`) |
 | `POST` | `/{workflow_id}/instances/{instance_id}/callback` | 200 | Resume **suspended** (HITL) instance; optional `context_patch` |
 | `POST` | `/{workflow_id}/instances/{instance_id}/retry` | 200 | Retry **failed** instance (`RetryRequest`) |
 | `POST` | `/{workflow_id}/instances/{instance_id}/pause` | 200 | Request cooperative **pause** after current node (`pause_requested`) |
@@ -500,6 +510,8 @@ prompts to be reusable across different workflow topologies.
 | `GET` | `/health` | Returns `{"status": "ok", "service": "ae-ai-hub-orchestrator"}` |
 
 All workflow/tool endpoints require the `X-Tenant-Id` request header for tenant isolation.
+
+**Execute request body** (`ExecuteRequest`): `trigger_payload`, `deterministic_mode`, **`sync`** (default `false`), **`sync_timeout`** (seconds, 5–3600, default 120). Synchronous runs bypass Celery for that HTTP request even when `ORCHESTRATOR_USE_CELERY=true`; use only for short, API-first callers. Timeout → **504**.
 
 ---
 
@@ -799,6 +811,8 @@ After every successful node completion the engine calls `_save_checkpoint(db, in
 **API surface:**
 - `GET /instances/{id}/checkpoints` → `list[CheckpointOut]` — id, instance_id, node_id, saved_at (no context payload for brevity)
 - `GET /instances/{id}/checkpoints/{checkpoint_id}` → `CheckpointDetailOut` — adds `context_json`
+
+**Hub UI (V0.9.13):** After a terminal run, **Debug** in `ExecutionPanel` fetches the checkpoint list and steps through snapshots; `flowStore.updateNodeData` sets per-node `status` for completed vs current checkpoint; `AgenticNode` shows an indigo ring on the checkpoint-under-inspection node.
 
 **Langfuse linking (V0.9.7):** `_save_checkpoint` returns the checkpoint UUID. For sequential nodes (`_execute_single_node`), the id is passed to `span.update(output={..., "checkpoint_id": ...})` while the Langfuse span is still open — the span metadata in the Langfuse UI directly references the DB row. For parallel nodes (`_apply_result`), the Langfuse span has already closed; the checkpoint_id is instead embedded in `log_entry.output_json["_checkpoint_id"]`, remaining queryable via the execution log API. `span_node()` accepts an optional `checkpoint_id` kwarg for callers that can supply it at span creation time.
 

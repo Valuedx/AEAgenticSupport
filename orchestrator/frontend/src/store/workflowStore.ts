@@ -2,14 +2,18 @@ import { create } from "zustand";
 import type { Edge, Node } from "@xyflow/react";
 import {
   api,
+  ApiError,
   type WorkflowOut,
   type InstanceOut,
   type InstanceDetailOut,
   type InstanceContextOut,
+  type SyncExecuteOut,
+  type CheckpointOut,
+  type CheckpointDetailOut,
 } from "@/lib/api";
 import { useFlowStore } from "@/store/flowStore";
-import { EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW } from "@/lib/exampleComplexWorkflow";
-import { EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW } from "@/lib/exampleMainAppWorkflow";
+import { getWorkflowTemplate } from "@/lib/templates";
+import type { AgenticNodeData } from "@/types/nodes";
 
 interface WorkflowState {
   currentWorkflow: WorkflowOut | null;
@@ -33,8 +37,12 @@ interface WorkflowState {
 
   loading: boolean;
   error: string | null;
+  /** Non-error banner (e.g. historical graph restored for replay). */
+  notice: string | null;
 
   _sseCleanup: (() => void) | null;
+  dismissError: () => void;
+  dismissNotice: () => void;
 
   fetchWorkflows: () => Promise<void>;
   fetchInstances: (workflowId: string) => Promise<void>;
@@ -42,9 +50,17 @@ interface WorkflowState {
   saveWorkflow: (name?: string) => Promise<void>;
   deleteWorkflow: (id: string) => Promise<void>;
   newWorkflow: () => void;
-  loadExampleComplexWorkflow: () => void;
-  loadAutomationEdgeMainWorkflow: () => void;
+  /** Load a bundled template by id (see `lib/templates`). */
+  loadTemplate: (templateId: string) => void;
+  /** Replace canvas from portable `{ nodes, edges }` JSON. */
+  importGraphJson: (graph: { nodes: unknown[]; edges: unknown[] }) => void;
+  /** Downloadable JSON blob of the current canvas. */
+  exportCurrentGraph: () => Blob;
   markDirty: () => void;
+
+  /** When true, Run uses synchronous execute (API holds until terminal status). */
+  runSync: boolean;
+  setRunSync: (v: boolean) => void;
 
   executeWorkflow: (triggerPayload?: Record<string, unknown>) => Promise<void>;
   /** Ask backend to cancel after the current node finishes (between nodes). */
@@ -70,6 +86,25 @@ interface WorkflowState {
   pollInstance: (workflowId: string, instanceId: string) => Promise<void>;
   streamInstance: (workflowId: string, instanceId: string) => void;
   clearExecution: () => void;
+  /** Load instance from Execution history: detail, optional canvas align, SSE. */
+  openInstanceFromHistory: (workflowId: string, instanceId: string) => Promise<void>;
+  alignCanvasToInstanceVersion: (
+    workflowId: string,
+    instance: InstanceDetailOut,
+  ) => Promise<void>;
+
+  /** Step-through replay using server checkpoints (terminal runs). */
+  isDebugMode: boolean;
+  debugCheckpoints: CheckpointOut[];
+  activeCheckpointIdx: number | null;
+  activeCheckpointDetail: CheckpointDetailOut | null;
+  /** Separate loading flag scoped to debug replay (avoids clashing with save/load). */
+  debugLoading: boolean;
+  enterDebugMode: () => Promise<void>;
+  exitDebugMode: () => void;
+  selectCheckpointIdx: (idx: number) => Promise<void>;
+  stepDebugPrev: () => Promise<void>;
+  stepDebugNext: () => Promise<void>;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
@@ -83,7 +118,104 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   streamingTokens: {},
   loading: false,
   error: null,
+  notice: null,
   _sseCleanup: null,
+
+  dismissError: () => set({ error: null }),
+  dismissNotice: () => set({ notice: null }),
+  runSync: false,
+  isDebugMode: false,
+  debugCheckpoints: [],
+  activeCheckpointIdx: null,
+  activeCheckpointDetail: null,
+  debugLoading: false,
+
+  setRunSync: (v) => set({ runSync: v }),
+
+  enterDebugMode: async () => {
+    const wf = get().currentWorkflow;
+    const inst = get().activeInstance;
+    if (!wf || !inst) return;
+    set({ debugLoading: true, error: null });
+    try {
+      const cps = await api.listCheckpoints(wf.id, inst.id);
+      set({
+        debugCheckpoints: cps,
+        isDebugMode: true,
+        activeCheckpointIdx: null,
+        activeCheckpointDetail: null,
+        debugLoading: false,
+      });
+      if (cps.length > 0) {
+        await get().selectCheckpointIdx(0);
+      }
+    } catch (e) {
+      set({
+        error: String(e),
+        debugLoading: false,
+        isDebugMode: false,
+        debugCheckpoints: [],
+      });
+    }
+  },
+
+  exitDebugMode: () => {
+    const fs = useFlowStore.getState();
+    for (const n of fs.nodes) {
+      fs.updateNodeData(n.id, { status: "idle" });
+    }
+    set({
+      isDebugMode: false,
+      debugCheckpoints: [],
+      activeCheckpointIdx: null,
+      activeCheckpointDetail: null,
+      debugLoading: false,
+    });
+  },
+
+  selectCheckpointIdx: async (idx) => {
+    const wf = get().currentWorkflow;
+    const inst = get().activeInstance;
+    const cps = get().debugCheckpoints;
+    if (!wf || !inst || idx < 0 || idx >= cps.length) return;
+    set({ debugLoading: true, error: null });
+    try {
+      const detail = await api.getCheckpointDetail(wf.id, inst.id, cps[idx].id);
+      const completed = new Set<string>();
+      for (let j = 0; j < idx; j++) {
+        completed.add(cps[j].node_id);
+      }
+      const cursor = cps[idx].node_id;
+      const fs = useFlowStore.getState();
+      for (const n of fs.nodes) {
+        let st: NonNullable<AgenticNodeData["status"]> = "idle";
+        if (n.id === cursor) st = "running";
+        else if (completed.has(n.id)) st = "completed";
+        fs.updateNodeData(n.id, { status: st });
+      }
+      set({
+        activeCheckpointIdx: idx,
+        activeCheckpointDetail: detail,
+        debugLoading: false,
+      });
+    } catch (e) {
+      set({ error: String(e), debugLoading: false });
+    }
+  },
+
+  stepDebugPrev: async () => {
+    const i = get().activeCheckpointIdx;
+    const cps = get().debugCheckpoints;
+    if (i == null || i <= 0 || cps.length === 0) return;
+    await get().selectCheckpointIdx(i - 1);
+  },
+
+  stepDebugNext: async () => {
+    const i = get().activeCheckpointIdx;
+    const cps = get().debugCheckpoints;
+    if (i == null || i >= cps.length - 1) return;
+    await get().selectCheckpointIdx(i + 1);
+  },
 
   fetchWorkflows: async () => {
     set({ loading: true, error: null });
@@ -117,7 +249,18 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
       useFlowStore.getState().replaceGraph(newNodes, newEdges);
 
-      set({ currentWorkflow: wf, isDirty: false, loading: false, activeInstance: null });
+      set({
+        currentWorkflow: wf,
+        isDirty: false,
+        loading: false,
+        activeInstance: null,
+        isDebugMode: false,
+        debugCheckpoints: [],
+        activeCheckpointIdx: null,
+        activeCheckpointDetail: null,
+        debugLoading: false,
+        notice: null,
+      });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -143,7 +286,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         });
       }
 
-      set({ currentWorkflow: wf, isDirty: false, loading: false });
+      set({ currentWorkflow: wf, isDirty: false, loading: false, notice: null });
       get().fetchWorkflows();
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -167,28 +310,73 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   newWorkflow: () => {
     useFlowStore.getState().replaceGraph([], []);
-    set({ currentWorkflow: null, isDirty: false, activeInstance: null });
-  },
-
-  loadExampleComplexWorkflow: () => {
-    const { nodes, edges } = EXAMPLE_IT_SUPPORT_HELPDESK_WORKFLOW;
-    useFlowStore.getState().replaceGraph(nodes, edges);
     set({
       currentWorkflow: null,
-      isDirty: true,
+      isDirty: false,
       activeInstance: null,
+      isDebugMode: false,
+      debugCheckpoints: [],
+      activeCheckpointIdx: null,
+      activeCheckpointDetail: null,
+      debugLoading: false,
+      notice: null,
       error: null,
     });
   },
 
-  loadAutomationEdgeMainWorkflow: () => {
-    const { nodes, edges } = EXAMPLE_AUTOMATIONEDGE_MAIN_WORKFLOW;
+  loadTemplate: (templateId) => {
+    const t = getWorkflowTemplate(templateId);
+    if (!t) {
+      set({ error: `Unknown template: ${templateId}` });
+      return;
+    }
+    const prev = get()._sseCleanup;
+    if (prev) prev();
+    const { nodes, edges } = t.graph;
     useFlowStore.getState().replaceGraph(nodes, edges);
     set({
       currentWorkflow: null,
       isDirty: true,
       activeInstance: null,
+      isExecuting: false,
+      _sseCleanup: null,
       error: null,
+      notice: null,
+      isDebugMode: false,
+      debugCheckpoints: [],
+      activeCheckpointIdx: null,
+      activeCheckpointDetail: null,
+      debugLoading: false,
+    });
+  },
+
+  importGraphJson: (graph) => {
+    const prev = get()._sseCleanup;
+    if (prev) prev();
+    const newNodes = (graph.nodes ?? []) as Node[];
+    const newEdges = (graph.edges ?? []) as Edge[];
+    useFlowStore.getState().replaceGraph(newNodes, newEdges);
+    set({
+      currentWorkflow: null,
+      isDirty: true,
+      activeInstance: null,
+      isExecuting: false,
+      _sseCleanup: null,
+      error: null,
+      notice: null,
+      isDebugMode: false,
+      debugCheckpoints: [],
+      activeCheckpointIdx: null,
+      activeCheckpointDetail: null,
+      debugLoading: false,
+    });
+  },
+
+  exportCurrentGraph: () => {
+    const { nodes, edges } = useFlowStore.getState();
+    const graph_json = { nodes, edges };
+    return new Blob([JSON.stringify(graph_json, null, 2)], {
+      type: "application/json",
     });
   },
 
@@ -198,21 +386,99 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   executeWorkflow: async (triggerPayload) => {
     const wf = get().currentWorkflow;
-    if (!wf) return;
+    if (!wf) {
+      set({
+        error:
+          "Save the workflow before running. Use Save in the toolbar after loading a template or importing JSON.",
+      });
+      return;
+    }
 
-    set({ isExecuting: true, error: null, streamingTokens: {} });
+    set({ isExecuting: true, error: null, notice: null, streamingTokens: {} });
     try {
       if (get().isDirty) {
         await get().saveWorkflow();
       }
-      const instance = await api.executeWorkflow(wf.id, triggerPayload);
-      set({
-        activeInstance: { ...instance, logs: [] },
-        isExecuting: true,
-      });
-      get().streamInstance(wf.id, instance.id);
+      const result = await api.executeWorkflow(
+        wf.id,
+        triggerPayload,
+        undefined,
+        get().runSync,
+      );
+      const isSync = (r: InstanceOut | SyncExecuteOut): r is SyncExecuteOut =>
+        "instance_id" in r && "output" in r && !("id" in r);
+      if (isSync(result)) {
+        let detail: InstanceDetailOut;
+        try {
+          detail = await api.getInstanceDetail(wf.id, result.instance_id);
+        } catch {
+          detail = {
+            id: result.instance_id,
+            tenant_id: "",
+            workflow_def_id: wf.id,
+            status: result.status,
+            current_node_id: null,
+            started_at: result.started_at,
+            completed_at: result.completed_at,
+            created_at: result.started_at ?? new Date().toISOString(),
+            logs: [],
+            definition_version_at_start: wf.version,
+          };
+        }
+        set({
+          activeInstance: detail,
+          isExecuting: false,
+        });
+      } else {
+        const instance = result as InstanceOut;
+        set({
+          activeInstance: { ...instance, logs: [] },
+          isExecuting: true,
+        });
+        get().streamInstance(wf.id, instance.id);
+      }
     } catch (e) {
-      set({ error: String(e), isExecuting: false });
+      if (e instanceof ApiError && e.status === 504) {
+        const rawId = e.json?.instance_id;
+        const iid = typeof rawId === "string" ? rawId : null;
+        const wfNow = get().currentWorkflow;
+        if (iid && wfNow) {
+          set({
+            error:
+              "Synchronous run timed out; the workflow may still be running. Subscribing to live updates below.",
+            isExecuting: true,
+            activeInstance: {
+              id: iid,
+              tenant_id: "",
+              workflow_def_id: wfNow.id,
+              status: "running",
+              current_node_id: null,
+              started_at: null,
+              completed_at: null,
+              created_at: new Date().toISOString(),
+              logs: [],
+              definition_version_at_start: wfNow.version,
+            },
+          });
+          get().streamInstance(wfNow.id, iid);
+          void api
+            .getInstanceDetail(wfNow.id, iid)
+            .then((detail) => {
+              set({ activeInstance: detail });
+            })
+            .catch(() => {});
+          return;
+        }
+        if (iid) {
+          set({
+            error: `Synchronous run timed out. Instance id: ${iid}. Open this workflow and use Execution history, or poll GET …/instances/${iid}.`,
+            isExecuting: false,
+            activeInstance: null,
+          });
+          return;
+        }
+      }
+      set({ error: String(e), isExecuting: false, activeInstance: null });
     }
   },
 
@@ -336,6 +602,40 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     }
   },
 
+  alignCanvasToInstanceVersion: async (workflowId, instance) => {
+    const v = instance.definition_version_at_start;
+    const wf = get().currentWorkflow;
+    if (v == null || !wf || wf.id !== workflowId) return;
+    if (v === wf.version) return;
+    try {
+      const { graph_json } = await api.getGraphAtVersion(workflowId, v);
+      const nodes = (graph_json.nodes ?? []) as Node[];
+      const edges = (graph_json.edges ?? []) as Edge[];
+      useFlowStore.getState().replaceGraph(nodes, edges);
+      set({
+        isDirty: true,
+        notice: `Canvas restored to definition version ${v} from when this run started. The saved workflow is still version ${wf.version}. Save to keep this graph as a new revision, or reload the workflow to return to the latest version.`,
+      });
+    } catch {
+      set({
+        notice: `Could not load the historical graph for version ${v}. Replay overlays may not match the canvas.`,
+      });
+    }
+  },
+
+  openInstanceFromHistory: async (workflowId, instanceId) => {
+    set({ error: null, notice: null });
+    try {
+      const detail = await api.getInstanceDetail(workflowId, instanceId);
+      await get().alignCanvasToInstanceVersion(workflowId, detail);
+      const running = detail.status === "queued" || detail.status === "running";
+      set({ activeInstance: detail, isExecuting: running });
+      get().streamInstance(workflowId, instanceId);
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
   pollInstance: async (workflowId, instanceId) => {
     const poll = async () => {
       try {
@@ -361,6 +661,22 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   clearExecution: () => {
     const prev = get()._sseCleanup;
     if (prev) prev();
-    set({ activeInstance: null, isExecuting: false, _sseCleanup: null });
+    if (get().isDebugMode) {
+      const fs = useFlowStore.getState();
+      for (const n of fs.nodes) {
+        fs.updateNodeData(n.id, { status: "idle" });
+      }
+    }
+    set({
+      activeInstance: null,
+      isExecuting: false,
+      _sseCleanup: null,
+      isDebugMode: false,
+      debugCheckpoints: [],
+      activeCheckpointIdx: null,
+      activeCheckpointDetail: null,
+      debugLoading: false,
+      notice: null,
+    });
   },
 }));
