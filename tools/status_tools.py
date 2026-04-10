@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 import re
 from config.client_policy import format_client_message
+from config import related_applications as related_app_registry
 from config.settings import CONFIG
 from security.workflow_access import (
     can_execute_workflow,
@@ -303,42 +304,28 @@ def _extract_related_issue_text(log_result: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _detect_related_issue(log_result: dict[str, Any]) -> dict[str, str] | None:
+def _detect_related_issue(log_result: dict[str, Any]) -> dict[str, Any] | None:
     text = _extract_related_issue_text(log_result)
-    lowered = text.lower()
-    if not lowered:
+    workflow_name = str(
+        (log_result or {}).get("workflow_name")
+        or (log_result or {}).get("workflowName")
+        or ""
+    ).strip()
+    matched = related_app_registry.find_matching_related_application(
+        text,
+        workflow_name=workflow_name,
+    )
+    if not matched:
         return None
 
-    life_asia_markers = ("life asia", "life_asia", "lifeasia")
-    tebt_markers = ("tebt",)
-    life_asia_context = ("connect", "connection", "timeout", "down", "unavailable", "socket", "host", "service")
-    tebt_context = ("login", "portal", "credential", "password", "auth", "authentication", "session", "sign in", "signin")
-
-    if any(marker in lowered for marker in life_asia_markers) and (
-        any(marker in lowered for marker in life_asia_context) or "life asia" in lowered
-    ):
-        workflow_name = str(CONFIG.get("LIFE_ASIA_HEALTH_CHECK_WORKFLOW", "") or "").strip()
-        if workflow_name:
-            return {
-                "issue_type": "life_asia",
-                "issue_label": "Life Asia",
-                "health_check_label": "Life Asia health check",
-                "workflow_name": workflow_name,
-            }
-
-    if any(marker in lowered for marker in tebt_markers) and (
-        any(marker in lowered for marker in tebt_context) or "tebt" in lowered
-    ):
-        workflow_name = str(CONFIG.get("TEBT_HEALTH_CHECK_WORKFLOW", "") or "").strip()
-        if workflow_name:
-            return {
-                "issue_type": "tebt",
-                "issue_label": "TEBT",
-                "health_check_label": "TEBT health check",
-                "workflow_name": workflow_name,
-            }
-
-    return None
+    return {
+        "issue_type": str(matched.get("issue_type") or "").strip(),
+        "issue_label": str(matched.get("issue_label") or "").strip(),
+        "health_check_label": str(matched.get("health_check_label") or "").strip(),
+        "workflow_name": str(matched.get("health_check_workflow") or "").strip(),
+        "markers": list(matched.get("markers") or []),
+        "contexts": list(matched.get("contexts") or []),
+    }
 
 
 def _normalize_related_issue_sentence(value: Any) -> str:
@@ -358,36 +345,33 @@ def _normalize_related_issue_sentence(value: Any) -> str:
     return text
 
 
-def _extract_related_issue_reason(log_result: dict[str, Any], issue_info: dict[str, str]) -> str:
+def _extract_related_issue_reason(log_result: dict[str, Any], issue_info: dict[str, Any]) -> str:
     if not isinstance(log_result, dict):
         return ""
 
     issue_label = str(issue_info.get("issue_label") or "Related application").strip()
     issue_type = str(issue_info.get("issue_type") or "").strip().lower()
+    related_app = related_app_registry.get_related_application(issue_type)
     context_tokens = {
-        "connect",
-        "connection",
-        "timeout",
-        "down",
-        "unavailable",
-        "socket",
-        "host",
-        "service",
-        "login",
-        "portal",
-        "credential",
-        "password",
-        "auth",
-        "authentication",
-        "session",
-        "sign in",
-        "signin",
+        str(value).lower()
+        for value in (
+            issue_info.get("contexts")
+            or (related_app or {}).get("contexts")
+            or []
+        )
+        if str(value).strip()
     }
-    markers = {issue_label.lower()}
-    if issue_type == "life_asia":
-        markers.update({"life asia", "life_asia", "lifeasia"})
-    elif issue_type == "tebt":
-        markers.add("tebt")
+    markers = {
+        str(value).lower()
+        for value in (
+            issue_info.get("markers")
+            or (related_app or {}).get("markers")
+            or [issue_label]
+        )
+        if str(value).strip()
+    }
+    if issue_label:
+        markers.add(issue_label.lower())
 
     candidates: list[str] = []
     primary_error = log_result.get("primary_error")
@@ -552,63 +536,35 @@ def _build_related_issue_status_message(
     return " ".join(part.strip() for part in parts if str(part or "").strip())
 
 
-def _build_related_health_check_summary(issue_info: dict[str, str], status: str, org_code: str = "") -> str:
-    issue_type = str(issue_info.get("issue_type") or "").strip().lower()
+def _build_related_health_check_summary(issue_info: dict[str, Any], status: str, org_code: str = "") -> str:
+    issue_label = str(issue_info.get("issue_label") or "Related application").strip()
     normalized = str(status or "").strip().upper()
     success_statuses = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED"}
     failure_statuses = {"FAILURE", "FAILED", "ERROR", "DOWN", "TERMINATED", "CANCELLED"}
 
-    if issue_type == "life_asia":
-        if normalized in success_statuses:
-            return format_client_message(
-                "life_asia_health_up",
-                "Life Asia is currently up and running.",
-                org_code=org_code,
-                application="Life Asia",
-                status=status,
-            )
-        if normalized in failure_statuses:
-            return format_client_message(
-                "life_asia_health_down",
-                "Life Asia is currently unavailable.",
-                org_code=org_code,
-                application="Life Asia",
-                status=status,
-            )
+    if normalized in success_statuses:
         return format_client_message(
-            "life_asia_health_running",
-            "Life Asia health check is still running. Current status: {status}.",
+            "related_application_health_up",
+            "{application} is currently up and running.",
             org_code=org_code,
-            application="Life Asia",
+            application=issue_label,
             status=status,
         )
-
-    if issue_type == "tebt":
-        if normalized in success_statuses:
-            return format_client_message(
-                "tebt_health_up",
-                "TEBT is currently up and running.",
-                org_code=org_code,
-                application="TEBT",
-                status=status,
-            )
-        if normalized in failure_statuses:
-            return format_client_message(
-                "tebt_health_down",
-                "TEBT is currently unavailable.",
-                org_code=org_code,
-                application="TEBT",
-                status=status,
-            )
+    if normalized in failure_statuses:
         return format_client_message(
-            "tebt_health_running",
-            "TEBT health check is still running. Current status: {status}.",
+            "related_application_health_down",
+            "{application} is currently unavailable.",
             org_code=org_code,
-            application="TEBT",
+            application=issue_label,
             status=status,
         )
-
-    return f"Related health check status: {status}."
+    return format_client_message(
+        "related_application_health_running",
+        "{application} health check is still running. Current status: {status}.",
+        org_code=org_code,
+        application=issue_label,
+        status=status,
+    )
 
 
 def _run_related_health_check(
@@ -693,7 +649,7 @@ def _maybe_add_related_issue_health_check(
     latest: dict[str, Any],
     org_code: str = "",
 ) -> dict[str, Any] | None:
-    """Diagnose Life Asia / TEBT related failures without running a health check.
+    """Diagnose related application failures without running a health check.
 
     Status checks should explain the likely application-related reason, but the
     actual application health validation is deferred until the user asks to

@@ -1,6 +1,5 @@
 from unittest.mock import patch
 
-from config.settings import CONFIG
 from tools import remediation_tools
 import json
 
@@ -192,13 +191,26 @@ def test_run_related_health_check_uses_execution_status_error_when_logs_do_not_i
         def refresh_execution_payload(self, execution_id, record=None, workflow_name="", recent_limit=25):
             return dict(record or {})
 
-    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch.dict(
-        CONFIG,
-        {
-            "LIFE_ASIA_HEALTH_CHECK_WORKFLOW": "TEBT_Health_Check",
-            "TEBT_HEALTH_CHECK_WORKFLOW": "Life_Asia_Health_Check",
-        },
-        clear=False,
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.status_tools.related_app_registry.get_related_applications",
+        return_value=[
+            {
+                "issue_type": "life_asia",
+                "issue_label": "Life Asia",
+                "health_check_label": "Life Asia health check",
+                "health_check_workflow": "TEBT_Health_Check",
+                "markers": ["life asia", "life_asia", "lifeasia"],
+                "contexts": ["connect", "connection", "timeout", "down", "unavailable", "socket", "host", "service"],
+            },
+            {
+                "issue_type": "tebt",
+                "issue_label": "TEBT",
+                "health_check_label": "TEBT health check",
+                "health_check_workflow": "Life_Asia_Health_Check",
+                "markers": ["tebt"],
+                "contexts": ["login", "portal", "credential", "password", "auth", "authentication", "session", "sign in", "signin"],
+            },
+        ],
     ), patch(
         "tools.log_tools.get_execution_logs",
         return_value={"report": "Generic failure with no app details."},

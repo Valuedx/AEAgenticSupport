@@ -1,6 +1,27 @@
 from tools import status_tools
 
 
+def _registry_entries():
+    return [
+        {
+            "issue_type": "life_asia",
+            "issue_label": "Life Asia",
+            "health_check_label": "Life Asia health check",
+            "health_check_workflow": "TEBT_Health_Check",
+            "markers": ["life asia", "life_asia", "lifeasia"],
+            "contexts": ["connect", "connection", "timeout", "down", "unavailable", "socket", "host", "service"],
+        },
+        {
+            "issue_type": "tebt",
+            "issue_label": "TEBT",
+            "health_check_label": "TEBT health check",
+            "health_check_workflow": "Life_Asia_Health_Check",
+            "markers": ["tebt"],
+            "contexts": ["login", "portal", "credential", "password", "auth", "authentication", "session", "sign in", "signin"],
+        },
+    ]
+
+
 class _StatusClient:
     default_org_code = "AEGEMS"
 
@@ -52,9 +73,12 @@ def test_check_workflow_status_describes_life_asia_issue_without_running_health_
 
     monkeypatch.setitem(status_tools.CONFIG, "ENABLE_RELATED_ISSUE_HEALTH_CHECK", True)
     monkeypatch.setitem(status_tools.CONFIG, "RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)
-    monkeypatch.setitem(status_tools.CONFIG, "LIFE_ASIA_HEALTH_CHECK_WORKFLOW", "TEBT_Health_Check")
-    monkeypatch.setitem(status_tools.CONFIG, "TEBT_HEALTH_CHECK_WORKFLOW", "Life_Asia_Health_Check")
     monkeypatch.setattr(status_tools, "get_ae_client", lambda: client)
+    monkeypatch.setattr(
+        status_tools.related_app_registry,
+        "get_related_applications",
+        _registry_entries,
+    )
     monkeypatch.setattr(
         "tools.log_tools.get_execution_logs",
         lambda execution_id, tail=0, user_id="", org_code="": {
@@ -84,9 +108,12 @@ def test_check_workflow_status_describes_tebt_issue_without_running_health_check
 
     monkeypatch.setitem(status_tools.CONFIG, "ENABLE_RELATED_ISSUE_HEALTH_CHECK", True)
     monkeypatch.setitem(status_tools.CONFIG, "RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)
-    monkeypatch.setitem(status_tools.CONFIG, "LIFE_ASIA_HEALTH_CHECK_WORKFLOW", "TEBT_Health_Check")
-    monkeypatch.setitem(status_tools.CONFIG, "TEBT_HEALTH_CHECK_WORKFLOW", "Life_Asia_Health_Check")
     monkeypatch.setattr(status_tools, "get_ae_client", lambda: client)
+    monkeypatch.setattr(
+        status_tools.related_app_registry,
+        "get_related_applications",
+        _registry_entries,
+    )
     monkeypatch.setattr(
         "tools.log_tools.get_execution_logs",
         lambda execution_id, tail=0, user_id="", org_code="": {
@@ -111,9 +138,12 @@ def test_check_workflow_status_numeric_request_id_uses_related_issue_summary_wit
 
     monkeypatch.setitem(status_tools.CONFIG, "ENABLE_RELATED_ISSUE_HEALTH_CHECK", True)
     monkeypatch.setitem(status_tools.CONFIG, "RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE", True)
-    monkeypatch.setitem(status_tools.CONFIG, "LIFE_ASIA_HEALTH_CHECK_WORKFLOW", "TEBT_Health_Check")
-    monkeypatch.setitem(status_tools.CONFIG, "TEBT_HEALTH_CHECK_WORKFLOW", "Life_Asia_Health_Check")
     monkeypatch.setattr(status_tools, "get_ae_client", lambda: client)
+    monkeypatch.setattr(
+        status_tools.related_app_registry,
+        "get_related_applications",
+        _registry_entries,
+    )
     monkeypatch.setattr(
         "tools.log_tools.get_execution_logs",
         lambda execution_id, tail=0, user_id="", org_code="": {

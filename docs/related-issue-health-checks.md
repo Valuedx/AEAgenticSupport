@@ -10,15 +10,13 @@ It does **not** run a related-system health check during a simple workflow statu
 It only adds related-app diagnosis when:
 
 1. the latest execution is a failure, and
-2. the latest failure logs suggest either:
-   - a `Life Asia` connectivity/system issue, or
-   - a `TEBT` login/portal issue
+2. the latest failure logs suggest a configured related application issue
 
 If those conditions do not match, the current code behaves exactly as before.
 
 ## What Was Added
 
-### 1. Config flags and workflow mapping
+### 1. Config flags and related application registry
 
 File: [config/settings.py](d:/AG_V2/AEAgenticSupport/config/settings.py)
 
@@ -26,10 +24,10 @@ Added new config keys:
 
 - `ENABLE_RELATED_ISSUE_HEALTH_CHECK`
 - `RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE`
-- `LIFE_ASIA_HEALTH_CHECK_WORKFLOW`
-- `TEBT_HEALTH_CHECK_WORKFLOW`
+- `RELATED_APPLICATIONS_CONFIG_PATH`
+- `RELATED_APPLICATIONS_CONFIG_JSON`
 
-These make the feature configurable and avoid burying workflow-name mapping inside the logic.
+These make the feature configurable and avoid burying client-specific application names and workflow-name mapping inside the logic.
 
 ### 2. Root `.env` entries
 
@@ -39,15 +37,9 @@ Added:
 
 - `ENABLE_RELATED_ISSUE_HEALTH_CHECK=true`
 - `RELATED_ISSUE_HEALTH_CHECK_USE_ADMIN_SCOPE=true`
-- `LIFE_ASIA_HEALTH_CHECK_WORKFLOW=TEBT_Health_Check`
-- `TEBT_HEALTH_CHECK_WORKFLOW=Life_Asia_Health_Check`
+- `RELATED_APPLICATIONS_CONFIG_PATH=config/related_applications.json`
 
-Important note:
-
-- Logical `Life Asia health check` is mapped to actual AE workflow `TEBT_Health_Check`
-- Logical `TEBT health check` is mapped to actual AE workflow `Life_Asia_Health_Check`
-
-This matches the workflow-name swap you provided.
+The application labels, marker keywords, and health-check workflows now live in a dedicated registry file so new clients can add their own dependent applications without code changes.
 
 ### 3. Related issue detection from failure evidence
 
@@ -64,7 +56,7 @@ Added helper methods:
 What they do now:
 
 - collect text from execution-log output
-- classify whether the failure looks like `Life Asia` or `TEBT`
+- classify whether the failure looks like one of the configured related applications
 - append a business-readable failure summary into the status result
 - defer the actual application health check until the user asks to retry, restart, resubmit, or retrigger
 

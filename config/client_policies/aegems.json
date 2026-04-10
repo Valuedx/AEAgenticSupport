@@ -3,9 +3,9 @@
   "prompt": {
     "title": "AEGEMS Workflow Policy",
     "append_system_rules": [
-      "For AEGEMS, workflow status checks for Life Asia or TEBT related failures should explain the likely application-related reason without running the application health check immediately.",
+      "For AEGEMS, workflow status checks for configured related-application failures should explain the likely application-related reason without running the application health check immediately.",
       "For AEGEMS, workflow retry decisions must follow the failure-log and health-check flow before any retry action.",
-      "If Life Asia or TEBT is involved, confirm the related application health only when the user asks to retry, restart, resubmit, or retrigger the workflow."
+      "If a configured related application is involved, confirm the related application health only when the user asks to retry, restart, resubmit, or retrigger the workflow."
     ],
     "response_notes": [
       "Keep the wording concise and business-friendly for operations users.",

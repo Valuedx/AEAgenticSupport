@@ -363,7 +363,7 @@ def _pre_trigger_health_gate(client, workflow_name: str, org_code: str) -> dict 
 
     We inspect the latest terminal execution and only gate when:
     - status is failed/error
-    - logs indicate Life Asia or TEBT related issue
+    - logs indicate a configured related application issue
     """
     from tools.status_tools import _get_workflow_instances_compat
 
@@ -1535,8 +1535,9 @@ def trigger_workflow(
         logger.warning(f"Pre-trigger agent check failed for {resolved_name}: {exc}")
 
     # â”€â”€ IMPROVEMENT 6b: Pre-trigger health gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # If the most recent execution of this workflow FAILED due to Life Asia or
-    # TEBT issues, run BOTH health check workflows before allowing the trigger.
+    # If the most recent execution of this workflow failed due to a configured
+    # related application issue, validate that application's health before
+    # allowing the trigger.
     _health_gate_summary = None
     try:
         _health_gate_summary = _pre_trigger_health_gate(client, resolved_name, resolved_org)
@@ -1916,9 +1917,9 @@ tool_registry.register(
     ToolDefinition(
         name="run_related_health_check",
         description=(
-            "Run the configured Life Asia or TEBT application health-check workflow "
+            "Run the configured related application health-check workflow "
             "before a restart, retrigger, or resubmit decision. "
-            "Use this only when a failed execution looks related to one of those applications."
+            "Use this only when a failed execution looks related to a configured dependent application."
         ),
         category="remediation",
         tier="medium_risk",
@@ -1941,7 +1942,7 @@ tool_registry.register(
             },
             "issue_label": {
                 "type": "string",
-                "description": "Optional related application label such as Life Asia or TEBT.",
+                "description": "Optional related application label such as a portal or upstream system name.",
             },
             "user_id": {
                 "type": "string",
@@ -1951,7 +1952,7 @@ tool_registry.register(
         required_params=["execution_id"],
         use_when=(
             "Before restart_execution or resubmit_execution when the failed run appears to be caused by "
-            "Life Asia connectivity or TEBT login or portal issues."
+            "a configured related application issue."
         ),
         avoid_when="Simple status-only checks that do not plan to retry the failed run.",
     ),
