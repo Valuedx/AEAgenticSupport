@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from config.llm_client import llm_client
 from config.settings import CONFIG
 
 logger = logging.getLogger("ops_agent.related_applications")
@@ -146,6 +147,143 @@ def get_related_application(issue_type: str) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_phrase(text: str) -> str:
+    normalized = (
+        str(text or "")
+        .strip()
+        .lower()
+        .replace("_", " ")
+        .replace("-", " ")
+    )
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _extract_json(raw: str):
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def _candidate_related_applications_for_query(query_name: str) -> list[dict[str, Any]]:
+    normalized_query = _normalize_phrase(query_name)
+    if not normalized_query:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for item in get_related_applications():
+        for marker in item.get("markers") or []:
+            marker_text = _normalize_phrase(str(marker))
+            if not marker_text:
+                continue
+            if marker_text in normalized_query:
+                candidates.append(dict(item))
+                break
+    return candidates
+
+
+def classify_direct_related_application_query(query_name: str) -> dict[str, Any]:
+    candidates = _candidate_related_applications_for_query(query_name)
+    if not candidates:
+        return {
+            "decision": "not_alias",
+            "issue_type": "",
+            "confidence": 0.0,
+            "reason": "no_candidate_markers",
+            "candidates": [],
+            "related_application": None,
+        }
+
+    prompt_candidates = [
+        {
+            "issue_type": str(item.get("issue_type") or "").strip(),
+            "issue_label": str(item.get("issue_label") or "").strip(),
+            "markers": [str(value) for value in (item.get("markers") or []) if str(value).strip()][:6],
+        }
+        for item in candidates
+    ]
+    prompt = (
+        "Classify whether this operations query is referring to one configured related application alias.\n"
+        f"Candidate applications: {json.dumps(prompt_candidates, ensure_ascii=True)}\n\n"
+        f"User query: {query_name}\n\n"
+        "Decision rules:\n"
+        "- alias: the user is referring to the application label itself using generic terms like status, workflow, process, bot, or application.\n"
+        "- not_alias: the user is naming a specific workflow/process beyond the application label, or the query is about something else.\n"
+        "- uncertain: you cannot decide safely.\n\n"
+        "Return JSON with fields: decision, issue_type, confidence, reason.\n"
+        "decision must be one of: alias, not_alias, uncertain.\n"
+        "issue_type must be one of the provided candidate issue_type values when decision is alias, otherwise use an empty string."
+    )
+    system = (
+        "You classify short operations queries against a provided related-application registry. "
+        "Use only the provided candidates. "
+        "Respond only with a JSON object."
+    )
+
+    try:
+        raw = llm_client.chat(prompt, system=system, temperature=0.0, max_tokens=220)
+        data = _extract_json(raw)
+        if not isinstance(data, dict):
+            raise ValueError("LLM did not return a JSON object")
+
+        decision = str(data.get("decision", "")).strip().lower()
+        if decision not in {"alias", "not_alias", "uncertain"}:
+            decision = "uncertain"
+
+        issue_type = str(data.get("issue_type", "")).strip().lower()
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        related_application = None
+        if decision == "alias" and issue_type:
+            related_application = next(
+                (
+                    dict(item)
+                    for item in candidates
+                    if str(item.get("issue_type") or "").strip().lower() == issue_type
+                ),
+                None,
+            )
+            if related_application is None:
+                decision = "uncertain"
+                issue_type = ""
+
+        return {
+            "decision": decision,
+            "issue_type": issue_type,
+            "confidence": confidence,
+            "reason": str(data.get("reason", "")).strip(),
+            "candidates": candidates,
+            "related_application": related_application,
+        }
+    except Exception as exc:
+        logger.warning(
+            "Related application alias classification failed for %r: %s",
+            query_name,
+            exc,
+        )
+        return {
+            "decision": "uncertain",
+            "issue_type": "",
+            "confidence": 0.0,
+            "reason": "classifier_error",
+            "candidates": candidates,
+            "related_application": None,
+        }
+
 def find_matching_related_application(
     text: str,
     *,
@@ -175,4 +313,3 @@ def find_matching_related_application(
             best_match = candidate
 
     return dict(best_match[2]) if best_match else None
-

@@ -1,3 +1,5 @@
+import json
+
 from tools import status_tools
 
 
@@ -68,6 +70,74 @@ class _StatusClient:
         return {"status": self.poll_status, "raw": {"status": self.poll_status}}
 
 
+def _mock_related_app_llm(responses: dict[str, dict]):
+    def _fake_chat(prompt, system="", temperature=0.0, max_tokens=None):
+        lowered = str(prompt or "").lower()
+        for query, payload in responses.items():
+            if str(query).lower() in lowered:
+                return json.dumps(payload)
+        return json.dumps(
+            {
+                "decision": "uncertain",
+                "issue_type": "",
+                "confidence": 0.0,
+                "reason": "no_stubbed_response",
+            }
+        )
+
+    return _fake_chat
+
+
+def test_related_application_query_detection_matches_generic_process_and_workflow_phrases(monkeypatch):
+    monkeypatch.setattr(
+        status_tools.related_app_registry,
+        "get_related_applications",
+        _registry_entries,
+    )
+    monkeypatch.setattr(
+        status_tools.related_app_registry.llm_client,
+        "chat",
+        _mock_related_app_llm(
+            {
+                "may i know the status of life asia process": {
+                    "decision": "alias",
+                    "issue_type": "life_asia",
+                    "confidence": 0.98,
+                    "reason": "generic application alias query",
+                },
+                "may i know the status of life asia workflow": {
+                    "decision": "alias",
+                    "issue_type": "life_asia",
+                    "confidence": 0.98,
+                    "reason": "generic application alias query",
+                },
+                "status of life asia surrender process": {
+                    "decision": "not_alias",
+                    "issue_type": "",
+                    "confidence": 0.94,
+                    "reason": "specific workflow phrase present",
+                },
+            }
+        ),
+    )
+
+    process_match = status_tools.related_app_registry.classify_direct_related_application_query(
+        "may i know the status of life asia process"
+    )
+    workflow_match = status_tools.related_app_registry.classify_direct_related_application_query(
+        "may i know the status of life asia workflow"
+    )
+    specific_workflow = status_tools.related_app_registry.classify_direct_related_application_query(
+        "status of life asia surrender process"
+    )
+
+    assert process_match["decision"] == "alias"
+    assert process_match["related_application"]["issue_label"] == "Life Asia"
+    assert workflow_match["decision"] == "alias"
+    assert workflow_match["related_application"]["issue_label"] == "Life Asia"
+    assert specific_workflow["decision"] == "not_alias"
+
+
 def test_check_workflow_status_describes_life_asia_issue_without_running_health_check(monkeypatch):
     client = _StatusClient("Failure")
 
@@ -101,6 +171,147 @@ def test_check_workflow_status_describes_life_asia_issue_without_running_health_
     assert result["related_issue_check"]["application_status"] == "not_checked"
     assert result["related_issue_check"]["health_check_run"] is False
     assert client.executed == []
+
+
+def test_check_workflow_status_related_application_alias_uses_latest_matching_failure(monkeypatch):
+    class AliasClient:
+        default_org_code = "AEGEMS"
+
+        def resolve_cached_workflow_name(self, workflow_name, user_id="", org_code=""):
+            return "MG300W3_Surrender_Process"
+
+        def request(self, method, path, **kwargs):
+            assert method == "GET"
+            assert path == "/api/v1/failures/recent"
+            return {
+                "failures": [
+                    {
+                        "execution_id": "22916",
+                        "workflow_name": "Daily_claim_report_bot",
+                        "status": "Failure",
+                        "error_message": "Life Asia application unavailable",
+                        "failure_time": "2026-04-10T09:08:00+00:00",
+                    }
+                ]
+            }
+
+        def get_workflow_instance_by_id(self, execution_id):
+            return {
+                "id": execution_id,
+                "automationRequestId": execution_id,
+                "workflowName": "Daily_claim_report_bot",
+                "status": "Failure",
+                "createdDate": "2026-04-10T09:08:00+00:00",
+            }
+
+    client = AliasClient()
+
+    monkeypatch.setattr(status_tools, "get_ae_client", lambda: client)
+    monkeypatch.setattr(
+        status_tools.related_app_registry,
+        "get_related_applications",
+        _registry_entries,
+    )
+    monkeypatch.setattr(
+        status_tools.related_app_registry.llm_client,
+        "chat",
+        _mock_related_app_llm(
+            {
+                "may i know the status of life asia process": {
+                    "decision": "alias",
+                    "issue_type": "life_asia",
+                    "confidence": 0.99,
+                    "reason": "generic application alias query",
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "tools.log_tools.get_execution_logs",
+        lambda execution_id, tail=0, user_id="", org_code="": {
+            "workflow_name": "Daily_claim_report_bot",
+            "report": "Life Asia application unavailable.",
+            "primary_error": {"error_message": "Life Asia application unavailable"},
+        },
+    )
+
+    result = status_tools.check_workflow_status("may i know the status of life asia process")
+
+    assert result["issue_label"] == "Life Asia"
+    assert result["latest_execution_id"] == "22916"
+    assert result["workflow_name"] == "Daily_claim_report_bot"
+    assert "MG300W3_Surrender_Process" not in result["message"]
+    assert "Life Asia" in result["message"]
+
+
+def test_check_workflow_status_related_application_alias_fails_closed_without_safe_match(monkeypatch):
+    class AliasClient:
+        default_org_code = "AEGEMS"
+
+        def resolve_cached_workflow_name(self, workflow_name, user_id="", org_code=""):
+            return "MG300W3_Surrender_Process"
+
+        def request(self, method, path, **kwargs):
+            assert method == "GET"
+            assert path == "/api/v1/failures/recent"
+            return {
+                "failures": [
+                    {
+                        "execution_id": "22916",
+                        "workflow_name": "Daily_claim_report_bot",
+                        "status": "Failure",
+                        "error_message": "Upstream portal issue",
+                        "failure_time": "2026-04-10T09:08:00+00:00",
+                    }
+                ]
+            }
+
+        def get_workflow_instance_by_id(self, execution_id):
+            return {
+                "id": execution_id,
+                "automationRequestId": execution_id,
+                "workflowName": "Daily_claim_report_bot",
+                "status": "Failure",
+                "createdDate": "2026-04-10T09:08:00+00:00",
+            }
+
+    client = AliasClient()
+
+    monkeypatch.setattr(status_tools, "get_ae_client", lambda: client)
+    monkeypatch.setattr(
+        status_tools.related_app_registry,
+        "get_related_applications",
+        _registry_entries,
+    )
+    monkeypatch.setattr(
+        status_tools.related_app_registry.llm_client,
+        "chat",
+        _mock_related_app_llm(
+            {
+                "life asia workflow": {
+                    "decision": "alias",
+                    "issue_type": "life_asia",
+                    "confidence": 0.99,
+                    "reason": "generic application alias query",
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "tools.log_tools.get_execution_logs",
+        lambda execution_id, tail=0, user_id="", org_code="": {
+            "workflow_name": "Daily_claim_report_bot",
+            "report": "Portal issue without application marker.",
+            "primary_error": {"error_message": "Portal issue"},
+        },
+    )
+
+    result = status_tools.check_workflow_status("life asia workflow")
+
+    assert result["status"] == "AMBIGUOUS_APPLICATION_QUERY"
+    assert result["issue_label"] == "Life Asia"
+    assert "did not guess" in result["message"]
+    assert "MG300W3_Surrender_Process" not in result["message"]
 
 
 def test_check_workflow_status_describes_tebt_issue_without_running_health_check(monkeypatch):

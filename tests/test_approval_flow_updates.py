@@ -239,9 +239,104 @@ def test_handle_approval_response_for_health_check_executes_follow_up_restart():
             tracker,
         )
 
-    assert "Life Asia is currently up and running." in response
+    assert "Related system check" in response
+    assert "Life Asia is healthy." in response
     assert "Execution 2615124 has been restarted successfully." in response
     assert state.phase == ConversationPhase.RESOLVED
+    assert state.pending_action is None
+
+
+def test_handle_approval_response_for_health_check_surfaces_failed_restart_cleanly():
+    orchestrator = Orchestrator()
+    state = ConversationState()
+    state.conversation_id = "conv-health-follow-up-failure"
+    state.user_id = "webchat:pooja"
+    state.user_role = "technical"
+    state.phase = ConversationPhase.AWAITING_APPROVAL
+    state.pending_action = {
+        "tool": "run_related_health_check",
+        "args": {
+            "execution_id": "2616407",
+            "workflow_name": "Daily_claim_report_bot",
+            "health_check_workflow": "Life_Asia_Health_Check",
+            "issue_label": "Life Asia",
+            "org_code": "AEGEMS",
+        },
+        "tier": "medium_risk",
+        "authorized_users": [],
+        "request_id": "apprv-health-failure",
+        "follow_up_action": {
+            "tool": "restart_execution",
+            "args": {
+                "execution_id": "2616407",
+                "workflow_name": "Daily_claim_report_bot",
+                "org_code": "AEGEMS",
+                "_skip_retry_health_gate": True,
+            },
+            "tier": "medium_risk",
+            "authorized_users": [],
+        },
+    }
+    state.pending_action_summary = "run_related_health_check on Life_Asia_Health_Check"
+    tracker = MagicMock()
+
+    with patch.object(
+        orchestrator.approval_gate,
+        "classify_approval_turn",
+        return_value=ApprovalIntentResult(
+            intent=ApprovalIntent.APPROVE,
+            confidence=0.99,
+            reason="approve_phrase",
+        ),
+    ), patch.object(
+        orchestrator.approval_gate,
+        "log_decision",
+    ), patch(
+        "agents.orchestrator.tool_registry.execute",
+        side_effect=[
+            ToolResult(
+                success=True,
+                data={
+                    "success": True,
+                    "health_gate_required": True,
+                    "health_gate_passed": True,
+                    "message": "Life Asia is currently up and running.",
+                    "issue_label": "Life Asia",
+                },
+                tool_name="run_related_health_check",
+            ),
+            ToolResult(
+                success=False,
+                data={
+                    "success": False,
+                    "error": (
+                        "The latest status for **Daily_claim_report_bot** after restart is **Failure**.\n\n"
+                        "Latest message: Login issue Life Asia Portal"
+                    ),
+                    "message": (
+                        "The latest status for **Daily_claim_report_bot** after restart is **Failure**.\n\n"
+                        "Latest message: Login issue Life Asia Portal"
+                    ),
+                    "execution_id": "2616407",
+                    "workflow_name": "Daily_claim_report_bot",
+                    "status": "Failure",
+                },
+                tool_name="restart_execution",
+            ),
+        ],
+    ):
+        response = orchestrator._handle_approval_response(
+            "approve",
+            state,
+            tracker,
+        )
+
+    assert "Unable to Complete Action" in response
+    assert "Related system check" in response
+    assert "Life Asia is healthy." in response
+    assert "Login issue Life Asia Portal" in response
+    assert "Action Completed" not in response
+    assert state.phase == ConversationPhase.IDLE
     assert state.pending_action is None
 
 
@@ -361,7 +456,8 @@ def test_handle_approval_response_for_health_check_without_follow_up_infers_rest
             tracker,
         )
 
-    assert "TEBT is currently up and running." in response
+    assert "Related system check" in response
+    assert "TEBT is healthy." in response
     assert "Execution 2615591 has been restarted successfully." in response
     assert mock_execute.call_args_list[1].args[0] == "restart_execution"
     assert state.phase == ConversationPhase.RESOLVED

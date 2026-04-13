@@ -177,6 +177,30 @@ def test_build_action_failure_response_for_completed_restart_skips_retry_prompt(
     assert "Would you like me to retry" not in response
 
 
+def test_format_completion_message_shows_related_system_check_separately():
+    orchestrator = Orchestrator()
+
+    with patch("agents.orchestrator.llm_client.chat", return_value=""):
+        response = orchestrator._format_completion_message(
+            "restart_execution",
+            {
+                "success": True,
+                "message": "Execution 2615124 has been restarted successfully.",
+                "execution_id": "2615124",
+                "workflow_name": "Daily_claim_report_bot",
+                "status": "QUEUED",
+                "health_gate": {
+                    "issue_label": "Life Asia",
+                    "health_gate_passed": True,
+                },
+            },
+        )
+
+    assert "Execution 2615124 has been restarted successfully." in response
+    assert "Related system check" in response
+    assert "Life Asia is healthy." in response
+
+
 def test_format_completion_message_skips_suggestions_after_ticket_creation():
     orchestrator = Orchestrator()
 

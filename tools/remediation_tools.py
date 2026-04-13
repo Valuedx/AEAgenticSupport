@@ -119,6 +119,55 @@ def _resolve_execution_status_context(
     }
 
 
+def _finalize_retry_action_result(
+    base_result: dict,
+    *,
+    action_label: str,
+    status_context: dict,
+    fallback_raw: dict | None = None,
+) -> dict:
+    result = dict(base_result or {})
+    request_id = str(result.get("request_id") or result.get("execution_id") or "").strip()
+    workflow_name = str(result.get("workflow_name") or "this workflow").strip() or "this workflow"
+    accepted_message = str(result.get("message") or "").strip()
+
+    final_status = str((status_context or {}).get("status") or "").strip()
+    poll_raw = (status_context or {}).get("raw")
+    poll_raw = poll_raw if isinstance(poll_raw, dict) else {}
+    detail_msg = str((status_context or {}).get("detail_msg") or "").strip()
+    normalized_status = _normalize_execution_status(final_status)
+
+    result["raw"] = poll_raw or (fallback_raw if isinstance(fallback_raw, dict) else {})
+    if final_status:
+        result["status"] = final_status
+    if detail_msg:
+        result["workflow_response_message"] = detail_msg
+
+    if normalized_status == "FAILED":
+        status_label = final_status or "Failure"
+        latest_message = str(
+            poll_raw.get("errorMessage") or poll_raw.get("errorDetails") or detail_msg or ""
+        ).strip()
+        error_text = f"The latest status for **{workflow_name}** after {action_label} is **{status_label}**."
+        if latest_message:
+            error_text = f"{error_text}\n\nLatest message: {latest_message}"
+        result.update(
+            {
+                "success": False,
+                "error": error_text,
+                "message": error_text,
+            }
+        )
+        return result
+
+    result["success"] = True
+    if detail_msg:
+        result["message"] = detail_msg
+    elif not accepted_message:
+        result["message"] = f"Request {request_id} has been updated."
+    return result
+
+
 def _build_trigger_access_message(
     workflow_name: str,
     available: list[str] | None = None,
@@ -968,6 +1017,8 @@ def run_related_health_check(
     del user_id
     client = get_ae_client()
     resolved_org = str(org_code or default_org_code()).strip()
+    explicit_health_workflow = str(health_check_workflow or "").strip()
+    explicit_issue_label = str(issue_label or "").strip()
 
     requirement = _inspect_related_retry_health_requirement(
         client,
@@ -975,24 +1026,43 @@ def run_related_health_check(
         workflow_name=workflow_name,
     )
     if not requirement:
-        clean_workflow = str(workflow_name or "this workflow").strip() or "this workflow"
-        return {
-            "success": True,
-            "health_gate_required": False,
-            "health_gate_passed": True,
-            "workflow_name": clean_workflow,
-            "execution_id": str(execution_id or "").strip(),
-            "message": f"No related application health check is required before retrying **{clean_workflow}**.",
-        }
+        if explicit_health_workflow:
+            derived_issue_label = explicit_issue_label or "Related application"
+            derived_health_label = (
+                f"{derived_issue_label} health check"
+                if explicit_issue_label
+                else "Related application health check"
+            )
+            requirement = {
+                "execution_id": str(execution_id or "").strip(),
+                "workflow_name": str(workflow_name or "").strip(),
+                "issue_type": "",
+                "issue_label": derived_issue_label,
+                "health_check_label": derived_health_label,
+                "health_check_workflow": explicit_health_workflow,
+            }
+        else:
+            clean_workflow = str(workflow_name or "this workflow").strip() or "this workflow"
+            return {
+                "success": True,
+                "health_gate_required": False,
+                "health_gate_passed": True,
+                "workflow_name": clean_workflow,
+                "execution_id": str(execution_id or "").strip(),
+                "message": f"No related application health check is required before retrying **{clean_workflow}**.",
+            }
 
     from tools.status_tools import _classify_related_health_status, _run_related_health_check
 
     issue_info = {
         "issue_type": str(requirement.get("issue_type") or "").strip(),
-        "issue_label": str(requirement.get("issue_label") or issue_label or "Related application").strip(),
-        "health_check_label": str(requirement.get("health_check_label") or "").strip(),
+        "issue_label": str(requirement.get("issue_label") or explicit_issue_label or "Related application").strip(),
+        "health_check_label": str(
+            requirement.get("health_check_label")
+            or (f"{explicit_issue_label} health check" if explicit_issue_label else "")
+        ).strip(),
         "workflow_name": str(
-            requirement.get("health_check_workflow") or health_check_workflow or ""
+            requirement.get("health_check_workflow") or explicit_health_workflow or ""
         ).strip(),
     }
 
@@ -1185,26 +1255,19 @@ def restart_execution(execution_id: str,
             max_attempts=15,
         )
         final_status = status_context.get("status") or ""
-        poll_raw = status_context.get("raw") or {}
-        detail_msg = status_context.get("detail_msg") or ""
-
-        result = {
-            "success": True,
-            "message": detail_msg or resp.get("message") or f"Request {execution_id} has been restarted",
-            "execution_id": execution_id,
-            "request_id": execution_id,
-            "workflow_name": workflow_name,
-            "raw": poll_raw or resp,
-        }
-        if final_status:
-            result["status"] = final_status
-        if detail_msg:
-            result["workflow_response_message"] = detail_msg
+        result = _finalize_retry_action_result(
+            {
+                "message": resp.get("message") or f"Request {execution_id} has been restarted",
+                "execution_id": execution_id,
+                "request_id": execution_id,
+                "workflow_name": workflow_name,
+            },
+            action_label="restart",
+            status_context=status_context,
+            fallback_raw=resp,
+        )
         if retry_health_gate and isinstance(retry_health_gate, dict):
             result["health_gate"] = retry_health_gate
-            hg_msg = str(retry_health_gate.get("health_summary") or "").strip()
-            if hg_msg:
-                result["message"] = f"{hg_msg}\n\n{result['message']}"
         return result
     except Exception as e:
         err_str = str(e)
@@ -1224,6 +1287,9 @@ def restart_execution(execution_id: str,
                     org_code=org_code,
                     _skip_retry_health_gate=True,
                 )
+                if retry_health_gate and isinstance(retry_health_gate, dict):
+                    resubmit_resp = dict(resubmit_resp or {})
+                    resubmit_resp.setdefault("health_gate", retry_health_gate)
                 return {
                     **resubmit_resp,
                     "restart_limit_reached": True,
@@ -1335,30 +1401,23 @@ def resubmit_execution(execution_id: str,
             max_attempts=15,
         )
         final_status = status_context.get("status") or ""
-        poll_raw = status_context.get("raw") or {}
-        detail_msg = status_context.get("detail_msg") or ""
-
-        result = {
-            "success": True,
-            "message": detail_msg or message,
-            "execution_id": request_ref,
-            "request_id": request_ref,
-            "source_execution_id": execution_id,
-            "original_execution_id": execution_id,
-            "new_execution_id": new_request_id or "",
-            "workflow_name": workflow_name,
-            "from_failure_point": from_failure_point,
-            "raw": poll_raw or resp,
-        }
-        if final_status:
-            result["status"] = final_status
-        if detail_msg:
-            result["workflow_response_message"] = detail_msg
+        result = _finalize_retry_action_result(
+            {
+                "message": message,
+                "execution_id": request_ref,
+                "request_id": request_ref,
+                "source_execution_id": execution_id,
+                "original_execution_id": execution_id,
+                "new_execution_id": new_request_id or "",
+                "workflow_name": workflow_name,
+                "from_failure_point": from_failure_point,
+            },
+            action_label="resubmission",
+            status_context=status_context,
+            fallback_raw=resp,
+        )
         if retry_health_gate and isinstance(retry_health_gate, dict):
             result["health_gate"] = retry_health_gate
-            hg_msg = str(retry_health_gate.get("health_summary") or "").strip()
-            if hg_msg:
-                result["message"] = f"{hg_msg}\n\n{result['message']}"
         return result
     except Exception as e:
         logger.error(f"Resubmit failed for {execution_id}: {e}")
@@ -1826,10 +1885,6 @@ def trigger_workflow(
         # Attach pre-trigger health gate summary (if health checks were run and passed)
         if _health_gate_summary and isinstance(_health_gate_summary, dict):
             result["health_gate"] = _health_gate_summary
-            # Prepend health info to the user message
-            hg_msg = _health_gate_summary.get("health_summary", "")
-            if hg_msg:
-                result["message"] = f"{hg_msg}\n\n{pending_msg}"
         return result
 
     except Exception as e:

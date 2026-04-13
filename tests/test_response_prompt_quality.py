@@ -93,6 +93,7 @@ def test_technical_prompt_contains_clear_response_guidance():
     assert "MEANINGFUL FIRST-LINE RULE" in prompt
     assert "First sentence must answer the question or summarize the outcome clearly." in prompt
     assert "Stay conversational, readable, and precise." in prompt
+    assert '"Bots", "Workflows", and "Processes" are synonymous.' in prompt
     assert "NO EMAIL / LETTER FORMATTING" in prompt
 
 

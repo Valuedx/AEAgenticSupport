@@ -209,6 +209,36 @@ def test_resubmit_execution_surfaces_completed_workflow_response_message_after_p
     assert result["workflow_response_message"] == "The timesheet file has been shared with you. Kindly check your mailbox."
 
 
+def test_restart_execution_returns_failure_when_polled_status_is_still_failed():
+    class StubClient:
+        def get_execution_status(self, execution_id):
+            return {"status": "FAILED", "workflowName": "Daily_claim_report_bot"}
+
+        def restart_request(self, execution_id, reason=""):
+            return {"success": True, "message": "restart accepted"}
+
+        def poll_execution_status(self, execution_id, poll_interval_sec=2, max_attempts=15):
+            return {
+                "status": "Failure",
+                "raw": {
+                    "status": "Failure",
+                    "workflowName": "Daily_claim_report_bot",
+                    "workflowResponse": '{"message":null,"error":"Login issue Life Asia Portal","currentStatus":null,"outputParameters":[]}',
+                },
+            }
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._get_request_payload",
+        return_value={},
+    ):
+        result = restart_execution(execution_id="2616407")
+
+    assert result["success"] is False
+    assert result["status"] == "Failure"
+    assert "after restart is **Failure**" in result["error"]
+    assert "Login issue Life Asia Portal" in result["error"]
+
+
 def test_restart_execution_blocks_when_assigned_agents_are_not_running():
     class StubClient:
         def get_execution_status(self, execution_id):

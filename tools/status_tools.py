@@ -431,6 +431,41 @@ def _extract_related_issue_reason(log_result: dict[str, Any], issue_info: dict[s
     return cleaned_candidates[0] if cleaned_candidates else ""
 
 
+def _build_related_issue_check_from_log_result(
+    log_result: dict[str, Any],
+    *,
+    workflow_name: str = "",
+    org_code: str = "",
+) -> dict[str, Any] | None:
+    issue_info = _detect_related_issue(log_result)
+    if not issue_info:
+        return None
+
+    issue_label = str(issue_info.get("issue_label") or "Related application").strip()
+    guidance = format_client_message(
+        "related_issue_status_retry_guard",
+        "Current {application} health has not been checked yet. If you want to retry this workflow, I will first verify the current {application} health and only then proceed.",
+        org_code=org_code,
+        application=issue_label,
+        workflow_name=str(workflow_name or "").strip(),
+        status="NOT_CHECKED",
+    )
+    return {
+        "issue_type": issue_info.get("issue_type", ""),
+        "issue_label": issue_label,
+        "health_check_label": issue_info.get("health_check_label", ""),
+        "workflow_name": issue_info.get("workflow_name", ""),
+        "request_id": "",
+        "status": "NOT_CHECKED",
+        "used_admin_scope": False,
+        "message": guidance,
+        "failure_reason": _extract_related_issue_reason(log_result, issue_info),
+        "application_status": "not_checked",
+        "health_check_run": False,
+        "retry_health_check_required": True,
+    }
+
+
 def _classify_related_health_status(status: str, *, has_request_id: bool = True) -> str:
     normalized = str(status or "").strip().upper()
     success_statuses = {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED"}
@@ -645,6 +680,165 @@ def _run_related_health_check(
     }
 
 
+def _build_related_application_alias_clarification(
+    query_name: str,
+    related_application: dict[str, Any] | None,
+) -> dict[str, Any]:
+    app = related_application if isinstance(related_application, dict) else {}
+    issue_label = str(app.get("issue_label") or query_name or "this application").strip()
+    return {
+        "workflow_name": issue_label,
+        "status": "AMBIGUOUS_APPLICATION_QUERY",
+        "issue_type": str(app.get("issue_type") or "").strip(),
+        "issue_label": issue_label,
+        "message": (
+            f"{issue_label} looks like a related application name, not one exact workflow. "
+            "I could not safely map it to a single workflow, so I did not guess. "
+            "Please share the exact workflow name or request ID, and I will check it directly."
+        ),
+    }
+
+
+def _resolve_related_application_alias_status(
+    client,
+    query_name: str,
+    *,
+    user_id: str = "",
+    org_code: str = "",
+) -> dict[str, Any] | None:
+    classification = related_app_registry.classify_direct_related_application_query(query_name)
+    decision = str(classification.get("decision") or "").strip().lower()
+    related_application = classification.get("related_application")
+    if decision == "not_alias":
+        return None
+    if decision != "alias" or not isinstance(related_application, dict):
+        candidates = classification.get("candidates") or []
+        first_candidate = candidates[0] if isinstance(candidates, list) and candidates else None
+        return _build_related_application_alias_clarification(query_name, first_candidate)
+
+    resolved_org = str(org_code or default_org_code()).strip()
+    failures_result = list_recent_failures(
+        hours=24,
+        limit=50,
+        user_id=user_id,
+        org_code=resolved_org,
+    )
+    failures = failures_result.get("failures") or []
+    if not isinstance(failures, list):
+        failures = []
+
+    target_issue_type = str(related_application.get("issue_type") or "").strip().lower()
+    issue_label = str(related_application.get("issue_label") or "").strip()
+
+    for failure in failures[:20]:
+        if not isinstance(failure, dict):
+            continue
+        execution_id = str(failure.get("execution_id") or "").strip()
+        if not execution_id:
+            continue
+
+        try:
+            from tools.log_tools import get_execution_logs
+
+            log_result = get_execution_logs(execution_id, tail=0)
+        except Exception as exc:
+            logger.debug(
+                "Related application alias lookup skipped log diagnosis for %s: %s",
+                execution_id,
+                exc,
+            )
+            continue
+
+        related_issue_check = _build_related_issue_check_from_log_result(
+            log_result,
+            workflow_name=str(failure.get("workflow_name") or "").strip(),
+            org_code=resolved_org,
+        )
+        if not related_issue_check:
+            continue
+        if (
+            target_issue_type
+            and str(related_issue_check.get("issue_type") or "").strip().lower() != target_issue_type
+        ):
+            continue
+
+        instance: dict[str, Any] = {}
+        try:
+            instance = client.get_workflow_instance_by_id(execution_id)
+            if isinstance(instance, dict):
+                instance = _maybe_refresh_execution_payload(client, execution_id, instance)
+        except Exception as exc:
+            logger.debug(
+                "Could not fetch detailed execution payload for related application alias %s: %s",
+                execution_id,
+                exc,
+            )
+            instance = {}
+
+        record = instance if isinstance(instance, dict) and instance else {
+            "id": execution_id,
+            "automationRequestId": execution_id,
+            "workflowName": str(failure.get("workflow_name") or "").strip(),
+            "status": str(failure.get("status") or "Failure").strip(),
+            "createdDate": failure.get("failure_time") or failure.get("created_date"),
+            "errorMessage": failure.get("error_message"),
+        }
+        latest_ts = _parse_timestamp(
+            record.get("completedDate")
+            or record.get("lastUpdatedDate")
+            or record.get("createdDate")
+            or failure.get("failure_time")
+            or failure.get("created_date")
+        )
+        workflow_name = (
+            record.get("workflowName")
+            or record.get("workflow_name")
+            or str(failure.get("workflow_name") or "").strip()
+            or issue_label
+        )
+        latest_status = str(record.get("status") or failure.get("status") or "Failure").strip()
+
+        result = {
+            "bot_name": workflow_name,
+            "workflow_name": workflow_name,
+            "status": latest_status,
+            "latest_status": latest_status,
+            "latest_execution": {
+                "id": execution_id,
+                "bot_name": workflow_name,
+                "status": latest_status,
+                "timestamp": str(latest_ts) if latest_ts else "Unknown",
+            },
+            "latest_execution_id": execution_id,
+            "message": _build_related_issue_status_message(
+                workflow_name,
+                latest_ts,
+                related_issue_check,
+                org_code=resolved_org,
+            ),
+            "related_issue_check": related_issue_check,
+            "failure_reason": related_issue_check.get("failure_reason", ""),
+            "issue_type": str(related_application.get("issue_type") or "").strip(),
+            "issue_label": issue_label,
+        }
+
+        detail_msg = _extract_workflow_response_message(record)
+        if detail_msg:
+            result["workflow_response_message"] = detail_msg
+
+        error_message = str(
+            record.get("errorMessage")
+            or record.get("errorDetails")
+            or detail_msg
+            or ""
+        ).strip()
+        if error_message:
+            result["error_message"] = error_message
+        return result
+
+    return _build_related_application_alias_clarification(query_name, related_application)
+
+
 def _maybe_add_related_issue_health_check(
     latest: dict[str, Any],
     org_code: str = "",
@@ -674,33 +868,11 @@ def _maybe_add_related_issue_health_check(
         logger.warning("Related issue detection skipped for execution_id=%s: %s", execution_id, exc)
         return None
 
-    issue_info = _detect_related_issue(log_result)
-    if not issue_info:
-        return None
-    failure_reason = _extract_related_issue_reason(log_result, issue_info)
-    issue_label = str(issue_info.get("issue_label") or "Related application").strip()
-    guidance = format_client_message(
-        "related_issue_status_retry_guard",
-        "Current {application} health has not been checked yet. If you want to retry this workflow, I will first verify the current {application} health and only then proceed.",
-        org_code=org_code,
-        application=issue_label,
+    return _build_related_issue_check_from_log_result(
+        log_result,
         workflow_name=str(latest.get("workflowName") or latest.get("workflow_name") or "").strip(),
-        status="NOT_CHECKED",
+        org_code=org_code,
     )
-    return {
-        "issue_type": issue_info.get("issue_type", ""),
-        "issue_label": issue_label,
-        "health_check_label": issue_info.get("health_check_label", ""),
-        "workflow_name": issue_info.get("workflow_name", ""),
-        "request_id": "",
-        "status": "NOT_CHECKED",
-        "used_admin_scope": False,
-        "message": guidance,
-        "failure_reason": failure_reason,
-        "application_status": "not_checked",
-        "health_check_run": False,
-        "retry_health_check_required": True,
-    }
 
 
 def check_workflow_status(
@@ -734,10 +906,19 @@ def check_workflow_status(
                     "status": "UNAUTHORIZED",
                     "message": _workflow_access_denied_message(
                         query_name, user_id=user_id, org_code=org_code, action="view",
-                    ),
-                }
+                ),
+            }
         except Exception as exc:
             logger.warning(f"Direct request ID lookup failed for {query_name}: {exc}")
+
+    related_alias_result = _resolve_related_application_alias_status(
+        client,
+        query_name,
+        user_id=user_id,
+        org_code=org_code,
+    )
+    if related_alias_result:
+        return related_alias_result
 
     # 2. Resolve technical name
     resolved_name = ""

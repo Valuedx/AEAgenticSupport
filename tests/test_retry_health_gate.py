@@ -80,8 +80,9 @@ def test_resubmit_execution_allows_retry_when_related_app_health_check_passes():
         result = remediation_tools.resubmit_execution(execution_id="22024")
 
     assert result["success"] is True
+    assert result["request_id"] == "2611436"
     assert result["health_gate"]["health_gate_passed"] is True
-    assert "Retrying workflow now" in result["message"]
+    assert "Retrying workflow now" not in result["message"]
 
 
 def test_restart_execution_uses_explicit_org_code_for_retry_health_gate():
@@ -234,3 +235,36 @@ def test_run_related_health_check_uses_execution_status_error_when_logs_do_not_i
     assert result["health_gate_required"] is True
     assert result["health_check_workflow"] == "TEBT_Health_Check"
     assert result["issue_label"] == "Life Asia"
+
+
+def test_run_related_health_check_honors_explicit_health_workflow_when_requirement_lookup_misses():
+    class StubClient:
+        pass
+
+    with patch("tools.remediation_tools.get_ae_client", return_value=StubClient()), patch(
+        "tools.remediation_tools._inspect_related_retry_health_requirement",
+        return_value=None,
+    ), patch(
+        "tools.status_tools._run_related_health_check",
+        return_value={
+            "issue_type": "life_asia",
+            "issue_label": "Life Asia",
+            "health_check_label": "Life Asia health check",
+            "workflow_name": "Life_Asia_Health_Check",
+            "status": "COMPLETE",
+            "message": "Life Asia is currently up and running.",
+        },
+    ) as mock_health_check:
+        result = remediation_tools.run_related_health_check(
+            execution_id="2615124",
+            workflow_name="Daily_claim_report_bot",
+            health_check_workflow="Life_Asia_Health_Check",
+            issue_label="Life Asia",
+        )
+
+    assert result["success"] is True
+    assert result["health_gate_required"] is True
+    assert result["health_gate_passed"] is True
+    assert result["health_check_workflow"] == "Life_Asia_Health_Check"
+    assert result["issue_label"] == "Life Asia"
+    mock_health_check.assert_called_once()

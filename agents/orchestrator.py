@@ -549,17 +549,25 @@ class Orchestrator:
         next_args = self._inject_user_scope(next_tool_name, next_args, next_tool_def, state)
         next_result = tool_registry.execute(next_tool_name, **next_args)
         next_payload = next_result.data if isinstance(next_result.data, dict) else {}
+        health_gate_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        if health_gate_payload:
+            if not str(health_gate_payload.get("issue_label") or "").strip():
+                issue_label = str(
+                    ((action.get("args") or {}).get("issue_label") or "")
+                ).strip()
+                if issue_label:
+                    health_gate_payload["issue_label"] = issue_label
+            summary = str(
+                health_gate_payload.get("health_summary") or health_gate_payload.get("message") or ""
+            ).strip()
+            if summary:
+                health_gate_payload["health_summary"] = summary
+            next_payload = dict(next_payload or {})
+            next_payload.setdefault("health_gate", health_gate_payload)
         state.log_tool_call(next_tool_name, next_args, next_payload, next_result.success)
 
         if next_result.success:
             merged_payload = dict(next_payload or {})
-            prefix = str(payload.get("message") or "").strip()
-            if prefix:
-                existing_message = str(merged_payload.get("message") or "").strip()
-                merged_payload["message"] = (
-                    f"{prefix}\n\n{existing_message}" if existing_message else prefix
-                )
-            merged_payload.setdefault("health_gate", payload)
             state.phase = ConversationPhase.RESOLVED
             state.param_collection = {}
             active_issue = tracker.get_active_issue() if tracker else None
@@ -2393,6 +2401,40 @@ class Orchestrator:
                 pass
             return ""
 
+        def _related_system_check_line(payload: Any) -> str:
+            if not isinstance(payload, dict):
+                return ""
+            health_gate = payload.get("health_gate")
+            if not isinstance(health_gate, dict) or not health_gate:
+                return ""
+
+            label = str(
+                health_gate.get("issue_label")
+                or health_gate.get("application")
+                or "Related system"
+            ).strip() or "Related system"
+            passed = health_gate.get("health_gate_passed")
+            status_value = str(
+                health_gate.get("health_status")
+                or health_gate.get("status")
+                or health_gate.get("health_state")
+                or ""
+            ).strip().upper()
+
+            if passed is True or status_value in {"COMPLETE", "COMPLETED", "SUCCESS", "SUCCEEDED", "HEALTHY"}:
+                return f"{label} is healthy."
+            if passed is False or status_value in {"FAILURE", "FAILED", "ERROR", "UNHEALTHY"}:
+                return f"{label} is unavailable."
+
+            summary = str(
+                health_gate.get("health_summary")
+                or health_gate.get("message")
+                or ""
+            ).strip()
+            if summary:
+                return summary.splitlines()[0].strip()
+            return ""
+
         # ── Normalise: MCP tools often serialise their dict return value to a
         # JSON string over the transport layer. Parse it back so the guards below
         # always operate on a dict.
@@ -2523,8 +2565,15 @@ class Orchestrator:
                         labels.append(f"{name} ({state_value})")
                     if labels:
                         detail_lines.append(f"**Assigned agents:** {', '.join(labels)}")
+                related_system_check = _related_system_check_line(data)
+                if related_system_check:
+                    detail_lines.append(f"**Related system check:** {related_system_check}")
                 if data.get("request_id") or data.get("execution_id"):
                     detail_lines.append(f"**Request ID:** `{data.get('request_id') or data.get('execution_id')}`")
+                if data.get("status") or data.get("state"):
+                    detail_lines.append(f"**Status:** {data.get('status') or data.get('state')}")
+                if data.get("workflow_name"):
+                    detail_lines.append(f"**Workflow:** `{data.get('workflow_name')}`")
                 if data.get("last_status"):
                     detail_lines.append(f"**Server Extraction Status:** {data.get('last_status')}")
                 if data.get("waited_seconds"):
@@ -2590,6 +2639,9 @@ class Orchestrator:
             msg = report
         
         details = []
+        related_system_check = _related_system_check_line(data) if isinstance(data, dict) else ""
+        if related_system_check:
+            details.append(f"• **Related system check**: {related_system_check}")
         exec_id = (data.get("execution_id") or data.get("request_id")) if isinstance(data, dict) else None
         if exec_id:
             details.append(f"• **Request ID**: `{exec_id}`")
@@ -2764,7 +2816,7 @@ Rules:
     - For ANY failure, issue, blocked action, or agent-not-running condition (including agent STOPPED/OFFLINE/UNAVAILABLE), at least one suggestion MUST mention raising a support ticket in plain language. Do not mention internal tool names unless the user explicitly asks for them.
     - This rule applies across all workflows and all tools; do not rely on workflow-specific hardcoding.
     - Do NOT hardcode workflow names, bot names, ticket patterns, agent names, tenant names, organization names, or customer-specific rules. Use only the live tool data and the current conversation context.
-14. **TERMINOLOGY & STATUS-FIRST RULE**: "Bots" and "Workflows" are synonymous. If a user asks about a bot (even by a "friendly" or "natural language" name like 'Email Bot JD'), you MUST call `check_workflow_status` as your FIRST action unless they explicitly say "run", "start", or "trigger". Never assume the user wants to execute a bot just because they mentioned its name.
+14. **TERMINOLOGY & STATUS-FIRST RULE**: "Bots", "Workflows", and "Processes" are synonymous. If a user asks about a bot, workflow, or process (even by a "friendly" or "natural language" name like 'Email Bot JD'), you MUST call `check_workflow_status` as your FIRST action unless they explicitly say "run", "start", or "trigger". Never assume the user wants to execute a bot just because they mentioned its name.
 15. **PROACTIVE PARAMETER DISCOVERY**: When `discover_tools` returns a workflow with `[ORCHESTRATOR_MAPPING]` in its description:
     - **TECHNICAL MAPPING MANDATE**: You MUST silently cross-reference the required parameters against the conversation history before generating a response.
     - **NO REDUNDANCY**: DO NOT list a parameter in your response if its value is already present in history (even if the user used similar terms like "starts tomorrow" or typos like "lleave").
