@@ -2706,7 +2706,7 @@ class Orchestrator:
                 ),
                 system="You are a concise assistant. Output exactly 2 lines, each starting with '- '.",
                 temperature=0.7,
-                max_tokens=500,
+                max_tokens=5000,
             )
             # Handle both "-" and "*" bullet points
             suggestions = []
@@ -3689,7 +3689,7 @@ CRITICAL RULES:
                 prompt,
                 system="Extract only the listed parameters. Return strict JSON.",
                 temperature=0.0,
-                max_tokens=512,
+                max_tokens=1512,
             )
             raw_clean = raw.strip()
             if raw_clean.startswith("```"):

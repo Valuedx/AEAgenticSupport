@@ -94,32 +94,6 @@ AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://localhost:5050")
 AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "120"))
 
 
-def _username_from_email(value: str) -> str:
-    email = str(value or "").strip()
-    if "@" not in email:
-        return ""
-    return email.split("@", 1)[0].strip()
-
-
-def _extract_teams_username(channel_user: dict | None, *, user_email: str = "", user_id: str = "") -> str:
-    user_blob = channel_user if isinstance(channel_user, dict) else {}
-    for candidate in (
-        user_blob.get("userName"),
-        user_blob.get("username"),
-        user_blob.get("userPrincipalName"),
-        user_blob.get("upn"),
-    ):
-        clean = str(candidate or "").strip()
-        if clean:
-            return clean
-
-    from_email = _username_from_email(user_blob.get("email") or user_email)
-    if from_email:
-        return from_email
-
-    return _username_from_email(user_id)
-
-
 async def _call_agent(
     session_id: str,
     user_text: str,
@@ -277,7 +251,6 @@ async def run_ops_support(
     user_id = "webchat_user"
     user_role = "technical"
     user_name = ""
-    display_name = ""
     user_email = ""
     team_id = ""
     metadata = {}
@@ -288,7 +261,7 @@ async def run_ops_support(
             # 1. Basic From info
             if hasattr(activity, "from_property") and activity.from_property:
                 user_id = activity.from_property.id or user_id
-                display_name = activity.from_property.name or ""
+                user_name = activity.from_property.name or ""
             
             # 2. Channel Data (Teams)
             cd = getattr(activity, "channel_data", {}) or {}
@@ -302,11 +275,6 @@ async def run_ops_support(
                 u = cd.get("user", {}) or {}
                 if isinstance(u, dict) and u.get("email"):
                     user_email = u["email"]
-                user_name = _extract_teams_username(
-                    u if isinstance(u, dict) else {},
-                    user_email=user_email,
-                    user_id=user_id,
-                )
 
             # 3. Entities (Mentions/Metadata)
             entities = getattr(activity, "entities", []) or []
@@ -325,17 +293,24 @@ async def run_ops_support(
             # 4. Fallback for email
             if not user_email and "@" in user_id:
                 user_email = user_id
-            if not user_name:
-                user_name = _extract_teams_username(
-                    {},
-                    user_email=user_email,
-                    user_id=user_id,
-                )
-            if display_name:
-                metadata["user_display_name"] = display_name
 
     except Exception as exc:
         print(f"[DEBUG-OPS] User detail extract failed: {exc}")
+
+    try:
+        from custom.helpers.custom_bot_helper import Custom_Bot_Helper
+
+        teams_details = await Custom_Bot_Helper.store_teams_user(
+            context, aistudio_conv_state
+        )
+        if teams_details:
+            user_id = teams_details.get("user_id") or user_id
+            user_name = teams_details.get("user_name") or user_name
+            user_email = teams_details.get("email") or user_email
+            team_id = teams_details.get("tenant_id") or team_id
+            metadata["teams_user"] = teams_details
+    except Exception as exc:
+        logger.warning("ops_support: failed to enrich Teams user details: %s", exc)
     
     # ...existing typing indicator logic...
     try:

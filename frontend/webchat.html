@@ -4,8 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AE Agentic Support — Webchat</title>
-  <!-- Include marked.js for Markdown rendering -->
+  <title>AE Ops Co-Pilot — Webchat</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     * {
@@ -14,421 +13,832 @@
       padding: 0;
     }
 
+    :root {
+      --ae-orange: #F97316;
+      --ae-orange-dark: #C85A05;
+      --ae-orange-hover: #EA6C0A;
+      --ae-orange-pale: #FFF7ED;
+      --ae-orange-light: #FFEDD5;
+      --ae-text: #1C1C1C;
+      --ae-muted: #6B7280;
+      --ae-border: #E5E7EB;
+      --ae-surface: #F9FAFB;
+      --ae-white: #FFFFFF;
+    }
+
     body {
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-      background: #f0f2f5;
+      background: #F0F2F5;
       height: 100vh;
       display: flex;
       flex-direction: column;
+      overflow: hidden;
     }
 
+    /* ── HEADER ── */
     .header {
-      background: linear-gradient(135deg, #1a73e8, #0d47a1);
-      color: white;
-      padding: 16px 24px;
+      background: var(--ae-white);
+      color: var(--ae-text);
+      padding: 0 22px;
+      height: 64px;
       display: flex;
       align-items: center;
-      gap: 12px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, .15);
+      gap: 14px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      flex-shrink: 0;
+      border-bottom: 1px solid var(--ae-border);
+    }
+
+    .ae-logo-wrap {
+      display: flex;
+      align-items: center;
+      height: 36px;
+      flex-shrink: 0;
+    }
+
+    .ae-logo-wrap img {
+      height: 36px;
+      width: auto;
+      object-fit: contain;
+    }
+
+    .header-divider {
+      width: 1px;
+      height: 28px;
+      background: var(--ae-border);
+      flex-shrink: 0;
+    }
+
+    .header-info {
+      flex: 1;
+      min-width: 0;
     }
 
     .header h1 {
-      font-size: 18px;
-      font-weight: 600;
-    }
-
-    .header .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-    }
-
-    .header .status {
-      font-size: 12px;
-      opacity: .85;
-      margin-left: auto;
-    }
-
-    .header .navlink {
-      color: #fff;
-      font-size: 12px;
-      text-decoration: none;
-      border: 1px solid rgba(255, 255, 255, .45);
-      padding: 5px 9px;
-      border-radius: 12px;
-      margin-left: 10px;
-    }
-
-    .header .navlink:hover {
-      background: rgba(255, 255, 255, .15);
+      font-size: 16px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--ae-orange);
+      letter-spacing: -0.01em;
     }
 
     .header .session {
       font-size: 11px;
-      opacity: .6;
+      font-weight: 500;
+      color: var(--ae-muted);
+      margin-top: 1px;
+      opacity: 0.8;
     }
 
-    .header .userbar {
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex-shrink: 0;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--ae-surface);
+      border: 1px solid var(--ae-border);
+      border-radius: 20px;
+      padding: 4px 12px;
+      font-size: 11.5px;
+      color: var(--ae-muted);
+      font-weight: 500;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #fbbf24;
+      transition: background 0.3s;
+    }
+
+    .user-account-wrap {
+      position: relative;
+      display: none; /* Shown via JS */
+    }
+
+    .user-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 14px;
+      border-radius: 999px;
+      background: var(--ae-white);
+      border: 1px solid var(--ae-border);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--ae-text);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .user-pill:hover {
+      border-color: var(--ae-orange);
+      background: var(--ae-surface);
+    }
+
+    .user-pill::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--ae-orange);
+    }
+
+    .user-dropdown {
+      position: absolute;
+      top: calc(100% + 10px);
+      right: 0;
+      width: 200px;
+      background: var(--ae-white);
+      border: 1px solid var(--ae-border);
+      border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+      z-index: 1000;
+      display: none;
+      flex-direction: column;
+      padding: 8px;
+      animation: slideDown 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .user-account-wrap.active .user-dropdown {
+      display: flex;
+    }
+
+    .dropdown-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--ae-border);
+      margin-bottom: 6px;
+    }
+
+    .dropdown-header strong {
+      display: block;
+      font-size: 13px;
+      color: var(--ae-text);
+      margin-bottom: 2px;
+    }
+
+    .dropdown-header span {
+      font-size: 10px;
+      color: var(--ae-muted);
+      word-break: break-all;
+    }
+
+    .dropdown-item {
       display: flex;
       align-items: center;
       gap: 10px;
-      margin-left: 14px;
-    }
-
-    .header .userpill {
-      display: none;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, .18);
-      font-size: 12px;
-    }
-
-    .header .logout {
-      display: none;
-      border: 1px solid rgba(255, 255, 255, .45);
-      background: transparent;
-      color: #fff;
-      border-radius: 14px;
-      padding: 6px 10px;
-      font-size: 12px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--ae-text);
+      text-decoration: none;
       cursor: pointer;
+      transition: all 0.15s;
     }
 
-    .header .logout:hover {
-      background: rgba(255, 255, 255, .15);
+    .dropdown-item:hover {
+      background: var(--ae-orange-pale);
+      color: var(--ae-orange);
     }
 
+    .dropdown-item.logout {
+      color: #ef4444;
+      margin-top: 4px;
+      border-top: 1px solid var(--ae-border);
+      padding-top: 12px;
+      border-radius: 0 0 8px 8px;
+    }
+
+    .dropdown-item.logout:hover {
+      background: #fef2f2;
+      color: #b91c1c;
+    }
+
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .navlink {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--ae-orange-dark);
+      text-decoration: none;
+      padding: 6px 14px;
+      border-radius: 12px;
+      border: 1.5px solid var(--ae-border);
+      transition: all 0.2s;
+    }
+
+    .navlink:hover {
+      border-color: var(--ae-orange);
+      background: var(--ae-orange-pale);
+    }
+
+    /* ── CHAT AREA ── */
     .chat-area {
       flex: 1;
       overflow-y: auto;
-      padding: 24px;
+      padding: 20px 22px 8px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
+      scroll-behavior: smooth;
+      position: relative;
+    }
+
+    .chat-area::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 360px;
+      height: 360px;
+      background-image: url("/static/AE_logo.png");
+      background-size: contain;
+      background-repeat: no-repeat;
+      background-position: center;
+      opacity: 0.03;
+      filter: blur(2px) grayscale(100%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .chat-area::-webkit-scrollbar {
+      width: 5px;
+    }
+
+    .chat-area::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .chat-area::-webkit-scrollbar-thumb {
+      background: #D1D5DB;
+      border-radius: 4px;
     }
 
     .msg {
-      max-width: 85%;
-      padding: 12px 16px;
-      border-radius: 16px;
-      line-height: 1.6;
+      max-width: 82%;
+      padding: 11px 15px;
+      border-radius: 18px;
+      line-height: 1.62;
       font-size: 14px;
       word-wrap: break-word;
-      animation: fadeIn .25s ease;
+      animation: fadeUp 0.22s ease;
+      position: relative;
+      z-index: 1;
     }
 
     .msg.bot {
-      background: white;
-      color: #1a1a1a;
+      background: var(--ae-white);
+      color: var(--ae-text);
       border-bottom-left-radius: 4px;
       align-self: flex-start;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+      border: 1px solid var(--ae-border);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
     }
 
     .msg.user {
-      background: #1a73e8;
+      background: linear-gradient(135deg, var(--ae-orange) 0%, var(--ae-orange-dark) 100%);
       color: white;
       border-bottom-right-radius: 4px;
       align-self: flex-end;
+      box-shadow: 0 2px 10px rgba(249, 115, 22, 0.35);
     }
 
     .msg.system {
       background: transparent;
-      color: #888;
+      color: var(--ae-muted);
       font-size: 12px;
       text-align: center;
       align-self: center;
+      padding: 4px 12px;
     }
 
     .msg.progress {
-      background: transparent;
-      color: #666;
-      font-size: 13px;
+      background: var(--ae-orange-pale);
+      color: var(--ae-orange-dark);
+      border: 1.5px solid rgba(249, 115, 22, 0.22);
+      font-size: 13.5px;
       align-self: flex-start;
-      padding: 6px 16px;
+      border-radius: 12px;
+      padding: 9px 15px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
       font-style: italic;
-      animation: fadeIn .2s ease;
     }
 
     .msg.progress::before {
-      content: '⏳ ';
+      content: '⏳';
+      animation: pulse 1.5s infinite;
+      display: flex;
+      flex-shrink: 0;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 0.5; transform: scale(0.95); }
+      50% { opacity: 1; transform: scale(1.05); }
+      100% { opacity: 0.5; transform: scale(0.95); }
     }
 
     .msg.error {
-      background: #fef2f2;
-      color: #b91c1c;
-      border: 1px solid #fecaca;
+      background: #FEF2F2;
+      color: #B91C1C;
+      border: 1px solid #FECACA;
       align-self: center;
       font-size: 13px;
+      border-radius: 12px;
     }
 
     .msg .label {
-      font-size: 11px;
-      font-weight: 600;
-      opacity: .5;
-      margin-bottom: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      opacity: 0.45;
+      margin-bottom: 5px;
       text-transform: uppercase;
-      letter-spacing: .5px;
+      letter-spacing: 0.8px;
     }
 
-    /* Markdown Styles */
+    /* Markdown in bot messages */
     .msg.bot p {
-      margin-bottom: 8px;
+      margin-bottom: 7px;
+    }
+
+    .msg.bot p:last-child {
+      margin-bottom: 0;
     }
 
     .msg.bot ul,
     .msg.bot ol {
-      margin-left: 20px;
-      margin-bottom: 8px;
+      margin-left: 18px;
+      margin-bottom: 7px;
+    }
+
+    .msg.bot li {
+      margin-bottom: 3px;
     }
 
     .msg.bot code {
-      background: #f4f4f4;
-      padding: 2px 4px;
+      background: var(--ae-orange-pale);
+      color: var(--ae-orange-dark);
+      padding: 2px 5px;
       border-radius: 4px;
       font-family: monospace;
+      font-size: 13px;
     }
 
     .msg.bot pre {
-      background: #f4f4f4;
+      background: var(--ae-orange-pale);
       padding: 12px;
       border-radius: 8px;
       overflow-x: auto;
       margin: 8px 0;
-      border-left: 3px solid #1a73e8;
+      border-left: 3px solid var(--ae-orange);
     }
 
     .msg.bot strong {
       font-weight: 600;
     }
 
-    /* JSON Formatting */
+    .msg.bot h3 {
+      font-size: 14px;
+      margin-bottom: 6px;
+    }
+
+    /* JSON highlight */
     .json-block {
-      font-family: 'Consolas', 'Monaco', monospace;
+      font-family: monospace;
       font-size: 13px;
-      background: #fafafa;
-      border: 1px solid #eee;
+      background: var(--ae-orange-pale);
+      border: 1px solid #FED7AA;
       padding: 12px;
       border-radius: 8px;
       margin: 8px 0;
+      border-left: 3px solid var(--ae-orange);
     }
 
     .json-key {
-      color: #881391;
+      color: #9A3412;
     }
 
     .json-string {
-      color: #1a1aa6;
+      color: #1A1AA6;
     }
 
     .json-number {
-      color: #1c00cf;
+      color: #1C00CF;
     }
 
     .json-boolean {
       color: #704214;
     }
 
+    /* Welcome banner */
+    .welcome-banner {
+      position: relative;
+      background: var(--ae-orange-light);
+      border: 1px solid rgba(249, 115, 22, 0.22);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      animation: fadeUp 0.25s ease;
+      margin-bottom: 8px;
+    }
+
+    .banner-close {
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      background: transparent;
+      border: none;
+      color: var(--ae-orange-dark);
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      opacity: 0.5;
+      transition: opacity 0.15s;
+    }
+
+    .banner-close:hover {
+      opacity: 1;
+    }
+
+    .welcome-logo {
+      height: 28px;
+      width: auto;
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+
+    .welcome-text strong {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ae-orange-dark);
+      margin-bottom: 2px;
+    }
+
+    .welcome-text span {
+      font-size: 12px;
+      color: var(--ae-muted);
+    }
+
+    /* Typing indicator */
     .typing {
       align-self: flex-start;
-      padding: 14px 22px;
-      background: white;
-      border-radius: 16px;
+      padding: 11px 17px;
+      background: var(--ae-white);
+      border-radius: 18px;
+      border-bottom-left-radius: 4px;
+      border: 1px solid var(--ae-border);
       display: none;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+      margin: 0 22px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
     }
 
     .typing span {
       display: inline-block;
-      width: 8px;
-      height: 8px;
-      background: #bbb;
+      width: 7px;
+      height: 7px;
+      background: var(--ae-orange);
       border-radius: 50%;
       margin: 0 2px;
-      animation: bounce .6s infinite;
+      animation: bounce 0.65s infinite;
+      opacity: 0.8;
     }
 
     .typing span:nth-child(2) {
-      animation-delay: .15s;
+      animation-delay: 0.15s;
     }
 
     .typing span:nth-child(3) {
-      animation-delay: .3s;
+      animation-delay: 0.30s;
     }
 
-    .input-area {
-      padding: 16px 24px;
-      background: white;
-      border-top: 1px solid #e0e0e0;
+    /* Quick actions */
+    .quick-actions {
+      padding: 8px 22px;
       display: flex;
-      gap: 12px;
+      gap: 7px;
+      flex-wrap: wrap;
     }
 
-    .input-area select {
-      padding: 12px 14px;
-      border: 1.5px solid #ddd;
-      border-radius: 24px;
-      background: white;
+    .quick-actions button {
+      padding: 5px 13px;
+      border: 1px solid var(--ae-border);
+      background: var(--ae-white);
+      color: var(--ae-muted);
+      border-radius: 16px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+
+    .quick-actions button:hover {
+      border-color: var(--ae-orange);
+      color: var(--ae-orange-dark);
+      background: var(--ae-surface);
+    }
+
+    /* Input area */
+    .input-area {
+      padding: 12px 22px;
+      background: var(--ae-white);
+      border-top: 1px solid var(--ae-border);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .custom-select {
+      position: relative;
+      min-width: 140px;
+    }
+
+    .select-trigger {
+      padding: 9px 12px;
+      padding-right: 32px;
+      border: 1.5px solid var(--ae-border);
+      border-radius: 20px;
+      background: var(--ae-surface);
       font-size: 13px;
-      color: #333;
+      color: var(--ae-text);
+      cursor: pointer;
+      transition: all 0.15s;
+      font-weight: 500;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23F97316' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+    }
+
+    .custom-select.active .select-trigger {
+      border-color: var(--ae-orange);
+      background-color: var(--ae-white);
+      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.1);
+    }
+
+    .select-options {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 0;
+      width: 100%;
+      background: white;
+      border: 1px solid var(--ae-border);
+      border-radius: 12px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+      display: none;
+      z-index: 10;
+      overflow: hidden;
+      animation: fadeUp 0.18s ease;
+    }
+
+    .custom-select.active .select-options {
+      display: block;
+    }
+
+    .select-option {
+      padding: 10px 14px;
+      font-size: 13px;
+      color: var(--ae-text);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .select-option:hover {
+      background: var(--ae-orange-pale);
+      color: var(--ae-orange);
+    }
+
+    .select-option.selected {
+      background: var(--ae-orange);
+      color: white;
     }
 
     .input-area input {
       flex: 1;
-      padding: 12px 16px;
-      border: 1.5px solid #ddd;
+      padding: 10px 16px;
+      border: 1.5px solid var(--ae-border);
       border-radius: 24px;
       font-size: 14px;
       outline: none;
-      transition: border-color .2s, box-shadow .2s;
+      background: var(--ae-surface);
+      color: var(--ae-text);
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .input-area input::placeholder {
+      color: #9CA3AF;
     }
 
     .input-area input:focus {
-      border-color: #1a73e8;
-      box-shadow: 0 0 0 3px rgba(26, 115, 232, .15);
+      border-color: var(--ae-orange);
+      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+      background: var(--ae-white);
     }
 
-    .input-area button {
-      padding: 12px 28px;
-      background: #1a73e8;
+    .send-btn {
+      padding: 10px 22px;
+      background: linear-gradient(135deg, var(--ae-orange) 0%, var(--ae-orange-dark) 100%);
       color: white;
       border: none;
       border-radius: 24px;
       font-size: 14px;
       font-weight: 600;
       cursor: pointer;
-      transition: background .2s, transform .1s;
-    }
-
-    .input-area button:hover {
-      background: #1557b0;
-    }
-
-    .input-area button:active {
-      transform: scale(.97);
-    }
-
-    .input-area button:disabled {
-      background: #ccc;
-      cursor: not-allowed;
-      transform: none;
-    }
-
-    .quick-actions {
-      padding: 8px 24px;
+      transition: all 0.15s;
+      box-shadow: 0 2px 8px rgba(249, 115, 22, 0.35);
       display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+      white-space: nowrap;
     }
 
-    .quick-actions button {
-      padding: 6px 14px;
-      border: 1.5px solid #1a73e8;
-      background: white;
-      color: #1a73e8;
-      border-radius: 16px;
-      font-size: 12px;
-      cursor: pointer;
-      transition: all .2s;
+    .send-btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(249, 115, 22, 0.45);
     }
 
-    .quick-actions button:hover {
-      background: #1a73e8;
-      color: white;
+    .send-btn:active:not(:disabled) {
+      transform: scale(0.97);
     }
 
+    .send-btn:disabled {
+      background: #D1D5DB;
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    /* Auth overlay */
     .auth-overlay {
       position: fixed;
       inset: 0;
-      background: rgba(15, 23, 42, .48);
+      background: rgba(0, 0, 0, 0.6);
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 24px;
-      z-index: 10;
+      z-index: 100;
+      backdrop-filter: blur(4px);
     }
 
     .auth-card {
       width: min(100%, 420px);
-      background: #fff;
-      border-radius: 22px;
-      box-shadow: 0 24px 48px rgba(15, 23, 42, .24);
-      padding: 28px;
+      background: var(--ae-white);
+      border-radius: 20px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+      overflow: hidden;
+    }
+
+    .auth-card-header {
+      background: var(--ae-white);
+      padding: 30px 32px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      border-bottom: 1px solid var(--ae-border);
+    }
+
+    .auth-header-logo {
+      height: 32px;
+      width: auto;
+      object-fit: contain;
+    }
+
+    .auth-header-divider {
+      width: 1px;
+      height: 26px;
+      background: var(--ae-border);
+      flex-shrink: 0;
+    }
+
+    .auth-card-header h2 {
+      color: var(--ae-orange);
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .auth-card-header p {
+      color: var(--ae-muted);
+      font-size: 13px;
+      font-weight: 500;
+      margin-top: 2px;
+    }
+
+    .auth-card-body {
+      padding: 22px 26px;
       display: flex;
       flex-direction: column;
       gap: 14px;
     }
 
-    .auth-card h2 {
-      font-size: 22px;
-      color: #0f172a;
+    .auth-card-body>p {
+      font-size: 13.5px;
+      color: var(--ae-muted);
+      line-height: 1.55;
     }
 
-    .auth-card p {
-      font-size: 14px;
-      color: #475569;
+    .auth-hint {
+      background: var(--ae-surface);
+      border: 1px solid var(--ae-border);
+      color: var(--ae-muted);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
       line-height: 1.5;
     }
 
     .auth-card label {
-      font-size: 12px;
-      font-weight: 600;
-      color: #334155;
+      font-size: 11px;
+      font-weight: 700;
+      color: #374151;
       text-transform: uppercase;
-      letter-spacing: .06em;
+      letter-spacing: 0.06em;
+      display: block;
+      margin-bottom: 5px;
     }
 
     .auth-card input {
       width: 100%;
-      padding: 12px 14px;
-      border: 1.5px solid #cbd5e1;
-      border-radius: 14px;
+      padding: 10px 14px;
+      border: 1.5px solid var(--ae-border);
+      border-radius: 12px;
       font-size: 14px;
       outline: none;
-      transition: border-color .2s, box-shadow .2s;
+      background: var(--ae-surface);
+      color: var(--ae-text);
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
 
     .auth-card input:focus {
-      border-color: #1a73e8;
-      box-shadow: 0 0 0 3px rgba(26, 115, 232, .15);
-    }
-
-    .auth-card button {
-      padding: 12px 16px;
-      background: #1a73e8;
-      color: #fff;
-      border: none;
-      border-radius: 14px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-
-    .auth-card button:disabled {
-      background: #94a3b8;
-      cursor: not-allowed;
-    }
-
-    .auth-hint {
-      background: #eff6ff;
-      border: 1px solid #bfdbfe;
-      color: #1d4ed8;
-      border-radius: 14px;
-      padding: 12px;
-      font-size: 13px;
-      line-height: 1.5;
+      border-color: var(--ae-orange);
+      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+      background: var(--ae-white);
     }
 
     .auth-error {
-      min-height: 18px;
-      color: #b91c1c;
+      min-height: 16px;
+      color: #B91C1C;
       font-size: 13px;
     }
 
-    @keyframes fadeIn {
+    .login-btn {
+      padding: 11px 16px;
+      background: linear-gradient(135deg, var(--ae-orange) 0%, var(--ae-orange-dark) 100%);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      box-shadow: 0 2px 8px rgba(249, 115, 22, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .login-btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(249, 115, 22, 0.4);
+    }
+
+    .login-btn:disabled {
+      background: #94A3B8;
+      box-shadow: none;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    @keyframes fadeUp {
       from {
         opacity: 0;
-        transform: translateY(8px);
+        transform: translateY(10px);
       }
 
       to {
@@ -446,61 +856,115 @@
       }
 
       40% {
-        transform: translateY(-6px);
+        transform: translateY(-5px);
       }
     }
   </style>
 </head>
 
 <body>
+
+  <!-- HEADER -->
   <div class="header">
-    <div class="dot" id="statusDot" style="background:#ffc107"></div>
-    <div>
-      <h1 id="chatTitle">AutomationEdge Ops Agent</h1>
+    <div class="ae-logo-wrap">
+      <img src="/static/AE_logo.png" alt="AutomationEdge">
+    </div>
+    <div class="header-divider"></div>
+    <div class="header-info">
+      <h1 id="chatTitle">AE Ops Co-Pilot</h1>
       <div class="session" id="sessionInfo">Session: checking...</div>
     </div>
-    <span class="status" id="statusText">Checking agent...</span>
-    <div class="userbar">
-      <span class="userpill" id="userPill"></span>
-      <button class="logout" id="logoutBtn" type="button">Logout</button>
+    <div class="header-right">
+      <div class="status-pill">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Checking...</span>
+      </div>
+      
+      <div class="user-account-wrap" id="userAccountWrap">
+        <div class="user-pill" id="userPill">User</div>
+        <div class="user-dropdown">
+          <div class="dropdown-header">
+            <strong id="dropdownUserName">User</strong>
+            <span id="dropdownSession">Session: ...</span>
+          </div>
+          <a class="dropdown-item" href="/admin">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            Control Center
+          </a>
+          <div class="dropdown-item logout" id="logoutBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+            Logout
+          </div>
+        </div>
+      </div>
     </div>
-    <a class="navlink" href="/admin">Control Center</a>
   </div>
+
+  <!-- AUTH OVERLAY -->
   <div class="auth-overlay" id="authOverlay">
     <div class="auth-card">
-      <h2>Web Chat Login</h2>
-      <p>Sign in with the exact AutomationEdge username. Workflow access in chat will use this username only.</p>
-      <div class="auth-hint">
-        Use the exact AE username with the configured default password. Username matching is case-sensitive.
+      <div class="auth-card-header">
+        <img class="auth-header-logo" src="/static/AE_logo.png" alt="AutomationEdge">
+        <div class="auth-header-divider"></div>
+        <div>
+          <h2>Web Chat Login</h2>
+          <p>AE Ops Co-Pilot</p>
+        </div>
       </div>
-      <div>
-        <label for="loginUsername">Username</label>
-        <input id="loginUsername" type="text" autocomplete="username" placeholder="example: claims.user">
+      <div class="auth-card-body">
+        <p>Sign in with the exact AutomationEdge username. Workflow access in chat will use this username only.</p>
+        <div class="auth-hint">
+          Use the exact AE username with the configured default password. Username matching is case-sensitive.
+        </div>
+        <div>
+          <label for="loginUsername">Username</label>
+          <input id="loginUsername" type="text" autocomplete="username" placeholder="example: claims.user">
+        </div>
+        <div>
+          <label for="loginPassword">Password</label>
+          <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Enter password">
+        </div>
+        <div class="auth-error" id="authError"></div>
+        <button id="loginBtn" class="login-btn" type="button">
+          Login
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <line x1="5" y1="12" x2="19" y2="12" />
+            <polyline points="12 5 19 12 12 19" />
+          </svg>
+        </button>
       </div>
-      <div>
-        <label for="loginPassword">Password</label>
-        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Enter password">
-      </div>
-      <div class="auth-error" id="authError"></div>
-      <button id="loginBtn" type="button">Login</button>
     </div>
   </div>
+
+  <!-- CHAT -->
   <div class="chat-area" id="chatArea"></div>
   <div class="typing" id="typing"><span></span><span></span><span></span></div>
+
+  <!-- QUICK ACTIONS -->
   <div class="quick-actions" id="quickActions"></div>
+
+  <!-- INPUT -->
   <div class="input-area">
-    <select id="roleSelect" title="Audience role">
-      <option value="technical" selected>Technical</option>
-      <option value="business">Business</option>
-    </select>
+    <div class="custom-select" id="roleSelectWrapper">
+      <div class="select-trigger" id="roleSelectTrigger">Operations / IT</div>
+      <div class="select-options" id="roleSelectOptions"></div>
+    </div>
     <input type="text" id="msgInput" placeholder="Describe your issue..." disabled>
-    <button id="sendBtn" disabled onclick="sendMessage()">Send</button>
+    <button id="sendBtn" class="send-btn" disabled onclick="sendMessage()">
+      Send
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+        stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13" />
+        <polygon points="22 2 15 22 11 13 2 9 22 2" />
+      </svg>
+    </button>
   </div>
 
   <script>
     const AGENT_URL = '';
     const DEFAULT_UI = {
-      assistantName: 'AutomationEdge Ops Agent',
+      assistantName: 'AE Ops Co-Pilot',
       technicalRoleLabel: 'Technical',
       businessRoleLabel: 'Business',
       inputPlaceholder: 'Describe your issue...',
@@ -517,136 +981,132 @@
 
     const chatArea = document.getElementById('chatArea');
     const msgInput = document.getElementById('msgInput');
-    const sendBtn = document.getElementById('sendBtn');
-    const roleSel = document.getElementById('roleSelect');
+    const roleSelWrapper = document.getElementById('roleSelectWrapper');
+    const roleSelTrigger = document.getElementById('roleSelectTrigger');
+    const roleSelOptions = document.getElementById('roleSelectOptions');
+    let currentRole = 'technical';
+    
+    // User Account
+    const userAccountWrap = document.getElementById('userAccountWrap');
+    const userPill = document.getElementById('userPill');
+    const dropdownUserName = document.getElementById('dropdownUserName');
+    const dropdownSession = document.getElementById('dropdownSession');
+    const logoutBtn = document.getElementById('logoutBtn');
+    
     const typingEl = document.getElementById('typing');
     const statusDot = document.getElementById('statusDot');
     const statusTxt = document.getElementById('statusText');
     const sessionEl = document.getElementById('sessionInfo');
     const titleEl = document.getElementById('chatTitle');
-    const quickActionsEl = document.getElementById('quickActions');
+    const quickActEl = document.getElementById('quickActions');
     const authOverlay = document.getElementById('authOverlay');
-    const loginUsernameEl = document.getElementById('loginUsername');
-    const loginPasswordEl = document.getElementById('loginPassword');
+    const loginUser = document.getElementById('loginUsername');
+    const loginPass = document.getElementById('loginPassword');
     const loginBtn = document.getElementById('loginBtn');
-    const authErrorEl = document.getElementById('authError');
-    const userPill = document.getElementById('userPill');
-    const logoutBtn = document.getElementById('logoutBtn');
+    const authError = document.getElementById('authError');
 
-    let webchatUser = null;
-    let sessionId = '';
-    let serverHealthy = false;
-    let welcomeShown = false;
+    let webchatUser = null, sessionId = '', serverHealthy = false, welcomeShown = false;
+    let connAttempts = 0;
 
-    // Configure marked.js
-    marked.setOptions({
-      breaks: true,
-      gfm: true,
-      headerIds: false,
-      mangle: false
-    });
+    marked.setOptions({ breaks: true, gfm: true, headerIds: false, mangle: false });
 
     function syntaxHighlight(json) {
-      if (typeof json !== 'string') {
-        json = JSON.stringify(json, undefined, 2);
-      }
+      if (typeof json !== 'string') json = JSON.stringify(json, undefined, 2);
       json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, function (match) {
-        let cls = 'json-number';
-        if (/^"/.test(match)) {
-          if (/:$/.test(match)) {
-            cls = 'json-key';
-          } else {
-            cls = 'json-string';
-          }
-        } else if (/true|false/.test(match)) {
-          cls = 'json-boolean';
-        } else if (/null/.test(match)) {
-          cls = 'json-null';
-        }
-        return '<span class="' + cls + '">' + match + '</span>';
+      return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, m => {
+        let c = 'json-number';
+        if (/^"/.test(m)) c = /:$/.test(m) ? 'json-key' : 'json-string';
+        else if (/true|false/.test(m)) c = 'json-boolean';
+        return `<span class="${c}">${m}</span>`;
       });
     }
 
     function addMsg(text, cls, label) {
       const d = document.createElement('div');
       d.className = 'msg ' + cls;
-
       if (label) {
         const l = document.createElement('div');
-        l.className = 'label';
-        l.textContent = label;
+        l.className = 'label'; l.textContent = label;
         d.appendChild(l);
       }
-
-      const container = document.createElement('div');
-
+      const wrap = document.createElement('div');
       if (cls === 'bot') {
-        // Check if the text is JSON
-        let isJson = false;
-        let jsonContent = null;
+        let isJson = false, parsed = null;
         try {
           if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-            jsonContent = JSON.parse(text);
-            if (typeof jsonContent === 'object' && jsonContent !== null) {
-              isJson = true;
-            }
+            parsed = JSON.parse(text);
+            if (typeof parsed === 'object' && parsed !== null) isJson = true;
           }
         } catch (e) { }
-
         if (isJson) {
-          const jsonPre = document.createElement('pre');
-          jsonPre.className = 'json-block';
-          jsonPre.innerHTML = syntaxHighlight(jsonContent);
-          container.appendChild(jsonPre);
+          const pre = document.createElement('pre');
+          pre.className = 'json-block';
+          pre.innerHTML = syntaxHighlight(parsed);
+          wrap.appendChild(pre);
         } else {
-          // Use marked.js for Markdown
-          container.innerHTML = marked.parse(text);
+          wrap.innerHTML = marked.parse(text);
         }
       } else {
-        // User messages and errors: just text
-        container.textContent = text;
-        container.style.whiteSpace = 'pre-wrap';
+        wrap.textContent = text;
+        wrap.style.whiteSpace = 'pre-wrap';
       }
-
-      d.appendChild(container);
+      d.appendChild(wrap);
       chatArea.appendChild(d);
       chatArea.scrollTop = chatArea.scrollHeight;
+      return d;
     }
 
     function renderQuickActions() {
-      quickActionsEl.innerHTML = '';
-      (chatUi.quickActions || []).forEach((text) => {
+      quickActEl.innerHTML = '';
+      (chatUi.quickActions || []).forEach(text => {
         const btn = document.createElement('button');
-        btn.textContent = text.length > 28 ? text.slice(0, 28) + '...' : text;
+        btn.textContent = text.length > 32 ? text.slice(0, 32) + '…' : text;
         btn.onclick = () => sendQuick(text);
-        quickActionsEl.appendChild(btn);
+        quickActEl.appendChild(btn);
       });
     }
 
     function applyChatUi() {
       titleEl.textContent = chatUi.assistantName || DEFAULT_UI.assistantName;
       msgInput.placeholder = chatUi.inputPlaceholder || DEFAULT_UI.inputPlaceholder;
-      roleSel.innerHTML = '';
-      [
-        ['technical', chatUi.technicalRoleLabel || DEFAULT_UI.technicalRoleLabel],
-        ['business', chatUi.businessRoleLabel || DEFAULT_UI.businessRoleLabel]
-      ].forEach(([value, label], index) => {
-        const opt = document.createElement('option');
-        opt.value = value;
-        opt.textContent = label;
-        if (index === 0) opt.selected = true;
-        roleSel.appendChild(opt);
+      
+      roleSelOptions.innerHTML = '';
+      const roles = [
+        { value: 'technical', label: chatUi.technicalRoleLabel || DEFAULT_UI.technicalRoleLabel },
+        { value: 'business', label: chatUi.businessRoleLabel || DEFAULT_UI.businessRoleLabel }
+      ];
+
+      roles.forEach(role => {
+        const opt = document.createElement('div');
+        opt.className = 'select-option' + (role.value === currentRole ? ' selected' : '');
+        opt.textContent = role.label;
+        opt.onclick = () => {
+          currentRole = role.value;
+          roleSelTrigger.textContent = role.label;
+          roleSelWrapper.classList.remove('active');
+          applyChatUi(); // redraw selected state
+          if (chatArea.children.length === 0 && serverHealthy && webchatUser) showWelcomeIfNeeded();
+        };
+        roleSelOptions.appendChild(opt);
+        if (role.value === currentRole) roleSelTrigger.textContent = role.label;
       });
       renderQuickActions();
     }
 
+    // Toggle dropdown
+    roleSelTrigger.onclick = (e) => {
+      e.stopPropagation();
+      roleSelWrapper.classList.toggle('active');
+    };
+
+    window.addEventListener('click', () => {
+      roleSelWrapper.classList.remove('active');
+    });
+
     async function loadChatUi() {
       try {
         const r = await fetch('/api/ui-config/chat', { signal: AbortSignal.timeout(4000) });
-        if (!r.ok) return;
-        const payload = await r.json();
-        chatUi = { ...DEFAULT_UI, ...(payload || {}) };
+        if (r.ok) { const p = await r.json(); chatUi = { ...DEFAULT_UI, ...(p || {}) }; }
       } catch (e) { }
       applyChatUi();
     }
@@ -655,50 +1115,99 @@
       const ready = serverHealthy && !!webchatUser;
       msgInput.disabled = !ready;
       sendBtn.disabled = !ready;
-      roleSel.disabled = !webchatUser;
+      roleSelWrapper.style.opacity = webchatUser ? '1' : '0.5';
+      roleSelWrapper.style.pointerEvents = webchatUser ? 'auto' : 'none';
     }
 
     function setStatus(state) {
-      const colors = { ok: '#4caf50', warn: '#ffc107', err: '#f44336' };
+      const colors = { ok: '#22c55e', warn: '#fbbf24', err: '#ef4444' };
       const labels = { ok: 'Connected', warn: 'Checking...', err: 'Disconnected' };
       statusDot.style.background = colors[state];
       statusTxt.textContent = labels[state];
       serverHealthy = state === 'ok';
+      if (serverHealthy) {
+        const errors = chatArea.querySelectorAll('.conn-error');
+        errors.forEach(e => e.remove());
+      }
       updateComposerState();
     }
 
     function updateAuthUi() {
-      const loggedIn = !!webchatUser;
-      authOverlay.style.display = loggedIn ? 'none' : 'flex';
-      userPill.style.display = loggedIn ? 'inline-flex' : 'none';
-      logoutBtn.style.display = loggedIn ? 'inline-flex' : 'none';
-      userPill.textContent = loggedIn ? 'User: ' + webchatUser : '';
-      sessionEl.textContent = loggedIn && sessionId ? ('Session: ' + sessionId) : 'Session: login required';
+      const in_ = !!webchatUser;
+      authOverlay.style.display = in_ ? 'none' : 'flex';
+      
+      // Update User Account UI
+      userAccountWrap.style.display = in_ ? 'block' : 'none';
+      if (in_) {
+        userPill.textContent = webchatUser;
+        dropdownUserName.textContent = webchatUser;
+        dropdownSession.textContent = 'ID: ' + (sessionId || '...');
+      }
+      
+      sessionEl.textContent = in_ && sessionId ? 'Session active' : 'Session: login required';
       updateComposerState();
     }
+
+    // User Dropdown Toggle
+    userPill.onclick = (e) => {
+      e.stopPropagation();
+      userAccountWrap.classList.toggle('active');
+    };
+
+    window.addEventListener('click', (e) => {
+      if (!userAccountWrap.contains(e.target)) {
+        userAccountWrap.classList.remove('active');
+      }
+    });
 
     function showWelcomeIfNeeded() {
       if (!serverHealthy || !webchatUser || welcomeShown) return;
       welcomeShown = true;
-      addMsg('Signed in as ' + webchatUser + '.', 'system');
-      const welcome = roleSel.value === 'business'
+      const banner = document.createElement('div');
+      banner.className = 'welcome-banner';
+      banner.innerHTML = `
+        <img class="welcome-logo" src="/static/AE_logo.png" alt="AE">
+        <div class="welcome-text">
+          <strong>Signed in as ${webchatUser}</strong>
+          <span>AE Ops Co-Pilot is ready to assist you.</span>
+        </div>
+        <button class="banner-close" title="Dismiss" onclick="this.parentElement.remove()">&times;</button>`;
+      chatArea.appendChild(banner);
+      const msg = roleSel.value === 'business'
         ? (chatUi.businessWelcomeMessage || DEFAULT_UI.businessWelcomeMessage)
         : (chatUi.technicalWelcomeMessage || DEFAULT_UI.technicalWelcomeMessage);
-      addMsg(welcome, 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
+      addMsg(msg, 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
     }
 
     async function checkHealth() {
       try {
         const r = await fetch(AGENT_URL + '/health', { signal: AbortSignal.timeout(5000) });
-        if (r.ok) {
-          setStatus('ok');
-          showWelcomeIfNeeded();
-          return;
+        if (r.ok) { 
+          setStatus('ok'); 
+          connAttempts = 0; 
+          const loader = chatArea.querySelector('.conn-loader');
+          if (loader) loader.remove();
+          showWelcomeIfNeeded(); 
+          return; 
         }
       } catch (e) { }
+      
       setStatus('err');
-      if (!chatArea.querySelector('.msg.error')) {
-        addMsg('Agent server not reachable at ' + AGENT_URL + '. Make sure agent_server.py is running.', 'error');
+      connAttempts++;
+      
+      if (connAttempts >= 3) {
+        // Show negative error after ~10-15 seconds of failure
+        const loader = chatArea.querySelector('.conn-loader');
+        if (loader) loader.remove();
+        if (!chatArea.querySelector('.conn-error')) {
+          addMsg('Agent server not reachable. Make sure agent_server.py is running.', 'error conn-error');
+        }
+      } else {
+        // Show "waiting" status initially
+        if (!chatArea.querySelector('.conn-loader') && !chatArea.querySelector('.conn-error')) {
+          const m = addMsg('Establishing connection to AE Ops Co-Pilot...', 'progress conn-loader');
+          if (m) m.style.fontStyle = 'italic';
+        }
       }
       setTimeout(checkHealth, 5000);
     }
@@ -706,33 +1215,18 @@
     async function restoreAuth() {
       try {
         const r = await fetch('/api/webchat/auth/me?refresh_chat_session=1', { signal: AbortSignal.timeout(5000) });
-        const payload = await r.json();
-        if (payload && payload.authenticated) {
-          webchatUser = payload.username || '';
-          sessionId = payload.chat_session_id || '';
-          welcomeShown = false;
-        } else {
-          webchatUser = null;
-          sessionId = '';
-        }
-      } catch (e) {
-        webchatUser = null;
-        sessionId = '';
-      }
+        const p = await r.json();
+        if (p && p.authenticated) { webchatUser = p.username || ''; sessionId = p.chat_session_id || ''; welcomeShown = false; }
+        else { webchatUser = null; sessionId = ''; }
+      } catch (e) { webchatUser = null; sessionId = ''; }
       updateAuthUi();
     }
 
     async function login() {
-      const username = loginUsernameEl.value.trim();
-      const password = loginPasswordEl.value;
-      authErrorEl.textContent = '';
-
-      if (!username) {
-        authErrorEl.textContent = 'Enter the exact AE username.';
-        loginUsernameEl.focus();
-        return;
-      }
-
+      const username = loginUser.value.trim();
+      const password = loginPass.value;
+      authError.textContent = '';
+      if (!username) { authError.textContent = 'Enter the exact AE username.'; loginUser.focus(); return; }
       loginBtn.disabled = true;
       try {
         const r = await fetch('/api/webchat/auth/login', {
@@ -740,113 +1234,68 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password })
         });
-        const payload = await r.json();
-        if (!r.ok || !payload.success) {
-          authErrorEl.textContent = (payload && payload.error) || ('Login failed with HTTP ' + r.status);
-          return;
-        }
-        webchatUser = payload.username || username;
-        sessionId = payload.chat_session_id || '';
+        const p = await r.json();
+        if (!r.ok || !p.success) { authError.textContent = (p && p.error) || 'Login failed with HTTP ' + r.status; return; }
+        webchatUser = p.username || username;
+        sessionId = p.chat_session_id || '';
         welcomeShown = false;
         chatArea.innerHTML = '';
         updateAuthUi();
         await checkHealth();
         msgInput.focus();
-      } catch (e) {
-        authErrorEl.textContent = 'Login failed: ' + e.message;
-      } finally {
-        loginBtn.disabled = false;
-      }
+      } catch (e) { authError.textContent = 'Login failed: ' + e.message; }
+      finally { loginBtn.disabled = false; }
     }
 
     async function logout() {
-      try {
-        await fetch('/api/webchat/auth/logout', { method: 'POST' });
-      } catch (e) { }
-      webchatUser = null;
-      sessionId = '';
-      welcomeShown = false;
-      chatArea.innerHTML = '';
-      authErrorEl.textContent = '';
-      loginPasswordEl.value = '';
-      updateAuthUi();
-      loginUsernameEl.focus();
+      try { await fetch('/api/webchat/auth/logout', { method: 'POST' }); } catch (e) { }
+      webchatUser = null; sessionId = ''; welcomeShown = false; chatArea.innerHTML = '';
+      authError.textContent = ''; loginPass.value = '';
+      updateAuthUi(); loginUser.focus();
     }
 
     async function sendMessage() {
       const text = msgInput.value.trim();
       if (!text) return;
-      if (!webchatUser) {
-        authErrorEl.textContent = 'Please log in first.';
-        updateAuthUi();
-        return;
-      }
+      if (!webchatUser) { authError.textContent = 'Please log in first.'; updateAuthUi(); return; }
       addMsg(text, 'user', 'You');
       msgInput.value = '';
-      sendBtn.disabled = true;
-      msgInput.disabled = true;
+      sendBtn.disabled = true; msgInput.disabled = true;
       typingEl.style.display = 'block';
       chatArea.scrollTop = chatArea.scrollHeight;
 
       let progressEl = null;
-
       try {
         const r = await fetch('/api/webchat/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: text,
-            user_role: roleSel.value || 'technical'
-          })
+          body: JSON.stringify({ message: text, user_role: currentRole })
         });
-
         if (!r.ok) {
           typingEl.style.display = 'none';
-          if (r.status === 401) {
-            await logout();
-            authErrorEl.textContent = 'Your login session expired. Please log in again.';
-          } else {
-            addMsg('Agent returned HTTP ' + r.status, 'error');
-          }
-          sendBtn.disabled = false;
-          msgInput.disabled = false;
-          msgInput.focus();
-          return;
+          if (r.status === 401) { await logout(); authError.textContent = 'Session expired. Please log in again.'; }
+          else addMsg('Agent returned HTTP ' + r.status, 'error');
+          sendBtn.disabled = false; msgInput.disabled = false; msgInput.focus(); return;
         }
-
         const reader = r.body.getReader();
         const decoder = new TextDecoder();
-        let buffer = '';
-        let sawDoneEvent = false;
-
+        let buffer = '', sawDone = false;
         while (true) {
           const { done, value } = await reader.read();
-          if (done) {
-            buffer += decoder.decode();
-          } else {
-            buffer += decoder.decode(value, { stream: true });
-          }
-
+          buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
           const frames = buffer.split(/\r?\n\r?\n/);
           buffer = frames.pop() || '';
-
           for (const frame of frames) {
             if (!frame.trim()) continue;
-
             let eventType = '';
             const dataLines = [];
             for (const line of frame.split(/\r?\n/)) {
-              if (line.startsWith('event: ')) {
-                eventType = line.slice(7).trim();
-              } else if (line.startsWith('data: ')) {
-                dataLines.push(line.slice(6));
-              }
+              if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+              else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
             }
-
             const raw = dataLines.join('\n');
             let parsed = raw;
             try { parsed = JSON.parse(raw); } catch { }
-
             if (eventType === 'progress') {
               typingEl.style.display = 'none';
               if (progressEl) progressEl.remove();
@@ -856,49 +1305,40 @@
               chatArea.appendChild(progressEl);
               chatArea.scrollTop = chatArea.scrollHeight;
             } else if (eventType === 'done') {
-              sawDoneEvent = true;
+              sawDone = true;
               if (progressEl) { progressEl.remove(); progressEl = null; }
               typingEl.style.display = 'none';
               addMsg(parsed || 'No response.', 'bot', chatUi.assistantName || DEFAULT_UI.assistantName);
             }
           }
-
           if (done) break;
         }
-
-        if (!sawDoneEvent) {
+        if (!sawDone) {
           if (progressEl) progressEl.remove();
           typingEl.style.display = 'none';
-          addMsg('The request finished but the final stream message was not received. Please try again.', 'error');
+          addMsg('Stream ended without a final response. Please try again.', 'error');
         }
       } catch (e) {
         if (progressEl) progressEl.remove();
         typingEl.style.display = 'none';
         addMsg('Request failed: ' + e.message, 'error');
       }
-      sendBtn.disabled = false;
-      msgInput.disabled = false;
-      msgInput.focus();
+      sendBtn.disabled = false; msgInput.disabled = false; msgInput.focus();
     }
 
     function sendQuick(text) { msgInput.value = text; sendMessage(); }
 
-    msgInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !sendBtn.disabled) sendMessage(); });
+    msgInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !sendBtn.disabled) sendMessage(); });
     loginBtn.addEventListener('click', login);
     logoutBtn.addEventListener('click', logout);
-    loginPasswordEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !loginBtn.disabled) login(); });
-    loginUsernameEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !loginBtn.disabled) login(); });
-    roleSel.addEventListener('change', () => {
-      if (chatArea.children.length === 0 && serverHealthy && webchatUser) {
-        showWelcomeIfNeeded();
-      }
-    });
+    loginPass.addEventListener('keydown', e => { if (e.key === 'Enter' && !loginBtn.disabled) login(); });
+    loginUser.addEventListener('keydown', e => { if (e.key === 'Enter' && !loginBtn.disabled) login(); });
 
     loadChatUi().finally(async () => {
       updateAuthUi();
       await restoreAuth();
       await checkHealth();
-      if (!webchatUser) loginUsernameEl.focus();
+      if (!webchatUser) loginUser.focus();
     });
   </script>
 </body>

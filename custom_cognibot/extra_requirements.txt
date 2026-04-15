@@ -1,2 +1,0 @@
-# Only requests needed — all heavy logic runs on the agent server
-requests>=2.28.0

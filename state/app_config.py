@@ -101,17 +101,17 @@ SECTION_ORDER = [
 
 DEFAULT_SECTIONS: dict[str, dict[str, Any]] = {
     "workspace": {
-        "adminConsoleTitle": "Operations Control Center",
+        "adminConsoleTitle": "AE Ops Co-Pilot — Admin",
         "adminConsoleSubtitle": (
             "Adjust the words, safeguards, and operational defaults that "
             "power the support assistant without editing code."
         ),
-        "documentationTitle": "Operations Knowledge Library",
+        "documentationTitle": "AE Ops Co-Pilot — Documentation",
         "documentationSubtitle": (
             "Share setup guides, reference notes, and implementation playbooks "
             "with support teams and business stakeholders."
         ),
-        "assistantName": "AutomationEdge Ops Agent",
+        "assistantName": "AE Ops Co-Pilot",
         "technicalRoleLabel": "Operations / IT",
         "businessRoleLabel": "Business user",
         "inputPlaceholder": "Describe what is blocked, delayed, or failing...",
